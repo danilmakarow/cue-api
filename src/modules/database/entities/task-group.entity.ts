@@ -1,22 +1,24 @@
 import { Column, Entity, JoinColumn, ManyToOne, OneToMany } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
+import { Calendar } from './calendar.entity';
 import { NotificationStrategy } from './notification-strategy.entity';
 import { Task } from './task.entity';
-import { User } from './user.entity';
 
 /**
- * TaskGroup entity representing a user-defined bucket of tasks (e.g. "Work", "Home").
+ * TaskGroup entity representing a calendar-owned bucket of tasks (e.g. "Work", "Home").
  * Groups optionally carry a default notification strategy inherited by contained tasks.
  */
 @Entity()
 export class TaskGroup extends BaseEntity {
   @Column()
-  userId: string;
+  calendarId: string;
 
-  @ManyToOne(() => User, (user) => user.taskGroups, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user: User;
+  @ManyToOne(() => Calendar, (calendar) => calendar.taskGroups, {
+    onDelete: 'CASCADE',
+  })
+  @JoinColumn({ name: 'calendarId' })
+  calendar: Calendar;
 
   @Column()
   name: string;

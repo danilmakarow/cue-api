@@ -82,19 +82,43 @@ export class InitialSchema1776546898362 implements MigrationInterface {
       `ALTER TABLE "telegram_link" ADD CONSTRAINT "FK_telegram_link_userId" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
     );
 
+    // calendar
+    await queryRunner.query(
+      `CREATE TABLE "calendar" (
+        "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+        "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        "ownerId" uuid NOT NULL,
+        "name" character varying NOT NULL,
+        "color" character varying,
+        "icon" character varying,
+        "sortOrder" integer NOT NULL DEFAULT 0,
+        CONSTRAINT "PK_calendar_id" PRIMARY KEY ("id")
+      )`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_calendar_ownerId" ON "calendar" ("ownerId")`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "calendar" ADD CONSTRAINT "FK_calendar_ownerId" FOREIGN KEY ("ownerId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+
     // notification_strategy
     await queryRunner.query(
       `CREATE TABLE "notification_strategy" (
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
         "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        "userId" uuid NOT NULL,
+        "calendarId" uuid NOT NULL,
         "name" character varying NOT NULL,
         CONSTRAINT "PK_notification_strategy_id" PRIMARY KEY ("id")
       )`,
     );
     await queryRunner.query(
-      `ALTER TABLE "notification_strategy" ADD CONSTRAINT "FK_notification_strategy_userId" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+      `CREATE INDEX "IDX_notification_strategy_calendarId" ON "notification_strategy" ("calendarId")`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "notification_strategy" ADD CONSTRAINT "FK_notification_strategy_calendarId" FOREIGN KEY ("calendarId") REFERENCES "calendar"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
     );
 
     // notification_rule
@@ -120,7 +144,7 @@ export class InitialSchema1776546898362 implements MigrationInterface {
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
         "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        "userId" uuid NOT NULL,
+        "calendarId" uuid NOT NULL,
         "name" character varying NOT NULL,
         "color" character varying,
         "icon" character varying,
@@ -130,7 +154,10 @@ export class InitialSchema1776546898362 implements MigrationInterface {
       )`,
     );
     await queryRunner.query(
-      `ALTER TABLE "task_group" ADD CONSTRAINT "FK_task_group_userId" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+      `CREATE INDEX "IDX_task_group_calendarId" ON "task_group" ("calendarId")`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "task_group" ADD CONSTRAINT "FK_task_group_calendarId" FOREIGN KEY ("calendarId") REFERENCES "calendar"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
     );
     await queryRunner.query(
       `ALTER TABLE "task_group" ADD CONSTRAINT "FK_task_group_defaultNotificationStrategyId" FOREIGN KEY ("defaultNotificationStrategyId") REFERENCES "notification_strategy"("id") ON DELETE SET NULL ON UPDATE NO ACTION`,
@@ -160,7 +187,7 @@ export class InitialSchema1776546898362 implements MigrationInterface {
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
         "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        "userId" uuid NOT NULL,
+        "calendarId" uuid NOT NULL,
         "groupId" uuid,
         "title" character varying NOT NULL,
         "notes" text,
@@ -177,10 +204,10 @@ export class InitialSchema1776546898362 implements MigrationInterface {
       )`,
     );
     await queryRunner.query(
-      `CREATE INDEX "IDX_task_userId_startAt" ON "task" ("userId", "startAt")`,
+      `CREATE INDEX "IDX_task_calendarId_startAt" ON "task" ("calendarId", "startAt")`,
     );
     await queryRunner.query(
-      `ALTER TABLE "task" ADD CONSTRAINT "FK_task_userId" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+      `ALTER TABLE "task" ADD CONSTRAINT "FK_task_calendarId" FOREIGN KEY ("calendarId") REFERENCES "calendar"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
     );
     await queryRunner.query(
       `ALTER TABLE "task" ADD CONSTRAINT "FK_task_groupId" FOREIGN KEY ("groupId") REFERENCES "task_group"("id") ON DELETE SET NULL ON UPDATE NO ACTION`,
@@ -275,9 +302,11 @@ export class InitialSchema1776546898362 implements MigrationInterface {
       `ALTER TABLE "task" DROP CONSTRAINT "FK_task_groupId"`,
     );
     await queryRunner.query(
-      `ALTER TABLE "task" DROP CONSTRAINT "FK_task_userId"`,
+      `ALTER TABLE "task" DROP CONSTRAINT "FK_task_calendarId"`,
     );
-    await queryRunner.query(`DROP INDEX "public"."IDX_task_userId_startAt"`);
+    await queryRunner.query(
+      `DROP INDEX "public"."IDX_task_calendarId_startAt"`,
+    );
     await queryRunner.query(`DROP TABLE "task"`);
 
     await queryRunner.query(`DROP TABLE "recurrence_rule"`);
@@ -286,8 +315,9 @@ export class InitialSchema1776546898362 implements MigrationInterface {
       `ALTER TABLE "task_group" DROP CONSTRAINT "FK_task_group_defaultNotificationStrategyId"`,
     );
     await queryRunner.query(
-      `ALTER TABLE "task_group" DROP CONSTRAINT "FK_task_group_userId"`,
+      `ALTER TABLE "task_group" DROP CONSTRAINT "FK_task_group_calendarId"`,
     );
+    await queryRunner.query(`DROP INDEX "public"."IDX_task_group_calendarId"`);
     await queryRunner.query(`DROP TABLE "task_group"`);
 
     await queryRunner.query(
@@ -296,9 +326,18 @@ export class InitialSchema1776546898362 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "notification_rule"`);
 
     await queryRunner.query(
-      `ALTER TABLE "notification_strategy" DROP CONSTRAINT "FK_notification_strategy_userId"`,
+      `ALTER TABLE "notification_strategy" DROP CONSTRAINT "FK_notification_strategy_calendarId"`,
+    );
+    await queryRunner.query(
+      `DROP INDEX "public"."IDX_notification_strategy_calendarId"`,
     );
     await queryRunner.query(`DROP TABLE "notification_strategy"`);
+
+    await queryRunner.query(
+      `ALTER TABLE "calendar" DROP CONSTRAINT "FK_calendar_ownerId"`,
+    );
+    await queryRunner.query(`DROP INDEX "public"."IDX_calendar_ownerId"`);
+    await queryRunner.query(`DROP TABLE "calendar"`);
 
     await queryRunner.query(
       `ALTER TABLE "telegram_link" DROP CONSTRAINT "FK_telegram_link_userId"`,

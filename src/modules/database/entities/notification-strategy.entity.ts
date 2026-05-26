@@ -1,8 +1,8 @@
 import { Column, Entity, JoinColumn, ManyToOne, OneToMany } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
+import { Calendar } from './calendar.entity';
 import { NotificationRule } from './notification-rule.entity';
-import { User } from './user.entity';
 
 /**
  * NotificationStrategy entity representing a named bundle of notification rules.
@@ -11,13 +11,13 @@ import { User } from './user.entity';
 @Entity()
 export class NotificationStrategy extends BaseEntity {
   @Column()
-  userId: string;
+  calendarId: string;
 
-  @ManyToOne(() => User, (user) => user.notificationStrategies, {
+  @ManyToOne(() => Calendar, (calendar) => calendar.notificationStrategies, {
     onDelete: 'CASCADE',
   })
-  @JoinColumn({ name: 'userId' })
-  user: User;
+  @JoinColumn({ name: 'calendarId' })
+  calendar: Calendar;
 
   @Column()
   name: string;

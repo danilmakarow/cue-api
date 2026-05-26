@@ -30,6 +30,11 @@ export const environmentSchema = z.object({
   DB_RUN_MIGRATIONS: booleanValidator,
   DB_LOGGING: booleanValidator,
   DB_DISABLE_SSL_AUTH: booleanValidator,
+
+  // Auth configuration
+  JWT_SECRET: z.string().min(32),
+  JWT_EXPIRES_IN: z.string().default('30d'),
+  APPLE_CLIENT_ID: z.string(),
 });
 
 export type EnvironmentVariables = z.infer<typeof environmentSchema>;

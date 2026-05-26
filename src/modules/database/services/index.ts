@@ -2,6 +2,7 @@ export { BaseDatabaseService } from './base-database.service';
 export { UserDatabaseService } from './user-database.service';
 export { DeviceDatabaseService } from './device-database.service';
 export { TelegramLinkDatabaseService } from './telegram-link-database.service';
+export { CalendarDatabaseService } from './calendar-database.service';
 export { TaskGroupDatabaseService } from './task-group-database.service';
 export { TaskDatabaseService } from './task-database.service';
 export { RecurrenceRuleDatabaseService } from './recurrence-rule-database.service';

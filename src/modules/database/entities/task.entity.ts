@@ -9,26 +9,28 @@ import {
 } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
+import { Calendar } from './calendar.entity';
 import { NotificationStrategy } from './notification-strategy.entity';
 import { RecurrenceRule } from './recurrence-rule.entity';
 import { TaskGroup } from './task-group.entity';
 import { TaskOccurrenceException } from './task-occurrence-exception.entity';
-import { User } from './user.entity';
 
 /**
  * Task entity — the unified event+todo primitive for Cue.
  * Supports all-day and timed occurrences, optional recurrence, per-task timezone, and soft deletion.
- * Indexed on (userId, startAt) to serve user calendar and agenda queries efficiently.
+ * Indexed on (calendarId, startAt) to serve calendar and agenda queries efficiently.
  */
 @Entity()
-@Index(['userId', 'startAt'])
+@Index(['calendarId', 'startAt'])
 export class Task extends BaseEntity {
   @Column()
-  userId: string;
+  calendarId: string;
 
-  @ManyToOne(() => User, (user) => user.tasks, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'userId' })
-  user: User;
+  @ManyToOne(() => Calendar, (calendar) => calendar.tasks, {
+    onDelete: 'CASCADE',
+  })
+  @JoinColumn({ name: 'calendarId' })
+  calendar: Calendar;
 
   @Column({ type: 'uuid', nullable: true })
   groupId: string | null;

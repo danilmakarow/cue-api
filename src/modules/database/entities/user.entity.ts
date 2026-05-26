@@ -1,10 +1,8 @@
 import { Column, Entity, OneToMany } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
+import { Calendar } from './calendar.entity';
 import { Device } from './device.entity';
-import { NotificationStrategy } from './notification-strategy.entity';
-import { TaskGroup } from './task-group.entity';
-import { Task } from './task.entity';
 import { TelegramLink } from './telegram-link.entity';
 
 /**
@@ -22,6 +20,14 @@ export class User extends BaseEntity {
   @Column({ type: String, nullable: true })
   displayName: string | null;
 
+  /**
+   * Base64-encoded profile picture. Sourced from the iOS "me" contact photo at
+   * sign-in time (Apple Sign-In doesn't expose a profile picture directly).
+   * Stored as `text` because PostgreSQL varchar lengths don't fit encoded images.
+   */
+  @Column({ type: 'text', nullable: true })
+  avatarBase64: string | null;
+
   @Column({ default: 'UTC' })
   timezone: string;
 
@@ -31,15 +37,6 @@ export class User extends BaseEntity {
   @OneToMany(() => TelegramLink, (telegramLink) => telegramLink.user)
   telegramLinks: TelegramLink[];
 
-  @OneToMany(() => TaskGroup, (taskGroup) => taskGroup.user)
-  taskGroups: TaskGroup[];
-
-  @OneToMany(() => Task, (task) => task.user)
-  tasks: Task[];
-
-  @OneToMany(
-    () => NotificationStrategy,
-    (notificationStrategy) => notificationStrategy.user,
-  )
-  notificationStrategies: NotificationStrategy[];
+  @OneToMany(() => Calendar, (calendar) => calendar.owner)
+  calendars: Calendar[];
 }

@@ -2,6 +2,7 @@ export { BaseEntity } from './base.entity';
 export { User } from './user.entity';
 export { Device, DevicePlatform } from './device.entity';
 export { TelegramLink } from './telegram-link.entity';
+export { Calendar } from './calendar.entity';
 export { TaskGroup } from './task-group.entity';
 export { Task } from './task.entity';
 export {

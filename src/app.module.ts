@@ -5,6 +5,8 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { AppController } from './app.controller';
+import { AuthModule } from './modules/auth/auth.module';
+import { CalendarModule } from './modules/calendar/calendar.module';
 import { DatabaseModule } from './modules/database/database.module';
 import { DeviceModule } from './modules/device/device.module';
 import { NotificationRuleModule } from './modules/notification-rule/notification-rule.module';
@@ -32,9 +34,11 @@ import { getDatabaseConfig, getDataSource } from '@/config/typeorm.config';
       dataSourceFactory: getDataSource,
     }),
     DatabaseModule,
+    AuthModule,
     UserModule,
     DeviceModule,
     TelegramLinkModule,
+    CalendarModule,
     TaskGroupModule,
     TaskModule,
     RecurrenceRuleModule,

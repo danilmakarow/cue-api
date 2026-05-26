@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import {
+  Calendar,
   Device,
   NotificationRule,
   NotificationStrategy,
@@ -14,6 +15,7 @@ import {
   User,
 } from './entities';
 import {
+  CalendarRepository,
   DeviceRepository,
   NotificationRuleRepository,
   NotificationStrategyRepository,
@@ -26,6 +28,7 @@ import {
   UserRepository,
 } from './repositories';
 import {
+  CalendarDatabaseService,
   DeviceDatabaseService,
   NotificationRuleDatabaseService,
   NotificationStrategyDatabaseService,
@@ -50,6 +53,7 @@ import {
       User,
       Device,
       TelegramLink,
+      Calendar,
       TaskGroup,
       Task,
       RecurrenceRule,
@@ -63,6 +67,7 @@ import {
     UserRepository,
     DeviceRepository,
     TelegramLinkRepository,
+    CalendarRepository,
     TaskGroupRepository,
     TaskRepository,
     RecurrenceRuleRepository,
@@ -73,6 +78,7 @@ import {
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
+    CalendarDatabaseService,
     TaskGroupDatabaseService,
     TaskDatabaseService,
     RecurrenceRuleDatabaseService,
@@ -85,6 +91,7 @@ import {
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
+    CalendarDatabaseService,
     TaskGroupDatabaseService,
     TaskDatabaseService,
     RecurrenceRuleDatabaseService,

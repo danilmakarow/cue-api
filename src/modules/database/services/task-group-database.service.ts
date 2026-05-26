@@ -14,11 +14,11 @@ export class TaskGroupDatabaseService extends BaseDatabaseService<TaskGroup> {
   }
 
   /**
-   * Returns all task groups that belong to the given user, ordered by `sortOrder`.
+   * Returns all task groups that belong to the given calendar, ordered by `sortOrder`.
    */
-  findAllByUser(userId: string) {
+  findAllByCalendar(calendarId: string) {
     return this.findAll({
-      where: { userId },
+      where: { calendarId },
       order: { sortOrder: 'ASC' },
     });
   }
