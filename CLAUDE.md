@@ -168,6 +168,48 @@ pnpm run format
 - `docker-compose.dev.yml` — Postgres 15-alpine + Redis 7-alpine, both with healthchecks and named volumes (`postgres_data`, `redis_data`).
 - `init-scripts/` is mounted at `/docker-entrypoint-initdb.d` on the Postgres container. Add `*.sql` / `*.sh` there to run on first DB init. Currently empty (kept via `.gitkeep`).
 
+## Documentation
+
+The `docs/` tree is the **source of truth for intent and decisions**. Code is the source of truth for behavior. See [`docs/README.md`](docs/README.md) for the full layout.
+
+```
+docs/
+  README.md             ← orientation; rules of the road
+  architecture.md       ← one-page system overview
+  adr/                  ← Architecture Decision Records (one decision per file, immutable)
+    TEMPLATE.md
+    0001-postgres-uuid-pks.md
+    0002-rrule-not-materialized.md
+  specs/                ← per-feature / per-system design docs
+    TEMPLATE.md
+    auth-apple-signin.md
+    notification-delivery.md
+  api/openapi.yaml      ← HTTP contract — the bridge to cue-ios
+```
+
+### When to write what
+
+- **Architectural decision** (DB choice, transport, schema convention, vendor pick) → new `docs/adr/NNNN-<kebab-title>.md` copied from `docs/adr/TEMPLATE.md`. Number sequentially. Once accepted, the ADR is **immutable** — supersede with a new ADR rather than editing in place.
+- **New feature or non-trivial subsystem** → new `docs/specs/<feature>.md` copied from `docs/specs/TEMPLATE.md`, written **before** the implementation. Update as the design evolves.
+- **New / changed HTTP endpoint** → update `docs/api/openapi.yaml` in the **same PR** as the code change. The OpenAPI spec is what cue-ios consumes.
+- **System-level context that isn't a single decision or feature** → update `docs/architecture.md`.
+- **One-off PR context** → the PR description, not a doc.
+
+### How agents use docs
+
+- **Before designing**: skim `docs/architecture.md`; check `docs/adr/` for relevant past decisions; check `docs/specs/` for any spec already covering this area.
+- **Before implementing**: if no spec exists for non-trivial work, draft one and confirm with the user before coding.
+- **While implementing**: if an architectural decision is being made (not just executing an existing design), draft an ADR and confirm with the user.
+- **After implementing**: update the spec status (`Draft` → `Implemented`), update `docs/architecture.md` if structure changed, update `docs/api/openapi.yaml` for any endpoint change.
+- **Cross-repo dependencies**: when a BE change affects iOS, link the matching `cue-ios/docs/specs/...` doc and vice versa.
+
+### Doc style
+
+- Lead specs with **Context → Goals → Non-goals**. Spend more time on **Alternatives considered** than on the chosen design.
+- ADRs are short (one screen). State the decision, the consequences (incl. downsides), the rejected alternatives.
+- Diagrams inline as Mermaid; no external image files unless Mermaid cannot express it.
+- Link liberally between docs with relative paths.
+
 ## Current state / deferred follow-ups
 
 Everything below is known-missing; don't treat absence as a bug.

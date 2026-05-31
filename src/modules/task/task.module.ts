@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
 
+import { DatabaseModule } from '../database/database.module';
+
 import { TaskController } from './task.controller';
 import { TaskService } from './task.service';
-import { DatabaseModule } from '../database/database.module';
 
 /**
  * Task module owning the unified event-plus-todo primitive.

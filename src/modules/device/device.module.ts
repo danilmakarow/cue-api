@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 
-import { DeviceService } from './device.service';
 import { DatabaseModule } from '../database/database.module';
+
+import { DeviceService } from './device.service';
 
 /**
  * Device module managing per-user APNs tokens for push delivery.

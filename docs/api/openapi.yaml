@@ -1,0 +1,179 @@
+openapi: 3.1.0
+info:
+  title: Cue API
+  version: 0.1.0
+  description: |
+    HTTP contract between cue-api and cue-ios. Source of truth for endpoints,
+    request/response shapes, and status codes. See `docs/architecture.md` and
+    `docs/specs/` for design rationale.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+  - url: https://api.cue.app
+    description: Production (placeholder — not yet deployed)
+
+tags:
+  - name: health
+  - name: auth
+    description: Apple Sign-In token exchange and session introspection.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
+  /auth/apple:
+    post:
+      tags: [auth]
+      summary: Exchange an Apple identity token for a Cue JWT
+      description: |
+        Verifies the Apple-signed identity token, provisions a new user (+ default
+        calendar) on first sign-in, or merges fresh profile fields onto a returning
+        user. Returns a Cue-signed JWT plus the user record. See
+        `docs/specs/auth-apple-signin.md`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleSignInRequest'
+      responses:
+        '200':
+          description: Sign-in succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Apple identity token invalid, expired, or audience mismatch.
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current authenticated user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Authenticated user record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '404':
+          description: Token decodes but the user no longer exists.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    AppleSignInRequest:
+      type: object
+      required: [identityToken]
+      properties:
+        identityToken:
+          type: string
+          minLength: 1
+          description: |
+            JWT returned by `ASAuthorizationAppleIDCredential.identityToken` on
+            the iOS client.
+        fullName:
+          type: string
+          maxLength: 200
+          description: |
+            Display name. Apple surfaces this only on the very first sign-in;
+            clients may resend on subsequent calls for completeness.
+        avatarBase64:
+          type: string
+          maxLength: 5000000
+          description: |
+            Base64-encoded profile picture (no data-URL prefix). Sourced from
+            the iOS "me" Contacts entry. ~5MB cap.
+        timezone:
+          type: string
+          maxLength: 64
+          description: IANA time zone. Falls back to `UTC` on the server if omitted.
+
+    AuthResponse:
+      type: object
+      required: [accessToken, user]
+      properties:
+        accessToken:
+          type: string
+          description: HS256-signed JWT. Payload is `{ sub: <Cue user uuid> }`.
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      required: [id, appleUserId, timezone, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        appleUserId:
+          type: string
+          description: Apple's `sub` claim — stable, opaque, per-app.
+        email:
+          type: [string, 'null']
+          format: email
+        displayName:
+          type: [string, 'null']
+        avatarBase64:
+          type: [string, 'null']
+        timezone:
+          type: string
+          default: UTC
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ValidationErrorBody:
+      type: object
+      required: [statusCode, message]
+      properties:
+        statusCode:
+          type: integer
+          example: 400
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        error:
+          type: string
+          example: Bad Request
+
+  responses:
+    ValidationError:
+      description: Request DTO failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorBody'

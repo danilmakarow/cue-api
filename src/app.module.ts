@@ -18,6 +18,7 @@ import { TaskGroupModule } from './modules/task-group/task-group.module';
 import { TaskOccurrenceExceptionModule } from './modules/task-occurrence-exception/task-occurrence-exception.module';
 import { TelegramLinkModule } from './modules/telegram-link/telegram-link.module';
 import { UserModule } from './modules/user/user.module';
+
 import { getConfigModule } from '@/config/env.config';
 import { getDatabaseConfig, getDataSource } from '@/config/typeorm.config';
 

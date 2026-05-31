@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 
-import { NotificationStrategyService } from './notification-strategy.service';
 import { DatabaseModule } from '../database/database.module';
+
+import { NotificationStrategyService } from './notification-strategy.service';
 
 /**
  * NotificationStrategy module managing named bundles of notification rules.

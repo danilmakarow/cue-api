@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 
-import { TaskGroupService } from './task-group.service';
 import { DatabaseModule } from '../database/database.module';
+
+import { TaskGroupService } from './task-group.service';
 
 /**
  * TaskGroup module managing user-owned task buckets.
