@@ -3,6 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import {
   Calendar,
+  Conversation,
+  ConversationMessage,
+  ConversationSummary,
   Device,
   NotificationRule,
   NotificationStrategy,
@@ -13,9 +16,13 @@ import {
   TaskOccurrenceException,
   TelegramLink,
   User,
+  UserMemoryFact,
 } from './entities';
 import {
   CalendarRepository,
+  ConversationMessageRepository,
+  ConversationRepository,
+  ConversationSummaryRepository,
   DeviceRepository,
   NotificationRuleRepository,
   NotificationStrategyRepository,
@@ -25,10 +32,14 @@ import {
   TaskOccurrenceExceptionRepository,
   TaskRepository,
   TelegramLinkRepository,
+  UserMemoryFactRepository,
   UserRepository,
 } from './repositories';
 import {
   CalendarDatabaseService,
+  ConversationDatabaseService,
+  ConversationMessageDatabaseService,
+  ConversationSummaryDatabaseService,
   DeviceDatabaseService,
   NotificationRuleDatabaseService,
   NotificationStrategyDatabaseService,
@@ -39,6 +50,7 @@ import {
   TaskOccurrenceExceptionDatabaseService,
   TelegramLinkDatabaseService,
   UserDatabaseService,
+  UserMemoryFactDatabaseService,
 } from './services';
 
 /**
@@ -61,6 +73,10 @@ import {
       NotificationStrategy,
       NotificationRule,
       ScheduledNotification,
+      Conversation,
+      ConversationMessage,
+      ConversationSummary,
+      UserMemoryFact,
     ]),
   ],
   providers: [
@@ -75,6 +91,10 @@ import {
     NotificationStrategyRepository,
     NotificationRuleRepository,
     ScheduledNotificationRepository,
+    ConversationRepository,
+    ConversationMessageRepository,
+    ConversationSummaryRepository,
+    UserMemoryFactRepository,
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
@@ -86,6 +106,10 @@ import {
     NotificationStrategyDatabaseService,
     NotificationRuleDatabaseService,
     ScheduledNotificationDatabaseService,
+    ConversationDatabaseService,
+    ConversationMessageDatabaseService,
+    ConversationSummaryDatabaseService,
+    UserMemoryFactDatabaseService,
   ],
   exports: [
     UserDatabaseService,
@@ -99,6 +123,10 @@ import {
     NotificationStrategyDatabaseService,
     NotificationRuleDatabaseService,
     ScheduledNotificationDatabaseService,
+    ConversationDatabaseService,
+    ConversationMessageDatabaseService,
+    ConversationSummaryDatabaseService,
+    UserMemoryFactDatabaseService,
   ],
 })
 export class DatabaseModule {}

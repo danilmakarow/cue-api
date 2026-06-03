@@ -1,3 +1,10 @@
+# Packages allowed to run install/postinstall build scripts.
+# pnpm 11 blocks build scripts by default and reads this allow-list here
+# (the `pnpm` field in package.json is no longer read by pnpm 11).
 allowBuilds:
   '@nestjs/core': true
+  esbuild: true
+  ffmpeg-static: true
+  msgpackr-extract: true
+  unrs-resolver: true
   '@scarf/scarf': false

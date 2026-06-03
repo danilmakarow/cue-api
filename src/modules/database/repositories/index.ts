@@ -10,3 +10,7 @@ export { TaskOccurrenceExceptionRepository } from './task-occurrence-exception.r
 export { NotificationStrategyRepository } from './notification-strategy.repository';
 export { NotificationRuleRepository } from './notification-rule.repository';
 export { ScheduledNotificationRepository } from './scheduled-notification.repository';
+export { ConversationRepository } from './conversation.repository';
+export { ConversationMessageRepository } from './conversation-message.repository';
+export { ConversationSummaryRepository } from './conversation-summary.repository';
+export { UserMemoryFactRepository } from './user-memory-fact.repository';

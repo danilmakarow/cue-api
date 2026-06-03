@@ -9,7 +9,6 @@ import {
 
 import { BaseEntity } from '../entities';
 import { BaseRepository } from '../repositories';
-
 import { EntityNotFoundException } from '@/exceptions/entity-not-found.exception';
 
 /**

@@ -9,7 +9,6 @@ import {
 
 import { AuthService } from './auth.service';
 import { AppleSignInDto } from './dtos';
-
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';

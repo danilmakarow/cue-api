@@ -1,8 +1,7 @@
 import { Module } from '@nestjs/common';
 
-import { DatabaseModule } from '../database/database.module';
-
 import { TaskOccurrenceExceptionService } from './task-occurrence-exception.service';
+import { DatabaseModule } from '../database/database.module';
 
 /**
  * TaskOccurrenceException module recording skip / override / completion overlays

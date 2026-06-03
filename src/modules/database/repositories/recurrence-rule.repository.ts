@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { RecurrenceRule } from '../entities';
-
 import { BaseRepository } from './base.repository';
 
 /**

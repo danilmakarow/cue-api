@@ -1,9 +1,10 @@
-import { IsDateString, IsUUID } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsDateString, IsOptional, IsUUID } from 'class-validator';
 
 /**
- * Query parameters for listing Tasks inside a Calendar within a half-open
- * time window `[from, to)`. Dates arrive as ISO 8601 strings and are coerced
- * to `Date` in the service layer.
+ * Query parameters for listing Task occurrences in a half-open time window
+ * `[from, to)`. All dates arrive as ISO 8601 strings and are coerced to `Date`
+ * in the service layer.
  */
 export class ListTasksQuery {
   @IsUUID()
@@ -14,4 +15,26 @@ export class ListTasksQuery {
 
   @IsDateString()
   to: string;
+
+  /**
+   * When `true`, completed occurrences are included in the response.
+   * Defaults to `false`.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Transform(
+    ({ value }: { value: unknown }) => value === 'true' || value === true,
+  )
+  includeCompleted?: boolean;
+
+  /**
+   * When `true`, timeless todos (no `startAt`) are included.
+   * Defaults to `false`.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Transform(
+    ({ value }: { value: unknown }) => value === 'true' || value === true,
+  )
+  includeTodos?: boolean;
 }

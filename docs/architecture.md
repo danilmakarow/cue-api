@@ -4,7 +4,7 @@ One-page system overview. For decisions, see [adr/](adr/). For per-feature desig
 
 ## What this service is
 
-The HTTP backend for [Cue](../../cue-ios/), an iOS calendar/TODO app. Owns the canonical task, calendar, and notification data; exposes a REST API consumed by the iOS client; delivers reminders via APNs and Telegram (planned).
+The HTTP backend for [Cue](../../cue-ios/), an iOS calendar/TODO app. Owns the canonical task, calendar, and notification data; exposes a REST API consumed by the iOS client; delivers reminders via APNs and Telegram (planned). A Telegram **AI assistant** (Claude-backed) lets users manage their calendar in natural language — see [specs/telegram-ai-assistant.md](specs/telegram-ai-assistant.md).
 
 ## Tech stack
 
@@ -27,6 +27,8 @@ The HTTP backend for [Cue](../../cue-ios/), an iOS calendar/TODO app. Owns the c
 ```
 User ─1─* Device                   (cascade)
 User ─1─1 TelegramLink             (cascade)
+User ─1─1 Conversation             (cascade)
+User ─1─* UserMemoryFact           (cascade)
 User ─1─* Calendar                 (cascade)
 
 Calendar ─1─* TaskGroup            (cascade)
@@ -42,6 +44,9 @@ Task 1─* TaskOccurrenceException   (cascade)
 Task 1─* ScheduledNotification     (cascade)
 
 NotificationStrategy 1─* NotificationRule (cascade)
+
+Conversation ─1─* ConversationMessage  (cascade)
+Conversation ─1─* ConversationSummary  (cascade)
 ```
 
 Effective notification strategy for a task = `task.notificationStrategyId ?? task.group.defaultNotificationStrategyId`.
@@ -52,14 +57,18 @@ Calendar is the org unit. Users own multiple Calendars; tasks/groups/strategies 
 
 ```
 src/modules/
+  ai                       ← provider-agnostic LLM connector — base + factory; Anthropic impl (planned)
+  assistant                ← Telegram AI assistant: webhook, orchestrator, context builder, tools (planned)
   auth                     ← Apple Sign-In token exchange + JWT issuance
   calendar                 ← Calendar CRUD (org unit)
   database                 ← single aggregator — entities, repositories, services
   device                   ← APNs device tokens (per User)
+  external-vendor          ← provider-agnostic messaging connector — base + factory; Telegram webhooks impl (planned)
   notification-rule        ← one reminder: offsetMinutes + channel
   notification-strategy    ← named set of NotificationRules (per Calendar)
   recurrence-rule          ← RRULE (frequency, interval, by-*, endType)
   scheduled-notification   ← outbox table — status, fireAt, channel, attemptCount
+  stt                      ← provider-agnostic speech-to-text — base + factory; OpenAI impl (planned)
   task                     ← unified event+task — startAt/endAt/isAllDay, completedAt
   task-group               ← collection of Tasks in a Calendar
   task-occurrence-exception← per-instance override for a recurring Task
@@ -133,7 +142,8 @@ sequenceDiagram
 
 - Most feature services are empty skeletons (no CRUD methods, no endpoints, no DTOs).
 - No notification delivery — see [specs/notification-delivery.md](specs/notification-delivery.md).
-- No recurrence expansion service.
+- Telegram AI assistant — implemented in `src/modules/assistant/` (webhook ingress → BullMQ queue → consumer → tool-use loop → reply), backed by the `ai` + `external-vendor` + `stt` connector modules and the `Conversation`/`ConversationMessage`/`ConversationSummary`/`UserMemoryFact` entities. Redis is now consumed (BullMQ webhook queue, dedupe, link nonces, held-conflict writes). Design: [specs/telegram-ai-assistant.md](specs/telegram-ai-assistant.md). Deferred within it: post-turn jobs on the durable queue (run in-process for v1), the query-aware Haiku date fallback, `set_reminder` delivery (owned by [specs/notification-delivery.md](specs/notification-delivery.md)), and `TelegramLink.isActive`.
+- Recurrence expansion is implemented (`RecurrenceRuleService.expandOccurrences` + occurrence-aware `TaskService.findOccurrencesInRange`, RRULE-not-materialized per [ADR 0002](adr/0002-rrule-not-materialized.md)) — see [specs/recurrence-expansion.md](specs/recurrence-expansion.md). **Both** the Telegram assistant and the REST `GET /tasks` path are occurrence-aware: `GET /tasks` returns `OccurrenceDTO[]` (one per expanded instance) with per-occurrence completion (`PATCH /tasks/:id/completion`) and skip (`POST /tasks/:id/skip`) — see [specs/tasks-rest-occurrence-read.md](specs/tasks-rest-occurrence-read.md). Task groups may carry a `defaultRecurrenceRuleId` their tasks inherit.
 - No tests; no Swagger; no Sentry; no Winston.
 - No `CalendarMember` sharing — additive migration when sharing ships.
-- Redis env vars not yet in the Zod schema.
+- Redis env vars are now in the Zod schema (added when the assistant began consuming Redis).

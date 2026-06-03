@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
 import { CreateCalendarDto } from './dtos';
-
 import { Calendar } from '@/modules/database/entities';
 import { CalendarDatabaseService } from '@/modules/database/services';
 
@@ -31,5 +30,17 @@ export class CalendarService {
    */
   async findAllByOwner(ownerId: string): Promise<Calendar[]> {
     return this.calendarDatabaseService.findAllByOwner(ownerId);
+  }
+
+  /**
+   * Returns the user's primary calendar — the first by `sortOrder` — or null
+   * when they own none. The assistant uses this to place an event when no
+   * explicit calendar is given.
+   */
+  async findPrimaryForOwner(ownerId: string): Promise<Calendar | null> {
+    const calendars =
+      await this.calendarDatabaseService.findAllByOwner(ownerId);
+
+    return calendars[0] ?? null;
   }
 }

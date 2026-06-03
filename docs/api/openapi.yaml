@@ -17,6 +17,12 @@ tags:
   - name: health
   - name: auth
     description: Apple Sign-In token exchange and session introspection.
+  - name: assistant
+    description: Telegram AI assistant — account linking status and control.
+  - name: tasks
+    description: Task/event CRUD. A Task is the unified event + todo primitive.
+  - name: task-groups
+    description: TaskGroup CRUD. A TaskGroup is a calendar-owned bucket of tasks that may carry a default recurrence rule.
 
 paths:
   /health:
@@ -81,6 +87,504 @@ paths:
         '404':
           description: Token decodes but the user no longer exists.
 
+  /assistant/link:
+    get:
+      tags: [assistant]
+      summary: Current Telegram link status
+      description: |
+        Reports whether the signed-in user has a linked Telegram chat. Drives the
+        Settings "Connect Telegram" row. See
+        `docs/specs/telegram-ai-assistant.md`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current link state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelegramLinkStatus'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    post:
+      tags: [assistant]
+      summary: Redeem a linking code
+      description: |
+        App-initiated binding. Burns the single-use nonce the bot issued and
+        upserts the `TelegramLink` binding this user to the Telegram chat, then
+        returns the resulting link state (`linked: true`).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkTelegramRequest'
+      responses:
+        '200':
+          description: Linking succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelegramLinkStatus'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '404':
+          description: Linking code is unknown or expired (single-use, short TTL).
+    delete:
+      tags: [assistant]
+      summary: Revoke the Telegram link
+      description: |
+        Disconnects the signed-in user's Telegram chat. Idempotent — succeeds
+        with `linked: false` whether or not a link was present.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Link revoked (or already absent).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [linked]
+                properties:
+                  linked:
+                    type: boolean
+                    enum: [false]
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /tasks:
+    get:
+      tags: [tasks]
+      summary: List task occurrences in a calendar and date range
+      description: |
+        Returns the expanded occurrences of all tasks in `calendarId` that
+        intersect the half-open window `[from, to)`. Each recurring anchor is
+        expanded into one `OccurrenceDTO` per occurrence date; one-off tasks
+        produce one `OccurrenceDTO` each. Exceptions (skips, overrides) are
+        applied. Occurrence identity for per-instance actions is `(taskId, occurrenceStart)`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Calendar to read. Must belong to the authenticated user.
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive lower bound of the occurrence window (ISO-8601).
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Exclusive upper bound of the occurrence window (ISO-8601).
+        - name: includeCompleted
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, completed occurrences are included.
+        - name: includeTodos
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, timeless todos (no startAt) are included.
+      responses:
+        '200':
+          description: Expanded occurrences for the window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OccurrenceDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+    post:
+      tags: [tasks]
+      summary: Create a task
+      description: |
+        Creates a task in the referenced calendar (which must belong to the
+        authenticated user) and returns the persisted series row as a `TaskDTO`
+        with the embedded recurrence rule. Supports timed events, all-day events,
+        timeless todos, recurring series (via `recurrence`), and group assignment.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        '201':
+          description: Task created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+
+  /tasks/{id}:
+    get:
+      tags: [tasks]
+      summary: Get a task series row
+      description: |
+        Returns the full `TaskDTO` for the series anchor, including the embedded
+        `recurrence` rule ready for an edit form. Use this to open the detail /
+        edit screen.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task id.
+      responses:
+        '200':
+          description: Task series row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task belongs to another user.
+        '404':
+          description: No task with that id.
+    patch:
+      tags: [tasks]
+      summary: Update a task (all / one-off scope)
+      description: |
+        Updates the task's fields in the "all" scope — the whole series or the
+        one-off task. Omitted fields are left unchanged. `recurrence: null` removes
+        the rule; a `RecurrenceRuleInput` replaces or adds it. Returns the updated
+        `TaskDTO`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+      responses:
+        '200':
+          description: Updated task.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task belongs to another user.
+        '404':
+          description: No task with that id.
+    delete:
+      tags: [tasks]
+      summary: Delete a task
+      description: |
+        Soft-deletes the task (and its series, for recurring tasks). Returns
+        `{ id }` with HTTP 200 — NOT 204, so the iOS client can decode the body.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task id.
+      responses:
+        '200':
+          description: Task deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task belongs to another user.
+        '404':
+          description: No task with that id.
+
+  /tasks/{id}/completion:
+    patch:
+      tags: [tasks]
+      summary: Toggle task or occurrence completion
+      description: |
+        When `occurrenceStart` is provided, toggles completion for that single
+        occurrence of a recurring task (per-instance). When omitted, toggles the
+        series anchor or one-off task. Returns a `CompletionResultDTO`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task id (series anchor or one-off).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetCompletionRequest'
+      responses:
+        '200':
+          description: Completion state updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResultDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task belongs to another user.
+        '404':
+          description: No task with that id.
+
+  /tasks/{id}/skip:
+    post:
+      tags: [tasks]
+      summary: Skip a single recurring occurrence
+      description: |
+        Marks a single occurrence as skipped by upserting a
+        `TaskOccurrenceException` with `isSkipped: true`. The occurrence
+        disappears from the calendar without affecting other instances or the
+        series rule. Returns `{ ok: true }`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task id (series anchor).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkipOccurrenceRequest'
+      responses:
+        '200':
+          description: Occurrence skipped.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task belongs to another user.
+        '404':
+          description: No task with that id, or occurrenceStart is not a real occurrence.
+
+  /task-groups:
+    get:
+      tags: [task-groups]
+      summary: List task groups
+      description: |
+        Returns all task groups for the authenticated user. When `calendarId` is
+        provided, scopes the result to that calendar (ownership asserted); otherwise
+        returns groups across all calendars the user owns. Each group includes its
+        embedded `recurrence` rule (or null).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: When given, scopes to a single calendar.
+      responses:
+        '200':
+          description: Task groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskGroupDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+    post:
+      tags: [task-groups]
+      summary: Create a task group
+      description: |
+        Creates a task group in the referenced calendar. When `recurrence` is
+        provided, creates a `RecurrenceRule` and sets it as the group default —
+        tasks in the group with no own rule will inherit this schedule. Returns
+        the created `TaskGroupDTO`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskGroupRequest'
+      responses:
+        '201':
+          description: Task group created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGroupDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+
+  /task-groups/{id}:
+    patch:
+      tags: [task-groups]
+      summary: Update a task group
+      description: |
+        Updates the task group's mutable fields. `recurrence: null` removes the
+        default rule; a `RecurrenceRuleInput` replaces or adds it. Returns the
+        updated `TaskGroupDTO`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task group id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskGroupRequest'
+      responses:
+        '200':
+          description: Updated task group.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGroupDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task group belongs to another user.
+        '404':
+          description: No task group with that id.
+    delete:
+      tags: [task-groups]
+      summary: Delete a task group
+      description: |
+        Deletes the task group. Contained tasks are not deleted; their `groupId`
+        is set to null. Returns `{ id }` with HTTP 200.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Task group id.
+      responses:
+        '200':
+          description: Task group deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: Task group belongs to another user.
+        '404':
+          description: No task group with that id.
+
 components:
   securitySchemes:
     bearerAuth:
@@ -89,6 +593,400 @@ components:
       bearerFormat: JWT
 
   schemas:
+    RecurrenceRuleDTO:
+      type: object
+      description: |
+        An embedded recurrence rule returned inside TaskDTO and TaskGroupDTO.
+        Field names are normative — the FE decodes them exactly.
+      required: [id, frequency, interval, byWeekday, byMonthDay, byMonth, endType, endDate, count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        frequency:
+          type: string
+          enum: [DAILY, WEEKLY, MONTHLY, YEARLY]
+        interval:
+          type: integer
+          minimum: 1
+          description: Repeat every N units. 1 = every period.
+        byWeekday:
+          type: ['array', 'null']
+          items:
+            type: integer
+            minimum: 0
+            maximum: 6
+          description: Weekday ordinals (0 = Mon … 6 = Sun). Null means no restriction.
+        byMonthDay:
+          type: ['array', 'null']
+          items:
+            type: integer
+            minimum: 1
+            maximum: 31
+          description: Days of the month. Null means no restriction.
+        byMonth:
+          type: ['array', 'null']
+          items:
+            type: integer
+            minimum: 1
+            maximum: 12
+          description: Months (1–12). Null means no restriction.
+        endType:
+          type: string
+          enum: [NEVER, UNTIL_DATE, COUNT]
+        endDate:
+          type: [string, 'null']
+          format: date
+          description: Required when endType = UNTIL_DATE.
+        count:
+          type: [integer, 'null']
+          minimum: 1
+          description: Required when endType = COUNT.
+
+    RecurrenceRuleInput:
+      type: object
+      description: |
+        Recurrence rule payload sent inside create/update task and task-group
+        request bodies. Same as RecurrenceRuleDTO minus `id`. Cross-field: COUNT
+        requires `count`; UNTIL_DATE requires `endDate`.
+      required: [frequency]
+      properties:
+        frequency:
+          type: string
+          enum: [DAILY, WEEKLY, MONTHLY, YEARLY]
+        interval:
+          type: integer
+          minimum: 1
+          default: 1
+        byWeekday:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 6
+        byMonthDay:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 31
+        byMonth:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 12
+        endType:
+          type: string
+          enum: [NEVER, UNTIL_DATE, COUNT]
+          default: NEVER
+        endDate:
+          type: string
+          format: date
+          description: Required when endType = UNTIL_DATE.
+        count:
+          type: integer
+          minimum: 1
+          description: Required when endType = COUNT.
+
+    TaskDTO:
+      type: object
+      description: |
+        A task series row. Returned by POST /tasks, PATCH /tasks/:id, GET /tasks/:id.
+        Includes the embedded recurrence rule for the edit form.
+      required:
+        [id, calendarId, groupId, title, notes, startAt, endAt, isAllDay, timezone,
+         requiresCompletion, completedAt, recurrenceRuleId, recurrence,
+         notificationStrategyId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        calendarId:
+          type: string
+          format: uuid
+        groupId:
+          type: [string, 'null']
+          format: uuid
+        title:
+          type: string
+        notes:
+          type: [string, 'null']
+        startAt:
+          type: [string, 'null']
+          format: date-time
+          description: ISO-8601 start; null for a timeless todo.
+        endAt:
+          type: [string, 'null']
+          format: date-time
+        isAllDay:
+          type: boolean
+        timezone:
+          type: string
+          description: IANA zone — the anchor for recurrence/DST expansion.
+        requiresCompletion:
+          type: boolean
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+        recurrenceRuleId:
+          type: [string, 'null']
+          format: uuid
+        recurrence:
+          oneOf:
+            - $ref: '#/components/schemas/RecurrenceRuleDTO'
+            - type: 'null'
+          description: Embedded rule for the edit form; null when not recurring.
+        notificationStrategyId:
+          type: [string, 'null']
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    OccurrenceDTO:
+      type: object
+      description: |
+        A single expanded occurrence. Returned by GET /tasks. One per visible
+        calendar cell. Stable identity = (taskId, occurrenceStart).
+      required:
+        [taskId, calendarId, groupId, originalStart, occurrenceStart, occurrenceEnd,
+         title, notes, isAllDay, timezone, requiresCompletion, completedAt,
+         isRecurring, isException]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+          description: Series anchor id — same across all occurrences of a recurring task.
+        calendarId:
+          type: string
+          format: uuid
+        groupId:
+          type: [string, 'null']
+          format: uuid
+        originalStart:
+          type: [string, 'null']
+          format: date-time
+          description: Rule-generated start BEFORE any override; stable instance key WITH taskId.
+        occurrenceStart:
+          type: [string, 'null']
+          format: date-time
+          description: Effective start with any overrideStartAt applied.
+        occurrenceEnd:
+          type: [string, 'null']
+          format: date-time
+        title:
+          type: string
+        notes:
+          type: [string, 'null']
+        isAllDay:
+          type: boolean
+        timezone:
+          type: string
+        requiresCompletion:
+          type: boolean
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Per-instance completion for recurring tasks.
+        isRecurring:
+          type: boolean
+        isException:
+          type: boolean
+
+    TaskGroupDTO:
+      type: object
+      description: |
+        A task group. Returned by all task-group endpoints.
+        The embedded `recurrence` is the group default rule inherited by tasks
+        with no own recurrence rule.
+      required:
+        [id, calendarId, name, color, icon, sortOrder, defaultRecurrenceRuleId,
+         recurrence, defaultNotificationStrategyId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        calendarId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        color:
+          type: [string, 'null']
+        icon:
+          type: [string, 'null']
+        sortOrder:
+          type: integer
+          minimum: 0
+        defaultRecurrenceRuleId:
+          type: [string, 'null']
+          format: uuid
+        recurrence:
+          oneOf:
+            - $ref: '#/components/schemas/RecurrenceRuleDTO'
+            - type: 'null'
+          description: Group default recurrence rule; null when the group has no default.
+        defaultNotificationStrategyId:
+          type: [string, 'null']
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CompletionResultDTO:
+      type: object
+      required: [taskId, occurrenceStart, completedAt]
+      description: Returned by PATCH /tasks/:id/completion.
+      properties:
+        taskId:
+          type: string
+          format: uuid
+        occurrenceStart:
+          type: [string, 'null']
+          format: date-time
+          description: The occurrence that was toggled; null for series/one-off completion.
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+          description: New completion timestamp; null when marked not complete.
+
+    CreateTaskRequest:
+      type: object
+      required: [calendarId, title, timezone]
+      properties:
+        calendarId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: [string, 'null']
+        startAt:
+          type: [string, 'null']
+          format: date-time
+        endAt:
+          type: [string, 'null']
+          format: date-time
+        isAllDay:
+          type: boolean
+          default: false
+        timezone:
+          type: string
+          description: IANA zone.
+        requiresCompletion:
+          type: boolean
+          default: true
+        groupId:
+          type: string
+          format: uuid
+          description: Optional group (must live in the same calendar).
+        recurrence:
+          $ref: '#/components/schemas/RecurrenceRuleInput'
+
+    UpdateTaskRequest:
+      type: object
+      description: All fields optional — omitted keys leave the current value unchanged.
+      properties:
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: [string, 'null']
+        startAt:
+          type: [string, 'null']
+          format: date-time
+        endAt:
+          type: [string, 'null']
+          format: date-time
+        isAllDay:
+          type: boolean
+        requiresCompletion:
+          type: boolean
+        groupId:
+          type: [string, 'null']
+          format: uuid
+          description: Set to null to ungroup.
+        recurrence:
+          oneOf:
+            - $ref: '#/components/schemas/RecurrenceRuleInput'
+            - type: 'null'
+          description: null removes the rule; a DTO replaces/adds it.
+
+    SetCompletionRequest:
+      type: object
+      required: [isCompleted]
+      properties:
+        isCompleted:
+          type: boolean
+          description: True sets completedAt = now (idempotent); false clears it.
+        occurrenceStart:
+          type: string
+          format: date-time
+          description: |
+            ISO-8601 occurrence to toggle. When provided, only that instance is
+            toggled. When omitted, the series anchor or one-off is toggled.
+
+    SkipOccurrenceRequest:
+      type: object
+      required: [occurrenceStart]
+      properties:
+        occurrenceStart:
+          type: string
+          format: date-time
+          description: ISO-8601 occurrence to skip.
+
+    CreateTaskGroupRequest:
+      type: object
+      required: [calendarId, name]
+      properties:
+        calendarId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+        color:
+          type: string
+        icon:
+          type: string
+        sortOrder:
+          type: integer
+          minimum: 0
+          default: 0
+        defaultNotificationStrategyId:
+          type: string
+          format: uuid
+        recurrence:
+          $ref: '#/components/schemas/RecurrenceRuleInput'
+
+    UpdateTaskGroupRequest:
+      type: object
+      description: All fields optional — omitted keys leave the current value unchanged.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        color:
+          type: [string, 'null']
+        icon:
+          type: [string, 'null']
+        sortOrder:
+          type: integer
+          minimum: 0
+        recurrence:
+          oneOf:
+            - $ref: '#/components/schemas/RecurrenceRuleInput'
+            - type: 'null'
+          description: null removes the group default rule; a DTO replaces/adds it.
+
     AppleSignInRequest:
       type: object
       required: [identityToken]
@@ -122,7 +1020,8 @@ components:
       properties:
         accessToken:
           type: string
-          description: HS256-signed JWT. Payload is `{ sub: <Cue user uuid> }`.
+          description: |
+            HS256-signed JWT. Payload is `{ sub: <Cue user uuid> }`.
         user:
           $ref: '#/components/schemas/User'
 
@@ -152,6 +1051,36 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    LinkTelegramRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: |
+            Single-use linking nonce the bot issued in the "Connect Telegram"
+            prompt. The iOS app receives it via the universal link (or manual
+            paste) and redeems it over the authenticated session.
+
+    TelegramLinkStatus:
+      type: object
+      required: [linked, telegramUsername, linkedAt]
+      description: |
+        Telegram link state returned by `GET`, `POST`, and `DELETE
+        /assistant/link`. When not linked, `telegramUsername` and `linkedAt` are
+        null.
+      properties:
+        linked:
+          type: boolean
+        telegramUsername:
+          type: [string, 'null']
+          description: Telegram @handle, when known (may be null even when linked).
+        linkedAt:
+          type: [string, 'null']
+          format: date-time
+          description: ISO-8601 timestamp the link was established, or null when unlinked.
 
     ValidationErrorBody:
       type: object

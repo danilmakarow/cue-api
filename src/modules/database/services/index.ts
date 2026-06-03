@@ -10,3 +10,7 @@ export { TaskOccurrenceExceptionDatabaseService } from './task-occurrence-except
 export { NotificationStrategyDatabaseService } from './notification-strategy-database.service';
 export { NotificationRuleDatabaseService } from './notification-rule-database.service';
 export { ScheduledNotificationDatabaseService } from './scheduled-notification-database.service';
+export { ConversationDatabaseService } from './conversation-database.service';
+export { ConversationMessageDatabaseService } from './conversation-message-database.service';
+export { ConversationSummaryDatabaseService } from './conversation-summary-database.service';
+export { UserMemoryFactDatabaseService } from './user-memory-fact-database.service';

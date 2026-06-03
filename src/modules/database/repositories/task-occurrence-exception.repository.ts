@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { TaskOccurrenceException } from '../entities';
-
 import { BaseRepository } from './base.repository';
 
 /**

@@ -1,0 +1,81 @@
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsDateString,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  Max,
+  Min,
+  ValidateIf,
+} from 'class-validator';
+
+import {
+  RecurrenceEndType,
+  RecurrenceFrequency,
+} from '@/modules/database/entities';
+
+/**
+ * DTO for partially updating a RecurrenceRule. Every field is optional; only the
+ * provided fields are mutated on the loaded entity.
+ *
+ * Cross-field rules apply only when `endType` is included in the payload:
+ * setting `endType = COUNT` requires `count`; `endType = UNTIL_DATE` requires `endDate`.
+ */
+export class UpdateRecurrenceRuleDto {
+  @IsOptional()
+  @IsEnum(RecurrenceFrequency)
+  frequency?: RecurrenceFrequency;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  interval?: number;
+
+  /** Weekday ordinals (0 = Monday … 6 = Sunday). */
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  @Max(6, { each: true })
+  byWeekday?: number[];
+
+  /** Days of the month (1-31). */
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(31, { each: true })
+  byMonthDay?: number[];
+
+  /** Months (1-12). */
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(12, { each: true })
+  byMonth?: number[];
+
+  @IsOptional()
+  @IsEnum(RecurrenceEndType)
+  endType?: RecurrenceEndType;
+
+  /** Required when this payload sets `endType = UNTIL_DATE`. */
+  @ValidateIf(
+    (dto: UpdateRecurrenceRuleDto) =>
+      dto.endType === RecurrenceEndType.UNTIL_DATE,
+  )
+  @IsDateString()
+  endDate?: string;
+
+  /** Required and positive when this payload sets `endType = COUNT`. */
+  @ValidateIf(
+    (dto: UpdateRecurrenceRuleDto) => dto.endType === RecurrenceEndType.COUNT,
+  )
+  @IsInt()
+  @Min(1)
+  count?: number;
+}

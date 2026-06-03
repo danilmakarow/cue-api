@@ -10,7 +10,6 @@ import {
 } from '@nestjs/common';
 
 import { AuthenticationResult, AuthService } from './auth.service';
-
 import { DevOnlyGuard } from '@/guards/dev-only.guard';
 import { User } from '@/modules/database/entities';
 import { UserDatabaseService } from '@/modules/database/services';

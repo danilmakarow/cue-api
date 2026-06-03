@@ -1,0 +1,28 @@
+{
+  "rootDir": "..",
+  "moduleFileExtensions": ["ts", "js", "json"],
+  "testEnvironment": "node",
+  "testRegex": ".e2e-spec.ts$",
+  "transform": {
+    "^.+\\.ts$": [
+      "ts-jest",
+      {
+        "tsconfig": "tsconfig.spec.json"
+      }
+    ]
+  },
+  "moduleNameMapper": {
+    "^@/utils/(.*)$": "<rootDir>/src/common/utils/$1",
+    "^@/config/(.*)$": "<rootDir>/src/config/$1",
+    "^@/constants/(.*)$": "<rootDir>/src/common/constants/$1",
+    "^@/decorators/(.*)$": "<rootDir>/src/common/decorators/$1",
+    "^@/exception/(.*)$": "<rootDir>/src/common/exception/$1",
+    "^@/guards/(.*)$": "<rootDir>/src/common/guards/$1",
+    "^@/interceptors/(.*)$": "<rootDir>/src/common/interceptors/$1",
+    "^@/services/(.*)$": "<rootDir>/src/common/services/$1",
+    "^@/exceptions/(.*)$": "<rootDir>/src/common/exceptions/$1",
+    "^@/modules/(.*)$": "<rootDir>/src/modules/$1",
+    "^@/(.*)$": "<rootDir>/src/$1"
+  },
+  "setupFiles": ["<rootDir>/test/jest-setup.ts"]
+}

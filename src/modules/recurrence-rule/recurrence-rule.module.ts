@@ -1,8 +1,7 @@
 import { Module } from '@nestjs/common';
 
-import { DatabaseModule } from '../database/database.module';
-
 import { RecurrenceRuleService } from './recurrence-rule.service';
+import { DatabaseModule } from '../database/database.module';
 
 /**
  * RecurrenceRule module handling RFC-5545-lite recurrence configuration for tasks.

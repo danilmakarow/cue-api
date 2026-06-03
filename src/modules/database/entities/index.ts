@@ -20,3 +20,15 @@ export {
   ScheduledNotification,
   ScheduledNotificationStatus,
 } from './scheduled-notification.entity';
+export { Conversation } from './conversation.entity';
+export {
+  ConversationMessage,
+  ConversationMessageRole,
+  ConversationMessageContentType,
+} from './conversation-message.entity';
+export { ConversationSummary } from './conversation-summary.entity';
+export {
+  UserMemoryFact,
+  UserMemoryFactType,
+  UserMemoryFactSource,
+} from './user-memory-fact.entity';

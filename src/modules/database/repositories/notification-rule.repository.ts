@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { NotificationRule } from '../entities';
-
 import { BaseRepository } from './base.repository';
 
 /**
