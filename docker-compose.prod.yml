@@ -1,6 +1,8 @@
 # Runs on the app EC2. The image tag is injected via CUE_IMAGE; runtime config comes
 # from /opt/cue/app.env (rendered from SSM Parameter Store by deploy/deploy.sh).
 # Started by deploy/deploy.sh, which is invoked through SSM Run Command.
+# Redis is an external managed service (Redis SaaS) — the app connects to it directly
+# over the network via REDIS_* in app.env; it is not run on this box.
 
 services:
   api:
@@ -8,9 +10,6 @@ services:
     restart: unless-stopped
     env_file:
       - /opt/cue/app.env
-    depends_on:
-      redis:
-        condition: service_healthy
     expose:
       - "3000" # internal only — only Caddy reaches it
     networks: [cue]
@@ -21,19 +20,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 40s
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
-    volumes:
-      - redis_data:/data
-    networks: [cue]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
 
   caddy:
     image: caddy:2-alpine
@@ -55,6 +41,5 @@ networks:
   cue:
 
 volumes:
-  redis_data:
   caddy_data:
   caddy_config:

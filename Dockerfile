@@ -16,11 +16,8 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src
-# NOTE: the runtime entry `node dist/main` requires the `@/*` path aliases to be
-# rewritten to relative paths. `nest build` (plain tsc) does NOT do this. Adopt
-# `tsc-alias` (`"build": "nest build && tsc-alias"`) — see
-# docs/specs/deployment-and-cicd.md → Open questions. The image builds regardless,
-# but the container won't boot until the build emits alias-free JS.
+# `pnpm build` runs `nest build && tsc-alias`, rewriting the `@/*` path aliases to
+# relative paths so `node dist/main` resolves them at runtime.
 RUN pnpm build
 
 # Drop dev dependencies so only runtime deps are carried into the final image.

@@ -51,8 +51,9 @@ graph TD
   CD -->|ssm send-command| EC2
   Internet --> CF[Cloudflare: proxy / WAF / TLS]
   CF -->|origin cert| EIP[Elastic IP]
-  EIP --> EC2[EC2: caddy → cue-api + redis]
+  EIP --> EC2[EC2: caddy → cue-api]
   EC2 -->|sslmode=require| RDS[(RDS: new cue database)]
+  EC2 -->|TLS| REDIS[(Redis SaaS - external)]
 ```
 
 ### Components
@@ -62,17 +63,22 @@ graph TD
   parameters, Cloudflare). The existing VPC and RDS are pulled in as read-only `data`
   sources.
 - **Image** — multi-stage `Dockerfile` (pnpm via corepack, prod-pruned, non-root,
-  `node:20-slim`). Built and pushed to **ECR** tagged with the git SHA; immutable tags,
-  scan-on-push, lifecycle keeps the last 10.
+  `node:20-slim`). The build runs `nest build && tsc-alias`, rewriting `@/*` path aliases
+  to relative paths so `node dist/main` resolves them. Built and pushed to **ECR** tagged
+  with the git SHA; immutable tags, scan-on-push, lifecycle keeps the last 10.
 - **Compute** — a single Terraform-created EC2 (Amazon Linux 2023, SSM agent built in)
   with an Elastic IP. Runs `docker-compose.prod.yml`: **Caddy** (TLS via Cloudflare
-  origin cert) → **cue-api** + a **Redis** sidecar.
+  origin cert) → **cue-api**. **Redis is an external managed service** (Redis SaaS); the
+  app connects to it directly over the network (no sidecar). The EC2 needs egress to the
+  SaaS endpoint — allowlist the Elastic IP in the SaaS console if it restricts by IP, and
+  enable TLS in the client if the SaaS requires it.
 - **Edge** — Cloudflare proxied DNS A-record → Elastic IP, SSL **Full (Strict)**, basic
   WAF/rate-limit. The EC2 security group allows 443 **only from Cloudflare IP ranges**
   (`data.cloudflare_ip_ranges`), so the origin can't be reached around the proxy.
-- **CI** (`.github/workflows/ci.yml` + reusable `_quality.yml`) — on PRs/branches: pnpm
-  + node 20 (cached), install, `pnpm lint`, `pnpm type`, `pnpm test`. A `postgres:15`
-  service is wired for future DB-touching tests.
+- **CI** (`.github/workflows/ci.yml` + reusable `_quality.yml`) — on every PR: pnpm
+  + node 20 (cached), install, `pnpm lint`, `pnpm type`, `pnpm test`. Unit tests mock
+  their dependencies, so no service container is needed; a `postgres:15` service gets
+  added when integration tests (`test:e2e`) land.
 - **CD** (`.github/workflows/deploy.yml`) — on push to `master`, `environment: production`
   (optional required-reviewer gate). Assumes the OIDC role, builds + pushes the image,
   then `aws ssm send-command` runs `deploy/deploy.sh <sha>` on the box.
@@ -122,7 +128,7 @@ boot without them:
 |---|---|
 | Core | `NODE_ENV=production`, `PORT=3000` |
 | Database | `DB_HOST` (RDS endpoint), `DB_PORT`, `DB_USERNAME=cue_app`, `DB_PASSWORD` 🔒, `DB_DATABASE=cue`, `DB_RUN_MIGRATIONS=true`, `DB_SYNCHRONIZE=false`, `DB_DISABLE_SSL_AUTH=false`, `DB_LOGGING=false` |
-| Redis (sidecar) | `REDIS_HOST=redis`, `REDIS_PORT=6379`, `REDIS_DB=0` |
+| Redis (external SaaS) | `REDIS_HOST` (SaaS host), `REDIS_PORT`, `REDIS_PASSWORD` 🔒, `REDIS_DB` |
 | Auth | `JWT_SECRET` 🔒 (≥32 chars), `APPLE_CLIENT_ID` |
 | Telegram | `TELEGRAM_BOT_TOKEN` 🔒, `TELEGRAM_WEBHOOK_SECRET` 🔒 |
 | AI / STT | `ANTHROPIC_API_KEY` 🔒, `OPENAI_API_KEY` 🔒, `ASSISTANT_MODEL_MAIN`, `ASSISTANT_MODEL_BACKGROUND`, `STT_MODEL` |
@@ -177,14 +183,15 @@ in Terraform's blast radius.
 
 ## Open questions
 
-- [ ] **Path-alias resolution for prod.** `node dist/main` cannot resolve `@/*` aliases as
-      built today. Recommended: adopt `tsc-alias` (`"build": "nest build && tsc-alias"`).
-      Needs sign-off — it adds one dev-dependency and changes the build script.
 - [ ] **AWS facts**: region, VPC id, a public subnet id, RDS instance id + endpoint, RDS
       security-group id.
 - [ ] **Cloudflare**: zone/domain, the API hostname (e.g. `api.cue.example`), API token.
-- [ ] **Migration safety**: keep on-boot migration, or add a fail-closed pre-start step
-      later (needs a compiled migrate entrypoint, since `bin/` isn't built by `nest build`).
+
+### Resolved
+
+- ✅ **Path aliases** — adopted `tsc-alias`; the build emits alias-free JS.
+- ✅ **Redis** — external managed service (Redis SaaS), connected directly; no sidecar.
+- ✅ **Migrations** — run on boot via `DB_RUN_MIGRATIONS=true` (accepted for single instance).
 
 ## References
 
