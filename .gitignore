@@ -57,3 +57,20 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 *.crt
 *.key
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# local-only backend config + runtime secrets rendered on the server
+infra/**/backend.hcl
+app.env

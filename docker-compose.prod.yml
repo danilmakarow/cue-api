@@ -1,0 +1,60 @@
+# Runs on the app EC2. The image tag is injected via CUE_IMAGE; runtime config comes
+# from /opt/cue/app.env (rendered from SSM Parameter Store by deploy/deploy.sh).
+# Started by deploy/deploy.sh, which is invoked through SSM Run Command.
+
+services:
+  api:
+    image: ${CUE_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /opt/cue/app.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose:
+      - "3000" # internal only — only Caddy reaches it
+    networks: [cue]
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+    networks: [cue]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      - CADDY_DOMAIN=${CUE_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/cue/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/cue/origin:/etc/caddy/origin:ro # Cloudflare origin cert.pem + key.pem
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [cue]
+
+networks:
+  cue:
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:
