@@ -294,7 +294,7 @@ export class ContextBuilderService {
       .join('\n\n');
 
     const messages: PromptBlock[] = [
-      ...priorWindow.map(ContextBuilderService.toPromptBlock),
+      ...priorWindow.map((entry) => ContextBuilderService.toPromptBlock(entry)),
       { role: PromptRole.USER, content: finalUserContent },
     ];
 

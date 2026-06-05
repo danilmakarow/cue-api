@@ -462,7 +462,10 @@ export class AssistantService {
     await this.vendor.acknowledgeCallback(params.callbackId);
 
     const conversation = await this.getOrCreateConversation(user.id);
-    const [action, token] = params.callbackData.split(':');
+    const [action, token] = params.callbackData.split(':') as [
+      ConflictCallbackAction,
+      string,
+    ];
 
     if (!token) {
       return;

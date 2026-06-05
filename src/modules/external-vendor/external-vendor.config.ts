@@ -43,7 +43,7 @@ export class ExternalVendorConfig {
     }
 
     const known = Object.values(ExternalVendor).find(
-      (vendor) => vendor === raw,
+      (vendor) => (vendor as string) === raw,
     );
 
     return known;

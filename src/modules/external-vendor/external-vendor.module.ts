@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
-import { ExternalVendorConnector } from './external-vendor-connector.abstract';
 import { ExternalVendorConnectorFactory } from './external-vendor-connector.factory';
 import { ExternalVendorConfig } from './external-vendor.config';
 import { TelegramVendorConnector } from './telegram/telegram-vendor.connector';
