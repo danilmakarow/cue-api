@@ -1,9 +1,79 @@
 # Deployment & CI/CD
 
-- **Status**: Draft
-- **Last updated**: 2026-06-05
+- **Status**: In progress — Phases 0–1 & 4 built; **Phase 2 active**
+- **Last updated**: 2026-06-06
 - **Owner**: Danil Makarov
 - **Related ADRs**: [0008](../adr/0008-iac-terraform-github-actions-ec2.md)
+
+## Implementation tracker
+
+> Living status for the deployment build. The design rationale is in the sections below
+> and in [ADR 0008](../adr/0008-iac-terraform-github-actions-ec2.md); this section tracks
+> **what's done, what's decided, and notes from execution.**
+>
+> Branch `infra/deployment-cicd` · Region `eu-north-1`
+
+### Status at a glance
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 · State bootstrap | S3 state bucket (native lock) | 📝 committed · ⏳ not applied |
+| 1 · Image + ECR | multi-stage Dockerfile, ECR repo | ✅ verified locally · ⏳ ECR not applied |
+| 2 · Compute + DB | EC2, EIP, SGs, IAM, SSM, new `cue` DB | 🔄 **active — planning** |
+| 3 · Edge | DNS, TLS, WAF, origin lockdown | ⛔ blocked — edge fork (Route53 vs Cloudflare) |
+| 4 · CI | `ci.yml` + `_quality.yml` | ✅ done & verified (green) |
+| 5 · CD | `deploy.yml` (OIDC → ECR → SSM) | ⏳ needs Phase 2 outputs |
+
+Legend: ✅ done · 🔄 in progress · 📝 written, not applied · ⏳ waiting · ⛔ blocked
+
+### Decision log
+
+| Date | Decision | Why |
+|---|---|---|
+| 06-05 | IaC = **Terraform** | Transferable skill; best at adopting existing infra; one tool for AWS + edge |
+| 06-05 | Runners = **GitHub-hosted + OIDC** | Zero-ops, keyless; frees the 2 manual runner EC2s |
+| 06-05 | Delivery = **Docker → ECR**, EC2 pulls via **SSM Run Command** | Immutable artifacts, exact rollbacks, no inbound SSH |
+| 06-05 | Existing RDS/VPC **referenced read-only**, not imported | Live DB never in Terraform's blast radius |
+| 06-05 | App host = **fresh EC2** (t3.small, AL2023) | Consistent with "manage only new" |
+| 06-05 | DB = **new `cue` database** on the existing RDS | Reuse the instance; isolated from other DBs |
+| 06-05 | Redis = **external managed (SaaS)**, direct connection | No sidecar; the app already consumes Redis |
+| 06-05 | Build = **`nest build && tsc-alias`**, exclude `bin/` (flat `dist/main.js`) | `@/` aliases resolve at runtime; fixes `start:prod` |
+| 06-05 | Migrations = **on boot** (`DB_RUN_MIGRATIONS=true`) | Simple & correct for a single instance |
+| 06-05 | CI lint gate green via **test-file rule scoping** | Cleared 64 pre-existing problems → 0 errors |
+| 06-06 | Region **eu-north-1**; domain `api.cue.makarov.app` in **Route53** | Provided by owner |
+| 06-06 | Edge = **PENDING** — Cloudflare via Route53 subdomain delegation, or Route53-native | Decided at Phase 3; only affects the EC2 `:443` ingress |
+
+### Phase 2 — Compute & DB wiring  🔄 active
+
+**Goal:** a running Dockerized EC2 in the VPC that reaches a new `cue` database — **no public
+traffic yet** (that lands in Phase 3).
+
+**Context**
+- Reuse the existing RDS (referenced read-only); the only change to it is one additive
+  ingress rule on its security group.
+- Public `:443` ingress is **deferred to Phase 3** (depends on the edge decision), so
+  nothing is publicly exposed in Phase 2.
+
+**Steps / checklist**
+- [ ] Read-only discovery (`describe-*`): VPC, public/private subnets, RDS endpoint+port+SG+engine, Route53 zone
+- [ ] Apply Phase 0 bootstrap (state bucket) + wire `backend.hcl`
+- [ ] `data.tf` — existing VPC / subnets / RDS / RDS SG (read-only)
+- [ ] `security.tf` — app SG (egress 5432→RDS, 443→internet; no SSH) + RDS-SG ingress from app SG
+- [ ] `ec2.tf` + `eip.tf` — EC2 (AL2023, t3.small) + user_data (docker/compose/`/opt/cue`) + Elastic IP
+- [ ] `iam.tf` — instance role: ECR pull, SSM core, SSM-Param read `/cue/production/*`, CloudWatch logs
+- [ ] `ssm.tf` — `/cue/production/*` params (config + SecureString secrets)
+- [ ] `terraform plan` → **owner review** → `apply`
+- [ ] Create `cue` DB + `cue_app` role on RDS (via SSM session) → store creds in SSM
+- [ ] Checkpoint: SSM in, `docker compose up`, `/health` ok against RDS + Redis SaaS
+
+**Open items (need input)**
+- RDS **master credentials** to create the `cue` DB (or owner runs the SQL and shares `cue_app` creds)
+- **App secrets** for SSM (JWT, Apple, Telegram, Anthropic, OpenAI, model IDs, Redis SaaS host/port/password/db) — paste, or create placeholders and fill in the console
+- Confirm **t3.small** (~$15/mo)
+- Edge fork (Route53 vs Cloudflare) — parked for Phase 3
+
+**Implementation notes**
+- _(filled during execution: discovered VPC/subnet/SG ids, AMI, plan highlights, gotchas…)_
 
 ## Context
 
@@ -183,9 +253,10 @@ in Terraform's blast radius.
 
 ## Open questions
 
-- [ ] **AWS facts**: region, VPC id, a public subnet id, RDS instance id + endpoint, RDS
-      security-group id.
-- [ ] **Cloudflare**: zone/domain, the API hostname (e.g. `api.cue.example`), API token.
+- [ ] **AWS facts** (Phase 2 discovery): VPC id, a public subnet id, RDS instance id +
+      endpoint, RDS security-group id. _(Region `eu-north-1` provided.)_
+- [ ] **Edge** (Phase 3): keep Cloudflare via Route53 subdomain delegation, or go
+      Route53-native? `api.cue.makarov.app` is in Route53. Determines the EC2 `:443` ingress.
 
 ### Resolved
 
