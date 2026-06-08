@@ -1,0 +1,41 @@
+# Non-secret runtime config only. Secrets (DB_PASSWORD, JWT_SECRET, *_API_KEY,
+# TELEGRAM_*, REDIS_PASSWORD) are NOT managed here — they're seeded out-of-band by
+# seed-secrets.sh so they never enter git or Terraform state. The instance role can read
+# both these and the secrets (path-scoped grant in iam.tf); deploy.sh reads the whole path.
+locals {
+  app_config = {
+    NODE_ENV = "production"
+    PORT     = "3000"
+
+    DB_HOST             = data.aws_db_instance.cue.address
+    DB_PORT             = "5432"
+    DB_USERNAME         = "cue_app"
+    DB_DATABASE         = "cue"
+    DB_SYNCHRONIZE      = "false"
+    DB_RUN_MIGRATIONS   = "true"
+    DB_LOGGING          = "false"
+    DB_DISABLE_SSL_AUTH = "false"
+
+    REDIS_HOST = var.redis_host
+    REDIS_PORT = tostring(var.redis_port)
+    REDIS_DB   = var.redis_db
+
+    EXTERNAL_VENDOR   = "telegram"
+    TELEGRAM_API_BASE = "https://api.telegram.org"
+    APPLE_CLIENT_ID   = var.apple_client_id
+
+    ASSISTANT_AI_PROVIDER      = "anthropic"
+    ASSISTANT_MODEL_MAIN       = var.assistant_model_main
+    ASSISTANT_MODEL_BACKGROUND = var.assistant_model_background
+    STT_PROVIDER               = "openai"
+    STT_MODEL                  = var.stt_model
+  }
+}
+
+resource "aws_ssm_parameter" "config" {
+  for_each = local.app_config
+
+  name  = "/${var.project}/production/${each.key}"
+  type  = "String"
+  value = each.value
+}

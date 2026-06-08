@@ -1,0 +1,21 @@
+# Keep the build context small and free of secrets.
+node_modules
+dist
+.git
+.github
+.env
+.env.*
+!.env.example
+*.log
+coverage
+.review
+docs
+test
+infra
+deploy
+bin
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
+Caddyfile

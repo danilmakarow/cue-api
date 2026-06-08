@@ -282,6 +282,7 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
    * Parses the enqueued raw update and normalizes it into a
    * {@link NormalizedInboundMessage}, or `null` for updates we ignore.
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- contract requires Promise<>; Telegram normalization is synchronous
   async handleWebhook(
     job: WebhookJob,
   ): Promise<NormalizedInboundMessage | null> {

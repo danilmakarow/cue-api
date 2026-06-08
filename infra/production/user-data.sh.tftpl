@@ -1,0 +1,35 @@
+#!/bin/bash
+# Bootstraps the cue-api host: Docker + Compose + AWS CLI, and lays down /opt/cue.
+# Runs once at first boot. Output: /var/log/cue-userdata.log
+set -euxo pipefail
+exec > /var/log/cue-userdata.log 2>&1
+
+# --- Docker ---
+dnf -y install docker
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# --- Docker Compose v2 plugin ---
+mkdir -p /usr/libexec/docker/cli-plugins
+curl -sSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+  -o /usr/libexec/docker/cli-plugins/docker-compose
+chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+
+# --- AWS CLI v2 ---
+dnf -y install unzip
+curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+
+# --- App files (base64-decoded from the repo) ---
+mkdir -p /opt/cue/origin
+echo "${compose_b64}" | base64 -d > /opt/cue/docker-compose.prod.yml
+echo "${caddy_b64}"   | base64 -d > /opt/cue/Caddyfile
+echo "${deploy_b64}"  | base64 -d > /opt/cue/deploy.sh
+chmod +x /opt/cue/deploy.sh
+
+# --- Compose interpolation vars (docker compose auto-reads /opt/cue/.env) ---
+# CUE_DOMAIN feeds the Caddy site address; CUE_IMAGE is exported by deploy.sh at deploy time.
+printf 'CUE_DOMAIN=%s\n' "${api_hostname}" > /opt/cue/.env
+
+echo "cue-api host bootstrap complete"

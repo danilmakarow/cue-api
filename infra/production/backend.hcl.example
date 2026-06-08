@@ -1,0 +1,4 @@
+# Copy to backend.hcl (gitignored) and fill in, then:
+#   terraform init -backend-config=backend.hcl
+bucket = "cue-tfstate-<unique>"
+region = "<region>"

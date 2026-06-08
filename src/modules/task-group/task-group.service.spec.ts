@@ -400,7 +400,10 @@ describe('TaskGroupService', () => {
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({ ...group, defaultRecurrenceRuleId: 'rule-1' });
+      groupDb.findOne.mockResolvedValue({
+        ...group,
+        defaultRecurrenceRuleId: 'rule-1',
+      });
 
       const service = new TaskGroupService(
         groupDb as never,
@@ -424,7 +427,10 @@ describe('TaskGroupService', () => {
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({ ...group, defaultRecurrenceRuleId: null });
+      groupDb.findOne.mockResolvedValue({
+        ...group,
+        defaultRecurrenceRuleId: null,
+      });
 
       const service = new TaskGroupService(
         groupDb as never,

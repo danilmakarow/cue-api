@@ -1,0 +1,15 @@
+# Cloudflare terminates client TLS and re-encrypts to the origin (SSL = Full Strict).
+# Caddy serves the Cloudflare Origin CA certificate on 443 and proxies to the app.
+{
+	admin off
+	auto_https off
+}
+
+{$CADDY_DOMAIN} {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+
+	encode zstd gzip
+	reverse_proxy api:3000
+
+	header -Server
+}

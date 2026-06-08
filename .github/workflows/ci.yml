@@ -1,0 +1,19 @@
+# Continuous integration — runs the quality gate on every pull request.
+# Pushes to master are handled by deploy.yml, which runs the same quality job
+# before deploying, so the checks gate both merge and release.
+name: ci
+
+on:
+  pull_request:
+  # To also run on direct pushes to feature branches (no PR yet), add:
+  #   push:
+  #     branches-ignore: [master]
+
+# Keep one in-flight run per branch; a new push cancels the previous run.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml

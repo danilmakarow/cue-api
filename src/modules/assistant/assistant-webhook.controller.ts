@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { InjectQueue } from '@nestjs/bullmq';
 import {
@@ -9,6 +9,7 @@ import {
   Headers,
   HttpCode,
   Ip,
+  Logger,
   Post,
   UnauthorizedException,
   UseGuards,
@@ -40,6 +41,8 @@ type InboundHeaders = Record<string, string | string[] | undefined>;
  */
 @Controller('assistant')
 export class AssistantWebhookController {
+  private readonly logger = new Logger(AssistantWebhookController.name);
+
   constructor(
     private readonly vendorFactory: ExternalVendorConnectorFactory,
     @InjectQueue(WEBHOOK_QUEUE_NAME)
@@ -89,16 +92,22 @@ export class AssistantWebhookController {
       throw new UnauthorizedException('Invalid webhook signature');
     }
 
+    const correlationId = randomUUID();
     const job: WebhookQueueJob = {
       vendor: connector.vendor,
       ip: ip ?? '',
       headers,
       body: bodyString,
       receivedAt: new Date().toISOString(),
+      correlationId,
     };
     const jobId = createHash('sha256').update(bodyString).digest('hex');
 
     await this.webhookQueue.add('inbound', job, { jobId });
+
+    this.logger.log(
+      `[cid=${correlationId}] enqueued ${connector.vendor} update jobId=${jobId.slice(0, 12)}`,
+    );
 
     return { ok: true };
   }

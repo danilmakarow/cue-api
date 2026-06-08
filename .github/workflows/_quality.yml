@@ -1,0 +1,36 @@
+# Reusable quality gate: install, lint, type-check, unit tests.
+# Defined once and called by ci.yml (PRs) and deploy.yml (master), so the checks
+# can never drift between "check before merge" and "check before deploy".
+name: quality
+
+on:
+  workflow_call:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm must be set up before setup-node so its cache can find the store.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint (ESLint, incl. Prettier)
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm type
+
+      - name: Unit tests
+        run: pnpm test
+      # Unit tests mock their dependencies — no database/Redis needed. When integration
+      # tests land (test:e2e), add a `services:` Postgres here and point DB_* at it.

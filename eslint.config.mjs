@@ -33,7 +33,14 @@ export default defineConfig(
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
       '@typescript-eslint/no-floating-promises': 'warn',
-      '@typescript-eslint/no-unused-vars': 'warn',
+      '@typescript-eslint/no-unused-vars': [
+        'warn',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
       '@typescript-eslint/no-unsafe-argument': 'warn',
       'lines-between-class-members': 'error',
     },
@@ -76,6 +83,18 @@ export default defineConfig(
         },
         { blankLine: 'any', prev: 'expression', next: 'expression' },
       ],
+    },
+  },
+  {
+    // Test files lean on jest mocks (bare method refs), async mock fns, and
+    // loosely typed fixtures — relax the type-safety rules that only fire on
+    // that style. Formatting and import rules stay on.
+    files: ['**/*.spec.ts', 'test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
     },
   },
 );

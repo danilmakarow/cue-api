@@ -86,10 +86,15 @@ export class ToolDispatcherService {
    * human-readable issue messages so the model can correct the offending input
    * rather than parsing raw Zod JSON.
    */
-  private toErrorOutcome(error: unknown): ToolDispatchOutcome {
+  private toErrorOutcome(
+    error: unknown,
+    correlationId?: string,
+  ): ToolDispatchOutcome {
     const message = this.describeError(error);
 
-    this.logger.warn(`Tool dispatch failed: ${message}`);
+    this.logger.warn(
+      `[cid=${correlationId ?? 'none'}] Tool dispatch failed: ${message}`,
+    );
 
     return { content: `Error: ${message}`, isError: true };
   }
@@ -852,7 +857,7 @@ export class ToolDispatcherService {
           };
       }
     } catch (error) {
-      return this.toErrorOutcome(error);
+      return this.toErrorOutcome(error, context.correlationId);
     }
   }
 }
