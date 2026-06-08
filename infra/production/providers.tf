@@ -10,8 +10,8 @@ provider "aws" {
   }
 }
 
-# Configured but unused until Phase 3 (edge). The token is only required when Cloudflare
-# resources are added; an empty value is fine for the Phase 1 ECR-only apply.
+# Cloudflare manages the Phase 3 edge (zone, DNS, TLS, rate-limit). Supply the API token
+# out-of-band via TF_VAR_cloudflare_api_token (env) — never in git or state.
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
