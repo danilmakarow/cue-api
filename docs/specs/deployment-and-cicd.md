@@ -1,6 +1,6 @@
 # Deployment & CI/CD
 
-- **Status**: In progress — Phases 0–2 & 4 applied; **Phase 3 edge in progress** (apex `makarov.my` on Cloudflare)
+- **Status**: In progress — **Phases 0–4 applied**; edge live (pending origin cert + app image); **Phase 5 (CD) is next**
 - **Last updated**: 2026-06-08
 - **Owner**: Danil Makarov
 - **Related ADRs**: [0008](../adr/0008-iac-terraform-github-actions-ec2.md)
@@ -20,9 +20,9 @@
 | 0 · State bootstrap | S3 state bucket (native lock) | ✅ applied |
 | 1 · Image + ECR | multi-stage Dockerfile, ECR repo | ✅ applied (ECR live) |
 | 2 · Compute + DB | EC2, EIP, SGs, IAM, SSM, new `cue` DB | ✅ applied · ⏳ owner: create `cue` DB + seed secrets |
-| 3 · Edge | DNS, TLS, rate-limit, origin lockdown | 🔄 SG rules applied; Cloudflare apex pending |
+| 3 · Edge | DNS, TLS, rate-limit, origin lockdown | ✅ applied · ⏳ owner: install origin cert |
 | 4 · CI | `ci.yml` + `_quality.yml` | ✅ done & verified (green) |
-| 5 · CD | `deploy.yml` (OIDC → ECR → SSM) | ⏳ needs Phase 2 outputs |
+| 5 · CD | `deploy.yml` (OIDC → ECR → SSM) | ⏳ **next** — Phase 2/3 outputs ready |
 
 Legend: ✅ done · 🔄 in progress · 📝 written, not applied · ⏳ waiting · ⛔ blocked
 
@@ -88,7 +88,7 @@ _Discovery — 2026-06-06 (account `540607980315`, eu-north-1):_
 
 _Phase 2 Terraform written — 2026-06-06, uncommitted:_ `data.tf`, `security.tf`, `iam.tf`, `ec2.tf`, `eip.tf`, `ssm.tf` (+ `user-data.sh.tftpl`, `seed-secrets.sh`); `variables.tf` defaults set to discovered ids. Apply sequence: bootstrap → `terraform apply` production (owner reviews plan) → `./seed-secrets.sh` + create `cue` DB → checkpoint.
 
-### Phase 3 — Edge (Cloudflare)  🔄 in progress — SG rules applied; Cloudflare edge pending
+### Phase 3 — Edge (Cloudflare)  ✅ applied · ⏳ owner: install origin cert
 
 **Goal:** the API reachable over HTTPS at `cue-api.makarov.my`, fronted by Cloudflare
 (proxy, TLS, rate-limit), with the EC2 origin reachable **only** through Cloudflare.
@@ -131,8 +131,7 @@ need Advanced Certificate Manager (~$10/mo).
 - [x] `ec2.tf` + `user-data.sh.tftpl` — pass `api_hostname`; write `/opt/cue/.env` (`CUE_DOMAIN`)
 - [x] `variables.tf` — `edge_zone_name=makarov.my`, `api_hostname=cue-api.makarov.my`; `fmt`+`validate` clean
 - [x] Owner: `makarov.my` connected to Cloudflare + Spaceship nameservers set (done manually)
-- [ ] Owner: `terraform apply` — creates the A record + settings + rate-limit in the zone;
-      **recreates the empty EC2** (new user-data; the Elastic IP stays)
+- [x] Owner: `terraform apply` — A record + Full-Strict/HSTS settings + rate-limit created; EC2 recreated (EIP kept)
 - [ ] Owner: create a **Cloudflare Origin CA cert** (host `cue-api.makarov.my`), install at
       `/opt/cue/origin/{cert,key}.pem` via SSM (`chmod 600` the key)
 - [ ] Checkpoint: `curl https://cue-api.makarov.my/health` → 200 once the app image is deployed (Phase 5)
