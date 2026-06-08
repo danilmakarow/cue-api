@@ -1,6 +1,6 @@
 # Deployment & CI/CD
 
-- **Status**: In progress — **Phases 0–4 applied**; edge live (pending origin cert + app image); **Phase 5 (CD) is next**
+- **Status**: In progress — **Phases 0–4 applied; Phase 5 (CD) written** (`cicd.tf` + `deploy.yml`), pending `apply` + repo var + first push. Remaining: owner prereqs (origin cert · `cue` DB · secrets) → first green deploy
 - **Last updated**: 2026-06-08
 - **Owner**: Danil Makarov
 - **Related ADRs**: [0008](../adr/0008-iac-terraform-github-actions-ec2.md)
@@ -22,7 +22,7 @@
 | 2 · Compute + DB | EC2, EIP, SGs, IAM, SSM, new `cue` DB | ✅ applied · ⏳ owner: create `cue` DB + seed secrets |
 | 3 · Edge | DNS, TLS, rate-limit, origin lockdown | ✅ applied · ⏳ owner: install origin cert |
 | 4 · CI | `ci.yml` + `_quality.yml` | ✅ done & verified (green) |
-| 5 · CD | `deploy.yml` (OIDC → ECR → SSM) | ⏳ **next** — Phase 2/3 outputs ready |
+| 5 · CD | `cicd.tf` (OIDC role) + `deploy.yml` | 📝 written · ⏳ owner: `apply` + set `AWS_DEPLOY_ROLE_ARN` + push |
 
 Legend: ✅ done · 🔄 in progress · 📝 written, not applied · ⏳ waiting · ⛔ blocked
 
@@ -153,6 +153,55 @@ need Advanced Certificate Manager (~$10/mo).
   connected it in Cloudflare by hand. TF owns only the records/settings/ruleset inside it (and
   all of AWS). If you manually added a `cue-api` DNS record, delete it first so TF can create
   it without a conflict.
+
+### Phase 5 — Continuous delivery (CD)  📝 written, not applied
+
+**Goal:** every push to `master` ships itself — re-run the quality gate, build & push the
+image to ECR (tagged with the commit SHA), then run `deploy/deploy.sh` on the box via SSM Run
+Command. AWS auth is **keyless** (GitHub OIDC → a deploy role); no static keys anywhere. The
+first successful run also delivers the first image, so `GET /health` finally returns 200.
+
+**What Terraform manages** (`cicd.tf`)
+- `aws_iam_openid_connect_provider.github` — trusts `token.actions.githubusercontent.com`
+  (audience `sts.amazonaws.com`). AWS validates the provider cert against trusted CAs, so the
+  thumbprint is vestigial (kept only because the API still requires the field).
+- `aws_iam_role.deploy` (`cue-api-deploy`) — assumable **only** by `repo:danilmakarow/cue-api`
+  on the `production` environment or the `master` ref (`StringLike` on the OIDC `sub`).
+- Its inline policy — least-privilege: ECR auth + **push** to the `cue-api` repo only;
+  `ec2:DescribeInstances` (resolve the target by tag); `ssm:SendCommand` to the
+  `AWS-RunShellScript` document, **tag-scoped** to the `Name=cue-api` instance (survives
+  instance replacement); `ssm:GetCommandInvocation` to gate on the result. **No** secret/SSM
+  param read — that stays with the instance role (`iam.tf`).
+- `output.deploy_role_arn` — the role ARN to wire into GitHub (below).
+
+**The workflow** (`.github/workflows/deploy.yml`)
+- `on: push: branches: [master]`; `concurrency: deploy-production` (no cancel — never interrupt
+  an in-flight deploy); `permissions: id-token: write` on the deploy job (OIDC).
+- `quality` reuses `_quality.yml` (same gate as PR CI) and **gates** the deploy.
+- `deploy`: OIDC assume → `amazon-ecr-login` → `docker build && push :<sha>` → resolve the
+  instance by `Name=cue-api` → `aws ssm send-command` runs
+  `AWS_REGION=… ECR_REGISTRY=… /opt/cue/deploy.sh <sha>` → poll `GetCommandInvocation` until a
+  terminal status, print stdout/stderr, fail the job unless `Success`.
+- `environment: production` — optional **required-reviewer** gate, and it pins the OIDC subject.
+
+**Status / checklist**
+- [x] `cicd.tf` — OIDC provider + deploy role + least-privilege policy; `fmt`+`validate` clean
+- [x] `deploy.yml` — quality-gated build→push→SSM-deploy; valid YAML
+- [ ] Owner: `terraform apply` (adds 3 resources: OIDC provider, role, role policy)
+- [ ] Owner: set repo **variable** `AWS_DEPLOY_ROLE_ARN` = `terraform output -raw deploy_role_arn`
+- [ ] Owner (optional): Settings → Environments → **production** → required reviewers
+- [ ] **Prereqs to a green deploy** (Phase 2/3 owner items): `cue` DB + `cue_app` role created,
+      `./seed-secrets.sh` run, Cloudflare origin cert installed
+- [ ] Checkpoint: push to `master` → Actions deploy green → `curl https://cue-api.makarov.my/health` → 200
+
+**Notes**
+- If the AWS account **already** has a GitHub OIDC provider, `apply` errors with
+  `EntityAlreadyExists` — `terraform import aws_iam_openid_connect_provider.github <arn>` once,
+  then re-apply.
+- The role ARN is **not** a secret (account-identifying only), so it's a repo *variable*, not a
+  secret. OIDC means no AWS keys are ever stored in GitHub.
+- Rollback = re-run the workflow at the previous green SHA (immutable ECR tags make it exact),
+  or **Re-run jobs** on that run.
 
 ## Context
 

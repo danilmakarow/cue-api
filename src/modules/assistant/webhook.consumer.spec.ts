@@ -28,6 +28,7 @@ const buildJob = (body: string): Job<WebhookQueueJob> =>
       headers: {},
       body,
       receivedAt: '2026-06-01T00:00:00.000Z',
+      correlationId: 'cid-1',
     },
   }) as Job<WebhookQueueJob>;
 
@@ -220,7 +221,10 @@ describe('WebhookConsumer', () => {
 
     expect(harness.assistantService.handleText).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'user-1' }),
-      expect.objectContaining({ text: 'what is on tomorrow?' }),
+      expect.objectContaining({
+        text: 'what is on tomorrow?',
+        correlationId: 'cid-1',
+      }),
     );
   });
 
@@ -239,7 +243,7 @@ describe('WebhookConsumer', () => {
 
     expect(harness.assistantService.handleCommand).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'user-1' }),
-      expect.objectContaining({ command: 'today' }),
+      expect.objectContaining({ command: 'today', correlationId: 'cid-1' }),
     );
   });
 

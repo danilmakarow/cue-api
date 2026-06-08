@@ -466,6 +466,7 @@ export class AnthropicAiConnector extends AiConnector {
     const modelRole = request.modelRole ?? AiModelRole.BACKGROUND;
     const message =
       `Anthropic request failed: operation=${operation} ` +
+      `traceId=${request.traceId ?? 'none'} ` +
       `model=${this.config.getModelId(modelRole)} modelRole=${modelRole} ` +
       `promptCaching=${request.features?.promptCaching === true} ` +
       `contextEditing=${request.features?.contextEditing === true} ` +

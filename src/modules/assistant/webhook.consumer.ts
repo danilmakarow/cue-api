@@ -126,12 +126,14 @@ export class WebhookConsumer extends WorkerHost {
     user: User,
     connector: ReturnType<ExternalVendorConnectorFactory['get']>,
     normalized: NormalizedInboundMessage,
+    correlationId: string,
   ): Promise<void> {
     if (normalized.kind === InboundKind.Command && normalized.command) {
       await this.assistantService.handleCommand(user, {
         command: normalized.command,
         args: normalized.commandArgs ?? [],
         vendorChatId: normalized.vendorChatId,
+        correlationId,
       });
 
       return;
@@ -142,6 +144,7 @@ export class WebhookConsumer extends WorkerHost {
         callbackId: normalized.callbackId,
         callbackData: normalized.callbackData ?? '',
         vendorChatId: normalized.vendorChatId,
+        correlationId,
       });
 
       return;
@@ -159,6 +162,7 @@ export class WebhookConsumer extends WorkerHost {
         contentType: ConversationMessageContentType.VOICE_TRANSCRIPT,
         vendorChatId: normalized.vendorChatId,
         vendorMessageId: null,
+        correlationId,
       });
 
       return;
@@ -170,6 +174,7 @@ export class WebhookConsumer extends WorkerHost {
         contentType: ConversationMessageContentType.TEXT,
         vendorChatId: normalized.vendorChatId,
         vendorMessageId: null,
+        correlationId,
       });
     }
   }
@@ -180,6 +185,7 @@ export class WebhookConsumer extends WorkerHost {
    */
   async process(job: Job<WebhookQueueJob>): Promise<void> {
     const data = job.data;
+    const correlationId = data.correlationId;
     const connector = this.vendorFactory.get(data.vendor);
 
     const normalized = await connector.handleWebhook({
@@ -195,7 +201,7 @@ export class WebhookConsumer extends WorkerHost {
 
     if (!acquired) {
       this.logger.debug(
-        `Dropping duplicate update ${data.vendor}:${normalized.dedupeId}`,
+        `[cid=${correlationId}] Dropping duplicate update ${data.vendor}:${normalized.dedupeId}`,
       );
 
       return;
@@ -226,13 +232,13 @@ export class WebhookConsumer extends WorkerHost {
 
       if (!user) {
         this.logger.warn(
-          `TelegramLink ${link.id} points at missing user ${link.userId}`,
+          `[cid=${correlationId}] TelegramLink ${link.id} points at missing user ${link.userId}`,
         );
 
         return;
       }
 
-      await this.routeForUser(user, connector, normalized);
+      await this.routeForUser(user, connector, normalized, correlationId);
     } catch (error) {
       await this.redis.del(dedupeKey(data.vendor, normalized.dedupeId));
 
@@ -247,9 +253,9 @@ export class WebhookConsumer extends WorkerHost {
   @OnWorkerEvent('failed')
   onFailed(job: Job<WebhookQueueJob> | undefined, error: Error): void {
     this.logger.error(
-      `Webhook job ${job?.id ?? 'unknown'} failed (attempt ${
-        job?.attemptsMade ?? 0
-      }): ${error.message}`,
+      `[cid=${job?.data?.correlationId ?? 'unknown'}] Webhook job ${
+        job?.id ?? 'unknown'
+      } failed (attempt ${job?.attemptsMade ?? 0}): ${error.message}`,
     );
   }
 }

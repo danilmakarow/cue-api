@@ -23,6 +23,12 @@ export enum ConversationMessageContentType {
   TEXT = 'text',
   VOICE_TRANSCRIPT = 'voice_transcript',
   COMMAND_RESULT = 'command_result',
+  /**
+   * A persisted tool-loop round (`role = tool`): the model's tool calls and the
+   * dispatched results for one round, kept in `toolPayload` as an audit trail.
+   * Excluded from the verbatim prompt window by the recent-window query.
+   */
+  TOOL_STEP = 'tool_step',
 }
 
 /**

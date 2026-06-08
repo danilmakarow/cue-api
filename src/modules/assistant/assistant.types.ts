@@ -32,6 +32,8 @@ export interface ToolDispatchContext {
   userId: string;
   user: User;
   handleMap?: HandleMap;
+  /** Turn correlation id, so a tool-dispatch failure log is greppable by turn. */
+  correlationId?: string;
 }
 
 /**
@@ -49,6 +51,12 @@ export interface WebhookQueueJob {
   body: string;
   /** ISO timestamp of when the webhook was received in the request path. */
   receivedAt: string;
+  /**
+   * Correlation id minted in the request path and threaded controller → queue →
+   * consumer → orchestrator, so every log line and persisted tool trace for one
+   * update shares a single greppable id.
+   */
+  correlationId: string;
 }
 
 /**
@@ -106,10 +114,51 @@ export type HeldWriteAction =
       endAt: string | null;
     };
 
+/**
+ * A batch of held writes stashed in Redis under one callback token. A single
+ * turn can produce several conflicting writes (e.g. seven lessons where two
+ * overlap); they are confirmed/cancelled together by one button tap rather than
+ * abandoning the rest. The shared `vendorChatId` is injected when the batch is
+ * stored; `userId` owns every action.
+ */
+export interface HeldConflictBatch {
+  userId: string;
+  vendorChatId: string;
+  actions: HeldWriteAction[];
+}
+
 /** Callback-data verbs sent on inline keyboard buttons for held conflicts. */
 export enum ConflictCallbackAction {
   CONFIRM = 'confirm',
   CANCEL = 'cancel',
+}
+
+/**
+ * One persisted tool-loop step inside a {@link ToolRoundAuditPayload}: the tool
+ * the model called, its arguments, the result text fed back, and whether that
+ * result was an error or a held (awaiting-confirmation) write. Stored verbatim
+ * in `ConversationMessage.toolPayload` for the audit trail.
+ */
+export interface ToolStepRecord {
+  name: string;
+  input: Record<string, unknown>;
+  resultContent: string;
+  isError: boolean;
+  held: boolean;
+}
+
+/**
+ * The structured `toolPayload` of one persisted `role = tool` message: a whole
+ * tool-loop round — the model's stop reason, any text it produced alongside the
+ * calls, and one {@link ToolStepRecord} per dispatched tool. Makes "what did the
+ * assistant actually do on turn X" a single SQL query against `toolPayload`.
+ */
+export interface ToolRoundAuditPayload {
+  correlationId: string;
+  round: number;
+  stopReason: string;
+  assistantText: string | null;
+  steps: ToolStepRecord[];
 }
 
 /**

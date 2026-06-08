@@ -142,6 +142,12 @@ export interface CompletionRequest {
   toolRounds?: ToolRound[];
   maxTokens?: number;
   features?: AiFeatureFlags;
+  /**
+   * Opaque correlation id for this user turn, threaded controller → queue →
+   * loop. Logged (never sent to the provider) so a failed round-trip can be tied
+   * back to the originating update.
+   */
+  traceId?: string;
 }
 
 /**

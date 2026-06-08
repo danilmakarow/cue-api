@@ -439,7 +439,13 @@ describe('AssistantService (orchestrator)', () => {
       },
     };
 
-    harness.redis.getdel.mockResolvedValue(JSON.stringify(held));
+    harness.redis.getdel.mockResolvedValue(
+      JSON.stringify({
+        userId: held.userId,
+        vendorChatId: held.vendorChatId,
+        actions: [held.action],
+      }),
+    );
     harness.taskService.create.mockResolvedValue({
       id: 't-1',
       title: 'Dentist',
@@ -467,12 +473,14 @@ describe('AssistantService (orchestrator)', () => {
       JSON.stringify({
         userId: USER.id,
         vendorChatId: CHAT_ID,
-        action: {
-          kind: 'update_event',
-          taskId: 't-1',
-          startAt: 'a',
-          endAt: null,
-        },
+        actions: [
+          {
+            kind: 'update_event',
+            taskId: 't-1',
+            startAt: 'a',
+            endAt: null,
+          },
+        ],
       }),
     );
 
@@ -509,5 +517,250 @@ describe('AssistantService (orchestrator)', () => {
       assistantReplies(harness.conversationMessageDatabaseService),
     ).toHaveLength(0);
     expect(harness.summarizer.maybeSummarize).not.toHaveBeenCalled();
+  });
+
+  it('does NOT abort the batch on the first held conflict — commits the rest and holds all conflicts together', async () => {
+    const harness = buildHarness();
+    const heldWrite: HeldConflictWrite = {
+      userId: USER.id,
+      vendorChatId: '',
+      action: {
+        kind: 'create_event',
+        calendarId: 'cal-1',
+        title: 'Lesson 2',
+        startAt: '2026-06-13T08:00:00Z',
+        endAt: '2026-06-13T11:00:00Z',
+        timezone: 'UTC',
+        notes: null,
+      },
+    };
+
+    // One round emitting three create_task calls; the middle one conflicts.
+    harness.ai.complete.mockResolvedValueOnce(
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('create_task', { title: 'Lesson 1' }),
+          toolCall('create_task', { title: 'Lesson 2' }),
+          toolCall('create_task', { title: 'Lesson 3' }),
+        ],
+      }),
+    );
+    harness.toolDispatcher.dispatch
+      .mockResolvedValueOnce({ content: 'Created "Lesson 1".' })
+      .mockResolvedValueOnce({
+        content: 'held',
+        heldConflict: {
+          promptText: 'That overlaps with Tennis. Book anyway?',
+          write: heldWrite,
+        },
+      })
+      .mockResolvedValueOnce({ content: 'Created "Lesson 3".' });
+
+    await harness.service.handleText(USER, {
+      text: 'create three lessons',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+    });
+
+    // All three calls were dispatched — the conflict did not short-circuit.
+    expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(3);
+    // The model was not re-invoked to resolve the conflict.
+    expect(harness.ai.complete).toHaveBeenCalledTimes(1);
+    // One held write stashed, with the 2 committed writes reported in the prompt.
+    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
+
+    const [, actions] = harness.vendor.sendActions.mock.calls[0];
+
+    expect(actions.text).toMatch(/saved 2 changes/i);
+    expect(actions.buttons[0][0].label).toMatch(/book anyway/i);
+
+    const [, payload] = harness.redis.set.mock.calls[0];
+
+    expect(JSON.parse(payload).actions).toHaveLength(1);
+  });
+
+  it('refuses to confirm a mutation the model only narrated (no write committed)', async () => {
+    const harness = buildHarness();
+
+    // The model ends its turn claiming it created events but calls no tool.
+    harness.ai.complete.mockResolvedValueOnce(
+      completion({
+        stopReason: AiStopReason.END_TURN,
+        text: 'Создаю все семь в группе Driving Lessons.',
+      }),
+    );
+
+    await harness.service.handleText(USER, {
+      text: 'create the seven lessons',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+    });
+
+    expect(harness.toolDispatcher.dispatch).not.toHaveBeenCalled();
+
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+
+    // The false success is replaced with an honest "nothing changed" reply.
+    expect(reply.text).not.toMatch(/Создаю/);
+    expect(reply.text).toMatch(/nothing was changed|didn't .* save/i);
+    // And the corrected text is what gets persisted, not the model's claim.
+    expect(
+      assistantReplies(harness.conversationMessageDatabaseService),
+    ).toEqual([expect.stringMatching(/nothing was changed|didn't .* save/i)]);
+  });
+
+  it('keeps a genuine success reply when a write actually committed', async () => {
+    const harness = buildHarness();
+
+    harness.ai.complete
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.TOOL_USE,
+          toolCalls: [toolCall('create_task', { title: 'Lesson' })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Created your lesson.',
+        }),
+      );
+    harness.toolDispatcher.dispatch.mockResolvedValue({
+      content: 'Created "Lesson".',
+    });
+
+    await harness.service.handleText(USER, {
+      text: 'create a lesson',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+    });
+
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+
+    expect(reply.text).toBe('Created your lesson.');
+  });
+
+  it('overrides a success claim when a write was attempted but errored (no veto)', async () => {
+    const harness = buildHarness();
+
+    harness.ai.complete
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.TOOL_USE,
+          toolCalls: [toolCall('create_task', { title: 'Lesson' })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'All done — I added your lesson.',
+        }),
+      );
+    // The write was ATTEMPTED but failed.
+    harness.toolDispatcher.dispatch.mockResolvedValue({
+      content: 'Error: invalid time',
+      isError: true,
+    });
+
+    await harness.service.handleText(USER, {
+      text: 'create a lesson',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+    });
+
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+
+    expect(reply.text).not.toMatch(/added your lesson/i);
+    expect(reply.text).toMatch(/nothing was changed|didn't .* save/i);
+  });
+
+  it('keeps an HONEST failure reply (negation veto) even when the write errored', async () => {
+    const harness = buildHarness();
+
+    harness.ai.complete
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.TOOL_USE,
+          toolCalls: [toolCall('create_task', { title: 'Lesson' })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: "I couldn't add that — the time was invalid.",
+        }),
+      );
+    harness.toolDispatcher.dispatch.mockResolvedValue({
+      content: 'Error: invalid time',
+      isError: true,
+    });
+
+    await harness.service.handleText(USER, {
+      text: 'create a lesson',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+    });
+
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+
+    // The model already told the truth — do not clobber it.
+    expect(reply.text).toBe("I couldn't add that — the time was invalid.");
+  });
+
+  it('applies what it can and reports failures when one held action throws (no rethrow, no retry)', async () => {
+    const harness = buildHarness();
+
+    harness.redis.getdel.mockResolvedValue(
+      JSON.stringify({
+        userId: USER.id,
+        vendorChatId: CHAT_ID,
+        actions: [
+          {
+            kind: 'create_event',
+            calendarId: 'cal-1',
+            title: 'Lesson A',
+            startAt: '2026-06-13T08:00:00Z',
+            endAt: '2026-06-13T11:00:00Z',
+            timezone: 'UTC',
+            notes: null,
+          },
+          {
+            kind: 'create_event',
+            calendarId: 'cal-1',
+            title: 'Lesson B',
+            startAt: '2026-06-14T08:00:00Z',
+            endAt: '2026-06-14T11:00:00Z',
+            timezone: 'UTC',
+            notes: null,
+          },
+        ],
+      }),
+    );
+    harness.taskService.create
+      .mockResolvedValueOnce({ id: 't-a', title: 'Lesson A' })
+      .mockRejectedValueOnce(new Error('calendar gone'));
+
+    // Must not throw, so the BullMQ job never retries against the burned token.
+    await expect(
+      harness.service.handleCallback(USER, {
+        callbackId: 'cb-3',
+        callbackData: `${ConflictCallbackAction.CONFIRM}:token-3`,
+        vendorChatId: CHAT_ID,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(harness.taskService.create).toHaveBeenCalledTimes(2);
+
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+
+    // Honest partial result: what succeeded AND what to retry.
+    expect(reply.text).toMatch(/booked "Lesson A"/);
+    expect(reply.text).toMatch(/couldn't apply "Lesson B"/i);
   });
 });

@@ -34,6 +34,25 @@ export const SCHEDULE_FETCH_TOOLS: ReadonlySet<string> = new Set([
   ToolName.FIND_FREE_SLOTS,
 ]);
 
+/**
+ * Tools that actually persist a calendar mutation. The orchestrator counts a
+ * successful, non-held call to any of these as a committed write, so it can tell
+ * whether a turn that *claimed* to act actually changed anything (the
+ * "claimed-action but no write" guard) and report an accurate "saved N changes".
+ *
+ * Reads (`list_tasks`, `find_free_slots`, `list_groups`) are excluded — and so
+ * is `set_reminder`: its handler is a no-op stub today ("reminders coming soon")
+ * that writes nothing, so counting it would both mask a fabricated reminder
+ * claim and inflate the saved-changes count. Re-add it when reminders persist.
+ */
+export const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  ToolName.CREATE_TASK,
+  ToolName.UPDATE_TASK,
+  ToolName.COMPLETE_TASK,
+  ToolName.DELETE_TASK,
+  ToolName.CREATE_GROUP,
+]);
+
 /** The three recurring-edit scopes the model may pass on update / delete. */
 export const editScopeSchema = z.enum(['this', 'this_and_following', 'all']);
 
