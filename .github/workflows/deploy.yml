@@ -3,7 +3,9 @@
 # Run Command. Auth to AWS is keyless (GitHub OIDC → the cue-api-deploy role); no static keys.
 #
 # One-time setup (after `terraform apply` of Phase 5):
-#   - Repo variable AWS_DEPLOY_ROLE_ARN = terraform output deploy_role_arn
+#   - Repo variable AWS_DEPLOY_ROLE_ARN = the role ARN itself (run `terraform output -raw
+#     deploy_role_arn` and paste its OUTPUT, e.g. arn:aws:iam::<acct>:role/cue-api-deploy —
+#     not the command text)
 #   - (optional) Settings → Environments → production → required reviewers, to gate releases
 name: deploy
 

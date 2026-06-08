@@ -188,7 +188,7 @@ first successful run also delivers the first image, so `GET /health` finally ret
 - [x] `cicd.tf` — OIDC provider + deploy role + least-privilege policy; `fmt`+`validate` clean
 - [x] `deploy.yml` — quality-gated build→push→SSM-deploy; valid YAML
 - [ ] Owner: `terraform apply` (adds 3 resources: OIDC provider, role, role policy)
-- [ ] Owner: set repo **variable** `AWS_DEPLOY_ROLE_ARN` = `terraform output -raw deploy_role_arn`
+- [ ] Owner: set repo **variable** `AWS_DEPLOY_ROLE_ARN` to the **ARN that** `terraform output -raw deploy_role_arn` **prints** (e.g. `arn:aws:iam::<acct>:role/cue-api-deploy`) — paste the ARN value, **not** the command text
 - [ ] Owner (optional): Settings → Environments → **production** → required reviewers
 - [ ] **Prereqs to a green deploy** (Phase 2/3 owner items): `cue` DB + `cue_app` role created,
       `./seed-secrets.sh` run, Cloudflare origin cert installed
