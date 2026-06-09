@@ -261,7 +261,7 @@ graph TD
   parameters, Cloudflare). The existing VPC and RDS are pulled in as read-only `data`
   sources.
 - **Image** — multi-stage `Dockerfile` (pnpm via corepack, prod-pruned, non-root,
-  `node:20-slim`). The build runs `nest build && tsc-alias`, rewriting `@/*` path aliases
+  `node:24-slim`). The build runs `nest build && tsc-alias`, rewriting `@/*` path aliases
   to relative paths so `node dist/main` resolves them. Built and pushed to **ECR** tagged
   with the git SHA; immutable tags, scan-on-push, lifecycle keeps the last 10.
 - **Compute** — a single Terraform-created EC2 (Amazon Linux 2023, SSM agent built in)

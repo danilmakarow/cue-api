@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ── Stage 1: build ────────────────────────────────────────────────
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable
@@ -24,7 +24,7 @@ RUN pnpm build
 RUN pnpm prune --prod
 
 # ── Stage 2: runtime ──────────────────────────────────────────────
-FROM node:20-slim AS runner
+FROM node:24-slim AS runner
 ENV NODE_ENV=production
 WORKDIR /app
 RUN useradd --system --uid 1001 --create-home cue
