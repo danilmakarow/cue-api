@@ -59,11 +59,30 @@ data "aws_iam_policy_document" "app" {
     }
   }
 
-  # Application logs.
+  # Application logs — write (the awslogs Docker driver streams container stdout here).
   statement {
     sid       = "CwLogs"
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/${var.project}/*"]
+  }
+
+  # Application logs — read. deploy.sh's failure path runs `aws logs tail` to surface recent api
+  # logs in the SSM/Actions output (the awslogs driver disables local `docker logs`). Filter/Get/
+  # DescribeLogStreams are scoped to the project groups; DescribeLogGroups can't be resource-scoped
+  # (it only lists group names, not contents), so it is "*".
+  statement {
+    sid = "CwLogsRead"
+    actions = [
+      "logs:FilterLogEvents",
+      "logs:GetLogEvents",
+      "logs:DescribeLogStreams",
+    ]
+    resources = ["arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/${var.project}/*:*"]
+  }
+  statement {
+    sid       = "CwLogsDescribeGroups"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
   }
 }
 

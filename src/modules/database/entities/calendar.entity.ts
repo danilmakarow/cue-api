@@ -1,3 +1,4 @@
+import { ApiProperty } from '@nestjs/swagger';
 import { Column, Entity, JoinColumn, ManyToOne, OneToMany } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
@@ -13,6 +14,7 @@ import { User } from './user.entity';
  */
 @Entity()
 export class Calendar extends BaseEntity {
+  @ApiProperty({ format: 'uuid', description: 'Owning user id.' })
   @Column()
   ownerId: string;
 
@@ -20,15 +22,19 @@ export class Calendar extends BaseEntity {
   @JoinColumn({ name: 'ownerId' })
   owner: User;
 
+  @ApiProperty({ example: 'Work' })
   @Column()
   name: string;
 
+  @ApiProperty({ nullable: true, example: '#E27921' })
   @Column({ type: String, nullable: true })
   color: string | null;
 
+  @ApiProperty({ nullable: true, example: 'briefcase.fill' })
   @Column({ type: String, nullable: true })
   icon: string | null;
 
+  @ApiProperty({ example: 0 })
   @Column({ type: 'int', default: 0 })
   sortOrder: number;
 

@@ -20,7 +20,7 @@
 | 0 · State bootstrap | S3 state bucket (native lock) | ✅ applied |
 | 1 · Image + ECR | multi-stage Dockerfile, ECR repo | ✅ applied (ECR live) |
 | 2 · Compute + DB | EC2, EIP, SGs, IAM, SSM, new `cue` DB | ✅ applied · ⏳ owner: create `cue` DB + seed secrets |
-| 3 · Edge | DNS, TLS, rate-limit, origin lockdown | ✅ applied · ⏳ owner: install origin cert |
+| 3 · Edge | DNS, TLS, rate-limit, origin lockdown | ✅ live · cert/key TF-managed in SSM (survives replacement) |
 | 4 · CI | `ci.yml` + `_quality.yml` | ✅ done & verified (green) |
 | 5 · CD | `cicd.tf` (OIDC role) + `deploy.yml` | 📝 written · ⏳ owner: `apply` + set `AWS_DEPLOY_ROLE_ARN` + push |
 
@@ -88,7 +88,7 @@ _Discovery — 2026-06-06 (account `540607980315`, eu-north-1):_
 
 _Phase 2 Terraform written — 2026-06-06, uncommitted:_ `data.tf`, `security.tf`, `iam.tf`, `ec2.tf`, `eip.tf`, `ssm.tf` (+ `user-data.sh.tftpl`, `seed-secrets.sh`); `variables.tf` defaults set to discovered ids. Apply sequence: bootstrap → `terraform apply` production (owner reviews plan) → `./seed-secrets.sh` + create `cue` DB → checkpoint.
 
-### Phase 3 — Edge (Cloudflare)  ✅ applied · ⏳ owner: install origin cert
+### Phase 3 — Edge (Cloudflare)  ✅ live · origin cert/key TF-managed in SSM
 
 **Goal:** the API reachable over HTTPS at `cue-api.makarov.my`, fronted by Cloudflare
 (proxy, TLS, rate-limit), with the EC2 origin reachable **only** through Cloudflare.
@@ -112,8 +112,9 @@ need Advanced Certificate Manager (~$10/mo).
   (IPv4); a direct hit to the Elastic IP is dropped. No `:80` — Cloudflare redirects
   http→https at the edge.
 - Secrets stay out of git/state (Option B): the CF API token comes from
-  `TF_VAR_cloudflare_api_token`; the origin cert/key are installed out-of-band, **not**
-  issued by Terraform (which would persist the private key in state).
+  `TF_VAR_cloudflare_api_token`. **Exception**: the origin cert/key are now TF-managed into SSM
+  (supplied via `TF_VAR_origin_*` at apply time) so they survive instance replacement — these two
+  *do* land in Terraform state (encrypted S3 backend). See the Phase 3 cert note below.
 
 **What Terraform manages** (`edge.tf` + the SG rule in `security.tf`)
 - `data.cloudflare_zone` — **references** the existing `makarov.my` zone (you connected it to Cloudflare by hand); TF manages only what's inside it.
@@ -132,14 +133,72 @@ need Advanced Certificate Manager (~$10/mo).
 - [x] `variables.tf` — `edge_zone_name=makarov.my`, `api_hostname=cue-api.makarov.my`; `fmt`+`validate` clean
 - [x] Owner: `makarov.my` connected to Cloudflare + Spaceship nameservers set (done manually)
 - [x] Owner: `terraform apply` — A record + Full-Strict/HSTS settings + rate-limit created; EC2 recreated (EIP kept)
-- [ ] Owner: create a **Cloudflare Origin CA cert** (host `cue-api.makarov.my`), install at
-      `/opt/cue/origin/{cert,key}.pem` via SSM (`chmod 600` the key)
-- [ ] Checkpoint: `curl https://cue-api.makarov.my/health` → 200 once the app image is deployed (Phase 5)
+- [x] Owner: created a **Cloudflare Origin CA cert** (host `cue-api.makarov.my`); now TF-managed —
+      supply via `TF_VAR_origin_*`, stored to SSM, laid down by `deploy.sh` (see the cert note below)
+- [x] Checkpoint: `curl https://cue-api.makarov.my/health` → **200** (live 2026-06-09)
 
-**Open items (need input)**
-- Spaceship **nameserver change** to Cloudflare (one-time; activates the zone).
-- The origin cert is a **one-time** manual install; it survives deploys but not an instance
-  replacement. Moving it into SSM later would make it durable.
+**✅ Resolved (2026-06-09) — origin cert/key are TF-managed in SSM and re-applied on every deploy**
+
+The app EC2 is **replaced** whenever the AL2023 AMI rolls: `data.aws_ssm_parameter.al2023_ami`
+feeds `aws_instance.app.ami`, so the first `terraform apply` after AWS publishes a new AMI forces
+a fresh instance (new id, **same** Elastic IP + `Name=cue-api` tag). The Cloudflare Origin CA cert
+used to be installed by hand at `/opt/cue/origin/{cert,key}.pem`, which lives **only on the
+instance's disk** — so a replacement booted with an empty `/opt/cue/origin`, Caddy couldn't load
+its cert, and the public URL **521**'d even though the app container was healthy. This bit us on
+**2026-06-09**: an AMI roll during a routine apply replaced the box, so the freshly-deployed app was
+`Up (healthy)` while `https://cue-api.makarov.my` returned 521 until the cert was reinstalled.
+
+**The fix** — the cert + key are now stored in SSM and laid down automatically on every deploy:
+- `variables.tf` — `origin_cert_pem` / `origin_key_pem` (both `sensitive`), supplied out-of-band at
+  apply time via `TF_VAR_origin_*` (never committed; `*.pem` / `*.tfvars` are git-ignored).
+- `ssm.tf` — writes them to `/cue/production/ORIGIN_{CERT,KEY}_PEM` as **SecureString**,
+  **base64-encoded** so each value is single-line (a raw multi-line PEM would corrupt the
+  `deploy.sh` app.env sweep).
+- `deploy/deploy.sh` — skips them in the app.env sweep, then base64-decodes them into
+  `/opt/cue/origin/{cert,key}.pem` (cert `644`, key `600`) **before** `docker compose up`.
+- **No new IAM**: the instance role already has SSM read + `kms:Decrypt` for `/cue/production/*`
+  (`iam.tf`). The cert now survives every replacement automatically.
+
+**Trade-off** — unlike the seed-secrets.sh secrets (Option B: never in state), these two values
+**do** enter Terraform state (the cost of `terraform apply` ownership). State lives in the encrypted
+S3 backend; treat it as sensitive.
+
+**Apply / activation order** — the updated `deploy.sh` + compose only reach the box on instance
+replacement (they're baked into `user_data` at first boot, and a `user_data` change doesn't replace
+a running instance by default), so:
+1. `export TF_VAR_origin_cert_pem="$(cat origin-cert.pem)"` (and `…_key_pem` likewise).
+2. `terraform apply` — creates the two SSM params (and the CloudWatch log group, below).
+3. Roll the new `deploy.sh`/compose onto the box: `terraform apply -replace=aws_instance.app`
+   (re-runs user_data → next deploy uses them, and validates cert-survival end-to-end), **or**
+   manually sync `/opt/cue/{deploy.sh,docker-compose.prod.yml}` and redeploy.
+4. **Run a deploy** (push to `master`, re-run the deploy workflow, or run `deploy.sh` on the box via
+   SSM with the latest image tag). **This step is not optional after a replacement**: `user_data`
+   only lays down files — it does **not** start the stack, so a freshly replaced box has no Caddy
+   and the public URL returns **521** until the first deploy renders `app.env`, writes the cert/key
+   into `/opt/cue/origin/`, and `docker compose up`s. (This is exactly what bit us on 2026-06-09.)
+
+To **rotate** the cert later: re-apply with new `TF_VAR_origin_*`, redeploy, then
+`docker restart cue-caddy-1` (a running Caddy reads its cert only at start).
+
+**Manual fallback** (SSM unreachable, or you need an immediate fix on the current box):
+
+```bash
+INSTANCE=$(aws ec2 describe-instances --region eu-north-1 \
+  --filters "Name=tag:Name,Values=cue-api" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+aws ssm start-session --region eu-north-1 --target "$INSTANCE"
+# on the box (sudo): write the Cloudflare Origin CA cert + key, then lock the key down
+sudo install -d -m 755 /opt/cue/origin
+sudo tee /opt/cue/origin/cert.pem >/dev/null   # paste the Origin Certificate, then Ctrl-D
+sudo tee /opt/cue/origin/key.pem  >/dev/null   # paste the Private Key, then Ctrl-D
+sudo chmod 644 /opt/cue/origin/cert.pem && sudo chmod 600 /opt/cue/origin/key.pem
+sudo docker restart cue-caddy-1                 # or just wait — restart: unless-stopped self-recovers
+```
+
+Verify: `curl -s https://cue-api.makarov.my/health` → `OK`.
+
+**Resolved** — Spaceship nameservers point at Cloudflare and the `makarov.my` zone is active (the
+site resolves end-to-end through Cloudflare), so the earlier "nameserver change" item is done.
 
 **Notes**
 - Provider pinned `cloudflare/cloudflare 4.52.7` (v4 attribute names — `zone`, `value`).
@@ -191,7 +250,7 @@ first successful run also delivers the first image, so `GET /health` finally ret
 - [ ] Owner: set repo **variable** `AWS_DEPLOY_ROLE_ARN` to the **ARN that** `terraform output -raw deploy_role_arn` **prints** (e.g. `arn:aws:iam::<acct>:role/cue-api-deploy`) — paste the ARN value, **not** the command text
 - [ ] Owner (optional): Settings → Environments → **production** → required reviewers
 - [ ] **Prereqs to a green deploy** (Phase 2/3 owner items): `cue` DB + `cue_app` role created,
-      `./seed-secrets.sh` run, Cloudflare origin cert installed
+      `./seed-secrets.sh` run, `TF_VAR_origin_*` set + applied (cert/key in SSM)
 - [ ] Checkpoint: push to `master` → Actions deploy green → `curl https://cue-api.makarov.my/health` → 200
 
 **Notes**
@@ -236,7 +295,8 @@ Constraints and existing assets:
 - Importing the existing RDS or the manual runner EC2s into Terraform. RDS is referenced
   read-only; the runners are retired/repurposed out of band.
 - Operating a self-hosted runner. GitHub-hosted runners are used (revisitable later).
-- An observability stack (centralised logs/metrics/alerting) beyond container health.
+- A full observability stack (metrics dashboards / alerting). Container **logs** now ship to
+  CloudWatch Logs (see *Logging* below); metrics + alerting remain out of scope.
 
 ## Proposed design
 
@@ -313,7 +373,8 @@ GRANT ALL PRIVILEGES ON DATABASE cue TO cue_app;
 
 Same endpoint/port/security-group; only `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`
 change. No impact on other databases on the instance (they share only the box's
-CPU/RAM/IOPS/connection pool). Connection uses `sslmode=require` (`DB_DISABLE_SSL_AUTH=false`).
+CPU/RAM/IOPS/connection pool). Connection uses `sslmode=require` (`DB_DISABLE_SSL_AUTH=true` —
+TLS on, RDS cert not verified against the default CA bundle).
 
 ### Config & secrets
 
@@ -325,7 +386,7 @@ boot without them:
 | Group | Parameters |
 |---|---|
 | Core | `NODE_ENV=production`, `PORT=3000` |
-| Database | `DB_HOST` (RDS endpoint), `DB_PORT`, `DB_USERNAME=cue_app`, `DB_PASSWORD` 🔒, `DB_DATABASE=cue`, `DB_RUN_MIGRATIONS=true`, `DB_SYNCHRONIZE=false`, `DB_DISABLE_SSL_AUTH=false`, `DB_LOGGING=false` |
+| Database | `DB_HOST` (RDS endpoint), `DB_PORT`, `DB_USERNAME=cue_app`, `DB_PASSWORD` 🔒, `DB_DATABASE=cue`, `DB_RUN_MIGRATIONS=true`, `DB_SYNCHRONIZE=false`, `DB_DISABLE_SSL_AUTH=true`, `DB_LOGGING=false` |
 | Redis (external SaaS) | `REDIS_HOST` (SaaS host), `REDIS_PORT`, `REDIS_PASSWORD` 🔒, `REDIS_DB` |
 | Auth | `JWT_SECRET` 🔒 (≥32 chars), `APPLE_CLIENT_ID` |
 | Telegram | `TELEGRAM_BOT_TOKEN` 🔒, `TELEGRAM_WEBHOOK_SECRET` 🔒 |
@@ -340,6 +401,25 @@ boot without them:
 - **Health gate** — `deploy.sh` polls `GET /health`; failure fails the deploy.
 - **Rollback** — re-run the deploy with the previous SHA (immutable tags make this exact).
   No automated blue/green in v1.
+
+### Logging
+
+Both containers log to **CloudWatch Logs** via Docker's `awslogs` driver
+(`docker-compose.prod.yml`):
+
+- **Group** `/cue/production` (Terraform `logs.tf`, `retention_in_days = 30`). **Streams** `api`
+  and `caddy`. The instance role already authorizes `CreateLogStream`/`PutLogEvents` on
+  `/cue/*` (`iam.tf`), so no new IAM.
+- **Read them**: `aws logs tail /cue/production --follow --region eu-north-1` (or
+  `--log-stream-names api`). The AWS console → CloudWatch → Log groups works too.
+- **Trade-off**: with the `awslogs` driver, on-box `docker logs` / `docker compose logs` no longer
+  read locally (the driver streams off-box). `deploy.sh`'s failure path therefore pulls recent
+  `api` events from CloudWatch instead.
+- **Ordering**: `awslogs-create-group` is `"false"`, so the log group must exist (apply `logs.tf`)
+  before the box runs the new compose — see the Phase 3 *Apply / activation order* above; the same
+  instance-replacement step ships the awslogs compose change onto the box.
+- Logs are **not** instance-local anymore, so they survive replacement and the box's disk can't
+  fill with unrotated json-file logs (the previous default).
 
 ## Alternatives considered
 
@@ -382,8 +462,10 @@ in Terraform's blast radius.
 ## Open questions
 
 - [x] **AWS facts** (Phase 2 discovery): captured 2026-06-06 (see the Phase 2 notes).
-- [x] **Edge** (Phase 3): **resolved 06-07** — Cloudflare via Route53 subdomain delegation
-      (see the Phase 3 section). The EC2 `:443` is locked to Cloudflare IP ranges.
+- [x] **Edge** (Phase 3): **resolved 06-08** — dedicated apex `makarov.my` on Cloudflare
+      (registrar Spaceship), host `cue-api.makarov.my`. The earlier 06-07 plan (Cloudflare via
+      Route53 subdomain delegation) was abandoned — CF subdomain zones are Enterprise-only
+      (err 1116). See the Phase 3 section; the EC2 `:443` is locked to Cloudflare IP ranges.
 
 ### Resolved
 

@@ -1,4 +1,5 @@
 import { Controller, Get, Header } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
 
 /**
  * Apple App Site Association app identifier in `TeamID.bundleId` form — the iOS
@@ -27,8 +28,9 @@ interface AppleAppSiteAssociation {
 /**
  * Serves the `.well-known` documents Apple's CDN fetches over HTTPS. The API is
  * mounted at the root (no global prefix), so the well-known path resolves
- * directly.
+ * directly. Excluded from Swagger — it is Apple infrastructure, not client API.
  */
+@ApiExcludeController()
 @Controller('.well-known')
 export class WellKnownController {
   /**

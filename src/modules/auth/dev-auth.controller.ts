@@ -8,6 +8,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
 
 import { AuthenticationResult, AuthService } from './auth.service';
 import { DevOnlyGuard } from '@/guards/dev-only.guard';
@@ -18,7 +19,10 @@ import { UserDatabaseService } from '@/modules/database/services';
  * Development-only authentication helpers — list every user and impersonate
  * one by id. The `DevOnlyGuard` returns 404 outside `NODE_ENV=development`,
  * so these handlers are invisible in any other environment.
+ *
+ * Excluded from Swagger — these are debug-only and never exist in production.
  */
+@ApiExcludeController()
 @UseGuards(DevOnlyGuard)
 @Controller('auth/dev')
 export class DevAuthController {

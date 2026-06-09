@@ -57,6 +57,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 *.crt
 *.key
+# Cloudflare origin cert/key fed to terraform via TF_VAR_origin_* — never commit
+*.pem
 
 # Terraform
 **/.terraform/*

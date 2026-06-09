@@ -115,3 +115,29 @@ variable "edge_zone_name" {
   type        = string
   default     = "makarov.my"
 }
+
+# Cloudflare origin cert + key, TF-managed (stored to SSM) so they survive EC2 replacement — the
+# instance-local copy at /opt/cue/origin/* is wiped when an AMI roll recreates the box. Supply the
+# PEMs out-of-band at apply time (never commit them):
+#   export TF_VAR_origin_cert_pem="$(cat origin-cert.pem)"
+#   export TF_VAR_origin_key_pem="$(cat origin-key.pem)"
+# NOTE: unlike the seed-secrets.sh secrets, these DO enter Terraform state — the price of
+# `terraform apply` ownership. State lives in the encrypted S3 backend; treat it as sensitive.
+variable "origin_cert_pem" {
+  description = "Cloudflare Origin CA certificate (PEM). Supply via TF_VAR_origin_cert_pem at apply time."
+  type        = string
+  sensitive   = true
+}
+
+variable "origin_key_pem" {
+  description = "Cloudflare Origin CA private key (PEM). Supply via TF_VAR_origin_key_pem at apply time."
+  type        = string
+  sensitive   = true
+}
+
+# ── Observability ──
+variable "log_retention_days" {
+  description = "CloudWatch retention for container logs (/cue/production)."
+  type        = number
+  default     = 30
+}

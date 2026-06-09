@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 
 import {
   CreateTaskGroupDto,
@@ -22,11 +23,14 @@ import { TaskGroupService } from './task-group.service';
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';
+import { Swagger } from '@/modules/swagger/decorators/swagger.decorator';
+import { IdResponseDto } from '@/modules/swagger/dtos/id-response.dto';
 
 /**
  * Controller exposing REST endpoints for the TaskGroup resource.
  * All routes require a valid JWT via `AccessTokenGuard`.
  */
+@ApiTags('Task groups')
 @UseGuards(AccessTokenGuard)
 @Controller('task-groups')
 export class TaskGroupController {
@@ -38,6 +42,11 @@ export class TaskGroupController {
    * current user.
    */
   @Post()
+  @Swagger({
+    summary: 'Create a task group inside a calendar.',
+    responseDto: TaskGroupDTO,
+    responseStatus: 201,
+  })
   async create(
     @CurrentUser() user: User,
     @Body() dto: CreateTaskGroupDto,
@@ -53,6 +62,18 @@ export class TaskGroupController {
    * groups across all calendars the user owns.
    */
   @Get()
+  @ApiQuery({
+    name: 'calendarId',
+    required: false,
+    format: 'uuid',
+    description: 'Scope to a single calendar; omit for all owned calendars.',
+  })
+  @Swagger({
+    summary: 'List task groups for the current user.',
+    responseDto: TaskGroupDTO,
+    isResponseArray: true,
+    responseStatus: 200,
+  })
   async findAll(
     @CurrentUser() user: User,
     @Query('calendarId') calendarId?: string,
@@ -69,6 +90,12 @@ export class TaskGroupController {
    * Returns the updated group as a `TaskGroupDTO`.
    */
   @Patch(':id')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: "Update a task group's fields and/or default recurrence rule.",
+    responseDto: TaskGroupDTO,
+    responseStatus: 200,
+  })
   async update(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -92,6 +119,12 @@ export class TaskGroupController {
    */
   @Delete(':id')
   @HttpCode(200)
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Delete a task group; responds 200 { id }.',
+    responseDto: IdResponseDto,
+    responseStatus: 200,
+  })
   async remove(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,

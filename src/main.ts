@@ -6,6 +6,7 @@ import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from './app.module';
 import { EnvironmentVariables } from '@/config/env.config';
+import { initializeSwagger } from '@/config/swagger.config';
 
 /**
  * Bootstraps the NestJS application — binds middleware, enables CORS, and starts the HTTP listener.
@@ -17,6 +18,7 @@ const bootstrap = async () => {
   const port = configService.get('PORT', { infer: true }) || 3000;
 
   app.enableCors({ origin: true, credentials: false });
+  initializeSwagger(app);
 
   await app.listen(port);
 
@@ -30,6 +32,7 @@ const bootstrap = async () => {
   );
   logger.log(''.padEnd(50, ' '));
   logger.log(`http://127.0.0.1:${port}`.padEnd(50, ' '));
+  logger.log(`Swagger docs: http://127.0.0.1:${port}/docs`.padEnd(50, ' '));
 
   if (configService.get('NODE_ENV') === 'development') {
     logger.log(''.padEnd(50, ' '));

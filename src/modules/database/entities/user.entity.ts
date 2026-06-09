@@ -1,3 +1,4 @@
+import { ApiProperty } from '@nestjs/swagger';
 import { Column, Entity, OneToMany } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
@@ -11,12 +12,15 @@ import { TelegramLink } from './telegram-link.entity';
  */
 @Entity()
 export class User extends BaseEntity {
+  @ApiProperty({ description: 'Apple `sub` claim from Sign in with Apple.' })
   @Column({ unique: true })
   appleUserId: string;
 
+  @ApiProperty({ nullable: true, example: 'jane@example.com' })
   @Column({ type: String, nullable: true })
   email: string | null;
 
+  @ApiProperty({ nullable: true, example: 'Jane Appleseed' })
   @Column({ type: String, nullable: true })
   displayName: string | null;
 
@@ -25,9 +29,14 @@ export class User extends BaseEntity {
    * sign-in time (Apple Sign-In doesn't expose a profile picture directly).
    * Stored as `text` because PostgreSQL varchar lengths don't fit encoded images.
    */
+  @ApiProperty({
+    nullable: true,
+    description: 'Base64-encoded profile picture (no data-URL prefix).',
+  })
   @Column({ type: 'text', nullable: true })
   avatarBase64: string | null;
 
+  @ApiProperty({ example: 'Europe/Berlin' })
   @Column({ default: 'UTC' })
   timezone: string;
 

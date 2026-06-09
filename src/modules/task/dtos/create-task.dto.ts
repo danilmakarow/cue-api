@@ -1,3 +1,4 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
@@ -22,44 +23,72 @@ import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
  * must reference a `TaskGroup` in the same calendar.
  */
 export class CreateTaskDto {
+  @ApiProperty({ format: 'uuid', description: 'Calendar that owns this task.' })
   @IsUUID()
   calendarId: string;
 
+  @ApiProperty({ example: 'Buy groceries', maxLength: 255 })
   @IsString()
   @MinLength(1)
   @MaxLength(255)
   title: string;
 
+  @ApiPropertyOptional({ example: 'Milk, eggs, bread' })
   @IsOptional()
   @IsString()
   notes?: string;
 
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description: 'ISO 8601 start; omit for a timeless todo.',
+    example: '2026-06-09T09:00:00.000Z',
+  })
   @IsOptional()
   @IsDateString()
   startAt?: string;
 
+  @ApiPropertyOptional({
+    format: 'date-time',
+    example: '2026-06-09T10:00:00.000Z',
+  })
   @IsOptional()
   @IsDateString()
   endAt?: string;
 
+  @ApiPropertyOptional({ description: 'Marks the task as an all-day event.' })
   @IsOptional()
   @IsBoolean()
   isAllDay?: boolean;
 
+  @ApiProperty({
+    description: 'IANA timezone the task time-of-day is anchored to.',
+    example: 'Europe/Berlin',
+  })
   @IsString()
   @MinLength(1)
   timezone: string;
 
+  @ApiPropertyOptional({
+    description: 'Whether the task must be explicitly completed.',
+  })
   @IsOptional()
   @IsBoolean()
   requiresCompletion?: boolean;
 
   /** Optional group this task belongs to; must live in the same calendar. */
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Group this task belongs to; must live in the same calendar.',
+  })
   @IsOptional()
   @IsUUID()
   groupId?: string;
 
   /** When present, makes the task recurring via a single linked RecurrenceRule. */
+  @ApiPropertyOptional({
+    type: () => CreateRecurrenceRuleDto,
+    description: 'When present, makes the task recurring.',
+  })
   @IsOptional()
   @ValidateNested()
   @Type(() => CreateRecurrenceRuleDto)

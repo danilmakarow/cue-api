@@ -8,6 +8,17 @@ services:
   api:
     image: ${CUE_IMAGE}
     restart: unless-stopped
+    # Ship stdout/stderr to CloudWatch (group /cue/production, stream "api"). The EC2 instance
+    # role authorizes PutLogEvents (iam.tf "CwLogs"); the group is created by Terraform (logs.tf),
+    # so awslogs-create-group stays "false". NOTE: with the awslogs driver `docker logs` /
+    # `docker compose logs` no longer read locally — use `aws logs tail /cue/production --follow`.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-eu-north-1}
+        awslogs-group: /cue/production
+        awslogs-create-group: "false"
+        awslogs-stream: api
     env_file:
       - /opt/cue/app.env
     expose:
@@ -24,6 +35,15 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # Edge access/error logs → CloudWatch (group /cue/production, stream "caddy"). See the api
+    # service note above re: `aws logs tail` vs. local `docker logs`.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-eu-north-1}
+        awslogs-group: /cue/production
+        awslogs-create-group: "false"
+        awslogs-stream: caddy
     depends_on: [api]
     environment:
       - CADDY_DOMAIN=${CUE_DOMAIN}

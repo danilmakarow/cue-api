@@ -1,19 +1,42 @@
+import { ApiProperty } from '@nestjs/swagger';
+
 import { RecurrenceRule, Task } from '@/modules/database/entities';
 import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
 
 /**
  * Wire shape for a RecurrenceRule embedded in task/group responses.
  * Field names are normative per the FE contract (Part C).
+ *
+ * Modelled as a class (not an interface) so `@ApiProperty` can describe it for
+ * Swagger; the `toRecurrenceRuleDTO` mapper returns a structurally compatible
+ * object literal — no instantiation needed.
  */
-export interface RecurrenceRuleDTO {
+export class RecurrenceRuleDTO {
+  @ApiProperty({ format: 'uuid' })
   id: string;
+
+  @ApiProperty({ example: 'WEEKLY' })
   frequency: string;
+
+  @ApiProperty({ example: 1 })
   interval: number;
+
+  @ApiProperty({ type: [Number], nullable: true, example: [0, 2, 4] })
   byWeekday: number[] | null;
+
+  @ApiProperty({ type: [Number], nullable: true, example: [1, 15] })
   byMonthDay: number[] | null;
+
+  @ApiProperty({ type: [Number], nullable: true, example: [1, 6, 12] })
   byMonth: number[] | null;
+
+  @ApiProperty({ example: 'NEVER' })
   endType: string;
+
+  @ApiProperty({ nullable: true, example: '2026-12-31' })
   endDate: string | null;
+
+  @ApiProperty({ nullable: true, example: 10 })
   count: number | null;
 }
 
@@ -21,22 +44,53 @@ export interface RecurrenceRuleDTO {
  * Wire shape for a Task series row. Returned by POST /tasks, PATCH /tasks/:id,
  * GET /tasks/:id. Includes the embedded recurrence rule for editing.
  */
-export interface TaskDTO {
+export class TaskDTO {
+  @ApiProperty({ format: 'uuid' })
   id: string;
+
+  @ApiProperty({ format: 'uuid' })
   calendarId: string;
+
+  @ApiProperty({ format: 'uuid', nullable: true })
   groupId: string | null;
+
+  @ApiProperty({ example: 'Buy groceries' })
   title: string;
+
+  @ApiProperty({ nullable: true, example: 'Milk, eggs, bread' })
   notes: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   startAt: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   endAt: string | null;
+
+  @ApiProperty()
   isAllDay: boolean;
+
+  @ApiProperty({ example: 'Europe/Berlin' })
   timezone: string;
+
+  @ApiProperty()
   requiresCompletion: boolean;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
+
+  @ApiProperty({ format: 'uuid', nullable: true })
   recurrenceRuleId: string | null;
+
+  @ApiProperty({ type: () => RecurrenceRuleDTO, nullable: true })
   recurrence: RecurrenceRuleDTO | null;
+
+  @ApiProperty({ format: 'uuid', nullable: true })
   notificationStrategyId: string | null;
+
+  @ApiProperty({ format: 'date-time' })
   createdAt: string;
+
+  @ApiProperty({ format: 'date-time' })
   updatedAt: string;
 }
 
@@ -44,29 +98,61 @@ export interface TaskDTO {
  * Wire shape for a single expanded occurrence. Returned by GET /tasks.
  * One per visible instance — recurring tasks produce one per occurrence date.
  */
-export interface OccurrenceDTO {
+export class OccurrenceDTO {
+  @ApiProperty({ format: 'uuid' })
   taskId: string;
+
+  @ApiProperty({ format: 'uuid' })
   calendarId: string;
+
+  @ApiProperty({ format: 'uuid', nullable: true })
   groupId: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   originalStart: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   occurrenceStart: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   occurrenceEnd: string | null;
+
+  @ApiProperty({ example: 'Buy groceries' })
   title: string;
+
+  @ApiProperty({ nullable: true })
   notes: string | null;
+
+  @ApiProperty()
   isAllDay: boolean;
+
+  @ApiProperty({ example: 'Europe/Berlin' })
   timezone: string;
+
+  @ApiProperty()
   requiresCompletion: boolean;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
+
+  @ApiProperty()
   isRecurring: boolean;
+
+  @ApiProperty()
   isException: boolean;
 }
 
 /**
  * Wire shape returned by PATCH /tasks/:id/completion.
  */
-export interface CompletionResultDTO {
+export class CompletionResultDTO {
+  @ApiProperty({ format: 'uuid' })
   taskId: string;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   occurrenceStart: string | null;
+
+  @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
 }
 

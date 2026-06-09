@@ -1,3 +1,4 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsDateString, IsOptional } from 'class-validator';
 
 /**
@@ -6,6 +7,7 @@ import { IsBoolean, IsDateString, IsOptional } from 'class-validator';
  * toggled; otherwise the series anchor (or one-off task) is toggled.
  */
 export class SetCompletionDto {
+  @ApiProperty({ description: 'Target completion state.' })
   @IsBoolean()
   isCompleted: boolean;
 
@@ -13,6 +15,12 @@ export class SetCompletionDto {
    * ISO date-time identifying the occurrence to toggle. Required for per-instance
    * completion of a recurring task; omitted for one-offs or series-wide completion.
    */
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description:
+      'Occurrence to toggle (recurring tasks); omit for one-offs or series-wide.',
+    example: '2026-06-09T09:00:00.000Z',
+  })
   @IsOptional()
   @IsDateString()
   occurrenceStart?: string;

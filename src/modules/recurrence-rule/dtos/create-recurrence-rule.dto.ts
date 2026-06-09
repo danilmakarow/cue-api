@@ -1,3 +1,4 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -26,15 +27,29 @@ import {
  * Weekday encoding for `byWeekday`: 0 = Monday … 6 = Sunday.
  */
 export class CreateRecurrenceRuleDto {
+  @ApiProperty({
+    enum: RecurrenceFrequency,
+    example: RecurrenceFrequency.WEEKLY,
+  })
   @IsEnum(RecurrenceFrequency)
   frequency: RecurrenceFrequency;
 
+  @ApiPropertyOptional({
+    minimum: 1,
+    default: 1,
+    description: 'Repeat every N units of the frequency.',
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
   interval?: number;
 
   /** Weekday ordinals (0 = Monday … 6 = Sunday). Absent means no weekday restriction. */
+  @ApiPropertyOptional({
+    type: [Number],
+    example: [0, 2, 4],
+    description: 'Weekday ordinals (0 = Monday … 6 = Sunday).',
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -44,6 +59,11 @@ export class CreateRecurrenceRuleDto {
   byWeekday?: number[];
 
   /** Days of the month (1-31). Absent means no month-day restriction. */
+  @ApiPropertyOptional({
+    type: [Number],
+    example: [1, 15],
+    description: 'Days of the month (1-31).',
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -53,6 +73,11 @@ export class CreateRecurrenceRuleDto {
   byMonthDay?: number[];
 
   /** Months (1-12). Absent means no month restriction. */
+  @ApiPropertyOptional({
+    type: [Number],
+    example: [1, 6, 12],
+    description: 'Months (1-12).',
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -61,11 +86,20 @@ export class CreateRecurrenceRuleDto {
   @Max(12, { each: true })
   byMonth?: number[];
 
+  @ApiPropertyOptional({
+    enum: RecurrenceEndType,
+    example: RecurrenceEndType.NEVER,
+  })
   @IsOptional()
   @IsEnum(RecurrenceEndType)
   endType?: RecurrenceEndType;
 
   /** Required when `endType = UNTIL_DATE`. ISO 8601 date (or date-time). */
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description: 'Required when endType = UNTIL_DATE.',
+    example: '2026-12-31T00:00:00.000Z',
+  })
   @ValidateIf(
     (dto: CreateRecurrenceRuleDto) =>
       dto.endType === RecurrenceEndType.UNTIL_DATE,
@@ -74,6 +108,11 @@ export class CreateRecurrenceRuleDto {
   endDate?: string;
 
   /** Required and positive when `endType = COUNT`. */
+  @ApiPropertyOptional({
+    minimum: 1,
+    description: 'Required and positive when endType = COUNT.',
+    example: 10,
+  })
   @ValidateIf(
     (dto: CreateRecurrenceRuleDto) => dto.endType === RecurrenceEndType.COUNT,
   )

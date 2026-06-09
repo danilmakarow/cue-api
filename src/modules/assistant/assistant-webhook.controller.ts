@@ -14,16 +14,18 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import { Queue } from 'bullmq';
 
 import { WebhookQueueJob } from './assistant.types';
-import { LinkTelegramDto } from './dtos';
+import { LinkTelegramDto, TelegramLinkStatusDto } from './dtos';
 import { LinkingService, TelegramLinkStatus } from './linking.service';
 import { WEBHOOK_QUEUE_NAME } from '../redis/redis.constants';
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';
 import { ExternalVendorConnectorFactory } from '@/modules/external-vendor/external-vendor-connector.factory';
+import { Swagger } from '@/modules/swagger/decorators/swagger.decorator';
 
 /** Inbound HTTP header values, as Node delivers them (single or repeated). */
 type InboundHeaders = Record<string, string | string[] | undefined>;
@@ -39,6 +41,7 @@ type InboundHeaders = Record<string, string | string[] | undefined>;
  * - `GET /assistant/link` — JWT-guarded; reports the user's current link state.
  * - `DELETE /assistant/link` — JWT-guarded; revokes the user's link (idempotent).
  */
+@ApiTags('Assistant')
 @Controller('assistant')
 export class AssistantWebhookController {
   private readonly logger = new Logger(AssistantWebhookController.name);
@@ -74,6 +77,7 @@ export class AssistantWebhookController {
    */
   @Post('telegram/webhook')
   @HttpCode(200)
+  @ApiExcludeEndpoint()
   async handleTelegramWebhook(
     @Headers() rawHeaders: InboundHeaders,
     @Ip() ip: string,
@@ -118,6 +122,11 @@ export class AssistantWebhookController {
    */
   @Post('link')
   @UseGuards(AccessTokenGuard)
+  @Swagger({
+    summary: 'Redeem a link nonce and bind this user to a Telegram chat.',
+    responseDto: TelegramLinkStatusDto,
+    responseStatus: 201,
+  })
   async link(
     @CurrentUser() user: User,
     @Body() dto: LinkTelegramDto,
@@ -137,6 +146,11 @@ export class AssistantWebhookController {
    */
   @Get('link')
   @UseGuards(AccessTokenGuard)
+  @Swagger({
+    summary: "Report the current user's Telegram link state.",
+    responseDto: TelegramLinkStatusDto,
+    responseStatus: 200,
+  })
   async getLinkStatus(@CurrentUser() user: User): Promise<TelegramLinkStatus> {
     return this.linkingService.getStatus(user.id);
   }
@@ -147,6 +161,11 @@ export class AssistantWebhookController {
    */
   @Delete('link')
   @UseGuards(AccessTokenGuard)
+  @Swagger({
+    summary: "Revoke the current user's Telegram link (idempotent).",
+    responseDto: TelegramLinkStatusDto,
+    responseStatus: 200,
+  })
   async unlink(@CurrentUser() user: User): Promise<{ linked: false }> {
     return this.linkingService.unlink(user.id);
   }

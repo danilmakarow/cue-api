@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -23,16 +24,22 @@ import {
  * setting `endType = COUNT` requires `count`; `endType = UNTIL_DATE` requires `endDate`.
  */
 export class UpdateRecurrenceRuleDto {
+  @ApiPropertyOptional({ enum: RecurrenceFrequency })
   @IsOptional()
   @IsEnum(RecurrenceFrequency)
   frequency?: RecurrenceFrequency;
 
+  @ApiPropertyOptional({ minimum: 1 })
   @IsOptional()
   @IsInt()
   @Min(1)
   interval?: number;
 
   /** Weekday ordinals (0 = Monday … 6 = Sunday). */
+  @ApiPropertyOptional({
+    type: [Number],
+    description: 'Weekday ordinals (0 = Monday … 6 = Sunday).',
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -42,6 +49,10 @@ export class UpdateRecurrenceRuleDto {
   byWeekday?: number[];
 
   /** Days of the month (1-31). */
+  @ApiPropertyOptional({
+    type: [Number],
+    description: 'Days of the month (1-31).',
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -51,6 +62,7 @@ export class UpdateRecurrenceRuleDto {
   byMonthDay?: number[];
 
   /** Months (1-12). */
+  @ApiPropertyOptional({ type: [Number], description: 'Months (1-12).' })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -59,11 +71,16 @@ export class UpdateRecurrenceRuleDto {
   @Max(12, { each: true })
   byMonth?: number[];
 
+  @ApiPropertyOptional({ enum: RecurrenceEndType })
   @IsOptional()
   @IsEnum(RecurrenceEndType)
   endType?: RecurrenceEndType;
 
   /** Required when this payload sets `endType = UNTIL_DATE`. */
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description: 'Required when this payload sets endType = UNTIL_DATE.',
+  })
   @ValidateIf(
     (dto: UpdateRecurrenceRuleDto) =>
       dto.endType === RecurrenceEndType.UNTIL_DATE,
@@ -72,6 +89,11 @@ export class UpdateRecurrenceRuleDto {
   endDate?: string;
 
   /** Required and positive when this payload sets `endType = COUNT`. */
+  @ApiPropertyOptional({
+    minimum: 1,
+    description:
+      'Required and positive when this payload sets endType = COUNT.',
+  })
   @ValidateIf(
     (dto: UpdateRecurrenceRuleDto) => dto.endType === RecurrenceEndType.COUNT,
   )

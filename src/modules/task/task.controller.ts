@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { ApiParam, ApiTags } from '@nestjs/swagger';
 
 import {
   CompletionResultDTO,
@@ -28,11 +29,15 @@ import { TaskService } from './task.service';
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';
+import { Swagger } from '@/modules/swagger/decorators/swagger.decorator';
+import { IdResponseDto } from '@/modules/swagger/dtos/id-response.dto';
+import { OkResponseDto } from '@/modules/swagger/dtos/ok-response.dto';
 
 /**
  * Controller exposing REST endpoints for the Task resource.
  * All routes require a valid JWT via `AccessTokenGuard`.
  */
+@ApiTags('Tasks')
 @UseGuards(AccessTokenGuard)
 @Controller('tasks')
 export class TaskController {
@@ -44,6 +49,12 @@ export class TaskController {
    * the previous raw-row GET.
    */
   @Get()
+  @Swagger({
+    summary: 'List expanded task occurrences in a [from, to) window.',
+    responseDto: OccurrenceDTO,
+    isResponseArray: true,
+    responseStatus: 200,
+  })
   async list(
     @CurrentUser() user: User,
     @Query() query: ListTasksQuery,
@@ -66,6 +77,12 @@ export class TaskController {
    * Returns the Task series row by id (with its recurrence rule embedded).
    */
   @Get(':id')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Get a task series row (with its recurrence rule).',
+    responseDto: TaskDTO,
+    responseStatus: 200,
+  })
   async findOne(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -80,6 +97,11 @@ export class TaskController {
    * row as a `TaskDTO`. The referenced Calendar must belong to the current user.
    */
   @Post()
+  @Swagger({
+    summary: 'Create a task (optionally recurring) inside a calendar.',
+    responseDto: TaskDTO,
+    responseStatus: 201,
+  })
   async create(
     @CurrentUser() user: User,
     @Body() dto: CreateTaskDto,
@@ -100,6 +122,12 @@ export class TaskController {
    * group, isAllDay, requiresCompletion, and the master recurrence rule.
    */
   @Patch(':id')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Update a task in the all / one-off scope.',
+    responseDto: TaskDTO,
+    responseStatus: 200,
+  })
   async update(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -131,6 +159,12 @@ export class TaskController {
    */
   @Delete(':id')
   @HttpCode(200)
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Soft-delete a task; responds 200 { id }.',
+    responseDto: IdResponseDto,
+    responseStatus: 200,
+  })
   async remove(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -147,6 +181,12 @@ export class TaskController {
    * asserted on both branches before any write.
    */
   @Patch(':id/completion')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Toggle completion of a task or a single occurrence.',
+    responseDto: CompletionResultDTO,
+    responseStatus: 200,
+  })
   async setCompletion(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -194,6 +234,12 @@ export class TaskController {
    * `TaskOccurrenceException` with `isSkipped: true`.
    */
   @Post(':id/skip')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Skip a single occurrence of a recurring task.',
+    responseDto: OkResponseDto,
+    responseStatus: 201,
+  })
   async skipOccurrence(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
