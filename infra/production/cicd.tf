@@ -83,9 +83,11 @@ data "aws_iam_policy_document" "deploy" {
 
   # Dispatch the deploy: SendCommand against the AWS-RunShellScript document...
   statement {
-    sid       = "SsmSendCommandDocument"
-    actions   = ["ssm:SendCommand"]
-    resources = ["arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:document/AWS-RunShellScript"]
+    sid     = "SsmSendCommandDocument"
+    actions = ["ssm:SendCommand"]
+    # AWS-owned document → its ARN has an EMPTY account field; including the account id
+    # makes the resource not match and SendCommand is denied.
+    resources = ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
   }
 
   # ...targeted only at the cue-api instance. Tag-scoped, so it survives instance replacement
