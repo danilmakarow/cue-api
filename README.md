@@ -1,5 +1,6 @@
 ### CLI
 
+
 # Create a user (also seeds their default "Personal" calendar)
 ```
 pnpm dev-cli create-user --appleUserId dev-danil --email danil@example.com --displayName "Danil M" --timezone Europe/Warsaw
