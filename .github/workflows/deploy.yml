@@ -1,6 +1,8 @@
 # Continuous delivery. On every push to master: re-run the quality gate, build & push the
-# image to ECR (tagged with the commit SHA), then run deploy/deploy.sh on the box via SSM
-# Run Command. Auth to AWS is keyless (GitHub OIDC → the cue-api-deploy role); no static keys.
+# image to ECR (tagged with the commit SHA — reused, not re-pushed, if it already exists since
+# tags are immutable), then run deploy/deploy.sh on the box via SSM Run Command. Can also be
+# dispatched manually to redeploy/roll back to any retained tag (see workflow_dispatch below).
+# Auth to AWS is keyless (GitHub OIDC → the cue-api-deploy role); no static keys.
 #
 # One-time setup (after `terraform apply` of Phase 5):
 #   - Repo variable AWS_DEPLOY_ROLE_ARN = the role ARN itself (run `terraform output -raw
@@ -12,6 +14,14 @@ name: deploy
 on:
   push:
     branches: [master]
+  # Manually redeploy/roll back to any image still in ECR. Leave image_tag blank to build the
+  # dispatched commit; set it to an existing SHA to skip the build and just (re)deploy that image.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing ECR image tag (commit SHA) to redeploy. Blank = build the dispatched commit."
+        required: false
+        type: string
 
 # Never run two production deploys at once; let an in-flight deploy finish (don't cancel it).
 concurrency:
@@ -40,6 +50,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Target tag = the manual input if given, else this commit's SHA. Passed via env (not inline
+      # interpolation) so a dispatch input can't inject into the shell.
+      - name: Resolve image tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$SHA}"
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Target image tag: ${TAG}"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,21 +73,31 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
+      - name: Build and push image (reuse if the tag already exists)
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
         run: |
           set -euo pipefail
           IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
-          docker build -t "${IMAGE}" .
-          docker push "${IMAGE}"
-          echo "Pushed ${IMAGE}"
+          # ECR tags are immutable, so re-running a deploy (or redeploying an older commit) must not
+          # re-push an existing tag. Reuse the image if it's already in ECR; otherwise build & push.
+          # batch-get-image uses the role's existing ecr:BatchGetImage grant (no extra IAM needed).
+          EXISTING="$(aws ecr batch-get-image --repository-name "${ECR_REPO}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageTag' --output text 2>/dev/null || echo None)"
+          if [ "${EXISTING}" = "${IMAGE_TAG}" ]; then
+            echo "Image ${IMAGE} already in ECR — reusing it (no rebuild)."
+          else
+            docker build -t "${IMAGE}" .
+            docker push "${IMAGE}"
+            echo "Pushed ${IMAGE}"
+          fi
 
       - name: Deploy via SSM Run Command
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
         run: |
           set -euo pipefail
 

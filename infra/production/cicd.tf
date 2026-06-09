@@ -59,7 +59,8 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["*"]
   }
 
-  # Push (and read) image layers for this repository only.
+  # Push and read image layers for this repository only. BatchGetImage also lets the workflow
+  # check whether a tag already exists (immutable tags → reuse the image instead of re-pushing).
   statement {
     sid = "EcrPush"
     actions = [

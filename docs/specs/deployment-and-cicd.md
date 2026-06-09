@@ -406,8 +406,11 @@ boot without them:
 - **Migration failure** — runs on boot; a bad migration crashes the container, the
   health check fails, and the SSM command returns non-zero so the deploy job goes red.
 - **Health gate** — `deploy.sh` polls `GET /health`; failure fails the deploy.
-- **Rollback** — re-run the deploy with the previous SHA (immutable tags make this exact).
-  No automated blue/green in v1.
+- **Rollback / redeploy** — run the deploy workflow via **workflow_dispatch** with
+  `image_tag=<previous SHA>` (or re-run that commit's old workflow run). Because ECR tags are
+  immutable, the build step **reuses** the existing image instead of re-pushing it, then redeploys
+  it — exact, no rebuild. Only images still retained by the ECR lifecycle policy (**last 10**) can
+  be redeployed; older ones must be rebuilt from source. No automated blue/green in v1.
 
 ### Logging
 
