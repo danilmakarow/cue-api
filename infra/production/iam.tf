@@ -46,6 +46,14 @@ data "aws_iam_policy_document" "app" {
     ]
   }
 
+  # Write only the self-heal pointer: deploy.sh records the last green image tag here so a replaced
+  # instance can redeploy it from user_data at first boot. Scoped to this one String param.
+  statement {
+    sid       = "SsmWriteImageTag"
+    actions   = ["ssm:PutParameter"]
+    resources = ["arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/production/CURRENT_IMAGE_TAG"]
+  }
+
   # Decrypt SecureString params. Scoped to SSM via kms:ViaService so it works with the
   # default aws/ssm key or a customer-managed key without over-permissioning.
   statement {

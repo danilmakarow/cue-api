@@ -32,4 +32,18 @@ chmod +x /opt/cue/deploy.sh
 # CUE_DOMAIN feeds the Caddy site address; CUE_IMAGE is exported by deploy.sh at deploy time.
 printf 'CUE_DOMAIN=%s\n' "${api_hostname}" > /opt/cue/.env
 
+# --- First-boot self-heal: bring the stack up at the last successfully deployed image ---
+# deploy.sh records the green tag at ${ssm_prefix}/CURRENT_IMAGE_TAG. On a replaced instance,
+# redeploy it so the box self-recovers without waiting for a CI/manual deploy. If no tag is
+# recorded yet (very first instance, before any deploy), skip — the first deploy will set it.
+TAG="$(aws ssm get-parameter --region "${region}" --name "${ssm_prefix}/CURRENT_IMAGE_TAG" \
+  --query 'Parameter.Value' --output text 2>/dev/null || true)"
+if [ -n "$${TAG}" ] && [ "$${TAG}" != "None" ]; then
+  echo "self-heal: deploying recorded image tag $${TAG}"
+  AWS_REGION="${region}" ECR_REGISTRY="${ecr_registry}" ECR_REPO="${ecr_repo}" \
+    /opt/cue/deploy.sh "$${TAG}" || echo "self-heal deploy failed; a CI/manual deploy will recover"
+else
+  echo "self-heal: no CURRENT_IMAGE_TAG recorded yet — skipping (first deploy will set it)"
+fi
+
 echo "cue-api host bootstrap complete"

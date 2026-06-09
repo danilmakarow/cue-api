@@ -36,10 +36,10 @@ aws ssm get-parameters-by-path \
   --query 'Parameters[].[Name,Value]' --output text \
   | while IFS=$'\t' read -r name value; do
       key="${name##*/}"
-      # The origin cert/key are Caddy files, not app env — written separately below. They are
-      # stored base64-encoded (single-line) so this line-by-line sweep can't be corrupted by
-      # their PEM newlines, and skipped here so the private key never enters the api container.
-      case "${key}" in ORIGIN_CERT_PEM | ORIGIN_KEY_PEM) continue ;; esac
+      # Skip params that aren't app env: ORIGIN_* are Caddy cert/key files (written separately
+      # below; base64 single-line so this sweep can't be corrupted by PEM newlines, and the private
+      # key never enters the api container). CURRENT_IMAGE_TAG is the self-heal pointer (below).
+      case "${key}" in ORIGIN_CERT_PEM | ORIGIN_KEY_PEM | CURRENT_IMAGE_TAG) continue ;; esac
       printf '%s=%s\n' "${key}" "${value}"
     done > "${APP_DIR}/app.env"
 
@@ -69,7 +69,13 @@ echo "==> Waiting for health"
 for attempt in $(seq 1 30); do
   if docker compose -f docker-compose.prod.yml exec -T api \
        node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
-    echo "==> Healthy. Pruning dangling images."
+    echo "==> Healthy. Recording deployed tag + pruning images."
+    # Record the known-good tag so a replaced instance can self-heal at boot (user_data redeploys
+    # it). Best-effort: never fail a healthy deploy if the write is denied (e.g. IAM not yet applied).
+    aws ssm put-parameter --region "${AWS_REGION}" \
+      --name "${SSM_PREFIX}/CURRENT_IMAGE_TAG" --type String \
+      --value "${IMAGE_TAG}" --overwrite >/dev/null \
+      || echo "   warn: could not record ${SSM_PREFIX}/CURRENT_IMAGE_TAG (self-heal keeps prior tag)" >&2
     docker image prune -f
     exit 0
   fi

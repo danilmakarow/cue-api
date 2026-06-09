@@ -171,11 +171,18 @@ a running instance by default), so:
 3. Roll the new `deploy.sh`/compose onto the box: `terraform apply -replace=aws_instance.app`
    (re-runs user_data → next deploy uses them, and validates cert-survival end-to-end), **or**
    manually sync `/opt/cue/{deploy.sh,docker-compose.prod.yml}` and redeploy.
-4. **Run a deploy** (push to `master`, re-run the deploy workflow, or run `deploy.sh` on the box via
-   SSM with the latest image tag). **This step is not optional after a replacement**: `user_data`
-   only lays down files — it does **not** start the stack, so a freshly replaced box has no Caddy
-   and the public URL returns **521** until the first deploy renders `app.env`, writes the cert/key
-   into `/opt/cue/origin/`, and `docker compose up`s. (This is exactly what bit us on 2026-06-09.)
+4. **First deploy** (push to `master`, re-run the workflow, or run `deploy.sh` on the box via SSM
+   with an image tag). Required **once** to seed the self-heal pointer — `deploy.sh` records each
+   green tag at `/cue/production/CURRENT_IMAGE_TAG`.
+
+**Self-heal after replacement** — once that pointer exists, `user_data` redeploys it at first boot,
+so a replaced instance brings itself back up (renders `app.env`, writes the cert/key, `compose up`s)
+with no manual step and no 521 window. The pointer is written only on a **green** deploy, so a
+replacement always recovers to the last known-good image — never a half-built or failed one.
+`CURRENT_IMAGE_TAG` is runtime-managed (written by `deploy.sh`, not Terraform); the instance role
+has `PutParameter` on just that one param (`iam.tf`). Before the pointer is first set — or if the
+box can't reach SSM — a replaced box stays down until a deploy runs, which is what bit us on
+2026-06-09.
 
 To **rotate** the cert later: re-apply with new `TF_VAR_origin_*`, redeploy, then
 `docker restart cue-caddy-1` (a running Caddy reads its cert only at start).

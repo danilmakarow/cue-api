@@ -9,6 +9,10 @@ resource "aws_instance" "app" {
   # files (embedded as base64 so their shell syntax isn't reinterpreted by Terraform).
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
     api_hostname = var.api_hostname
+    region       = var.region
+    ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+    ecr_repo     = aws_ecr_repository.api.name
+    ssm_prefix   = "/${var.project}/production"
     compose_b64  = base64encode(file("${path.module}/../../docker-compose.prod.yml"))
     caddy_b64    = base64encode(file("${path.module}/../../Caddyfile"))
     deploy_b64   = base64encode(file("${path.module}/../../deploy/deploy.sh"))
