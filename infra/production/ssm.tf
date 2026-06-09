@@ -7,17 +7,22 @@ locals {
     NODE_ENV = "production"
     PORT     = "3000"
 
-    DB_HOST             = data.aws_db_instance.cue.address
-    DB_PORT             = "5432"
-    DB_USERNAME         = "cue_app"
-    DB_DATABASE         = "cue"
-    DB_SYNCHRONIZE      = "false"
-    DB_RUN_MIGRATIONS   = "true"
-    DB_LOGGING          = "false"
-    DB_DISABLE_SSL_AUTH = "false"
+    DB_HOST           = data.aws_db_instance.cue.address
+    DB_PORT           = "5432"
+    DB_USERNAME       = "cue_app"
+    DB_DATABASE       = "cue"
+    DB_SYNCHRONIZE    = "false"
+    DB_RUN_MIGRATIONS = "true"
+    DB_LOGGING        = "false"
+    # RDS requires TLS. The app (typeorm.config.ts) enables SSL with rejectUnauthorized:false
+    # only when this is "true" — so it MUST be "true" for RDS, or the connection is rejected
+    # with "no pg_hba.conf entry ... no encryption".
+    DB_DISABLE_SSL_AUTH = "true"
 
-    REDIS_HOST = var.redis_host
-    REDIS_PORT = tostring(var.redis_port)
+    # Tolerate redis_host supplied as "host:port" (Redis Cloud copy-paste): split host/port apart
+    # so REDIS_HOST never carries the port (which would break DNS resolution).
+    REDIS_HOST = split(":", var.redis_host)[0]
+    REDIS_PORT = length(split(":", var.redis_host)) > 1 ? split(":", var.redis_host)[1] : tostring(var.redis_port)
     REDIS_DB   = var.redis_db
 
     EXTERNAL_VENDOR   = "telegram"
