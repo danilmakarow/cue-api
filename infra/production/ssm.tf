@@ -32,8 +32,12 @@ locals {
     ASSISTANT_AI_PROVIDER      = "anthropic"
     ASSISTANT_MODEL_MAIN       = var.assistant_model_main
     ASSISTANT_MODEL_BACKGROUND = var.assistant_model_background
-    STT_PROVIDER               = "openai"
-    STT_MODEL                  = var.stt_model
+    # Public HTTPS base the app registers the Telegram webhook against on boot (it appends
+    # /assistant/telegram/webhook). Registration also needs TELEGRAM_BOT_TOKEN +
+    # TELEGRAM_WEBHOOK_SECRET seeded (seed-secrets.sh) to actually succeed.
+    ASSISTANT_WEBHOOK_URL = "https://${var.api_hostname}"
+    STT_PROVIDER          = "openai"
+    STT_MODEL             = var.stt_model
   }
 }
 
