@@ -25,7 +25,7 @@ resource "cloudflare_record" "api" {
   zone_id = data.cloudflare_zone.edge.id
   name    = local.api_record_name
   type    = "A"
-  value   = aws_eip.app.public_ip
+  content = aws_eip.app.public_ip
   proxied = true
   ttl     = 1 # must be 1 (automatic) when proxied
   comment = "cue-api origin (Elastic IP)"

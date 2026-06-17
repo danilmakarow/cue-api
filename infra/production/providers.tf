@@ -10,8 +10,8 @@ provider "aws" {
   }
 }
 
-# Cloudflare manages the Phase 3 edge (zone, DNS, TLS, rate-limit). Supply the API token
-# out-of-band via TF_VAR_cloudflare_api_token (env) — never in git or state.
+# Cloudflare manages the Phase 3 edge (zone, DNS, TLS, rate-limit). Set the API token in
+# terraform.tfvars (gitignored) or via TF_VAR_cloudflare_api_token — never in git or state.
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }

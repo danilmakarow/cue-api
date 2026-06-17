@@ -49,7 +49,7 @@ variable "apple_client_id" {
 }
 
 variable "redis_host" {
-  description = "External Redis (SaaS) host. Supply at apply time."
+  description = "External Redis (SaaS) host, optionally \"host:port\". Set in terraform.tfvars (gitignored)."
   type        = string
 }
 
@@ -83,6 +83,12 @@ variable "stt_model" {
   default     = "gpt-4o-mini-transcribe"
 }
 
+variable "assistant_app_link_base_url" {
+  description = "Public HTTPS base for the iOS universal link in the Telegram linking prompt. Must match the iOS app's Associated Domains entitlement (currently applinks:cue.ngrok.app) and serve a /.well-known/apple-app-site-association file. Swap to a stable domain when the app does."
+  type        = string
+  default     = "https://cue.ngrok.app"
+}
+
 # ── GitHub OIDC (Phase 5) ──
 variable "github_repo" {
   description = "owner/repo permitted to assume the deploy role."
@@ -98,7 +104,7 @@ variable "api_hostname" {
 }
 
 variable "cloudflare_api_token" {
-  description = "Cloudflare API token. Supply out-of-band via TF_VAR_cloudflare_api_token (never in git/state)."
+  description = "Cloudflare API token. Set in terraform.tfvars (gitignored) or via TF_VAR_cloudflare_api_token — never commit it."
   type        = string
   sensitive   = true
   default     = ""
@@ -116,24 +122,10 @@ variable "edge_zone_name" {
   default     = "makarov.my"
 }
 
-# Cloudflare origin cert + key, TF-managed (stored to SSM) so they survive EC2 replacement — the
-# instance-local copy at /opt/cue/origin/* is wiped when an AMI roll recreates the box. Supply the
-# PEMs out-of-band at apply time (never commit them):
-#   export TF_VAR_origin_cert_pem="$(cat origin-cert.pem)"
-#   export TF_VAR_origin_key_pem="$(cat origin-key.pem)"
-# NOTE: unlike the seed-secrets.sh secrets, these DO enter Terraform state — the price of
-# `terraform apply` ownership. State lives in the encrypted S3 backend; treat it as sensitive.
-variable "origin_cert_pem" {
-  description = "Cloudflare Origin CA certificate (PEM). Supply via TF_VAR_origin_cert_pem at apply time."
-  type        = string
-  sensitive   = true
-}
-
-variable "origin_key_pem" {
-  description = "Cloudflare Origin CA private key (PEM). Supply via TF_VAR_origin_key_pem at apply time."
-  type        = string
-  sensitive   = true
-}
+# NOTE: the Cloudflare origin cert + key are NOT variables — ssm.tf reads them directly from the
+# gitignored origin-cert.pem / origin-key.pem files in this directory. They still enter Terraform
+# state via the SSM SecureString resources (state lives in the encrypted S3 backend; treat it as
+# sensitive). To rotate: replace those two files and re-apply.
 
 # ── Observability ──
 variable "log_retention_days" {

@@ -1,0 +1,18 @@
+# Copy this to `terraform.tfvars` (same directory) and fill in the values. Terraform AUTO-LOADS
+# terraform.tfvars on every `terraform apply` — no -var-file flag, no TF_VAR_* env exports needed.
+#
+#   cp terraform.tfvars.example terraform.tfvars   # then edit
+#
+# terraform.tfvars is gitignored (the repo .gitignore ignores *.tfvars but keeps *.tfvars.example),
+# so real values never get committed.
+#
+# NOTE: the Cloudflare ORIGIN cert + key are NOT listed here. ssm.tf reads them straight from the
+# gitignored origin-cert.pem / origin-key.pem files already in this directory — nothing to paste.
+
+# External Redis (Redis Cloud). May be "host" or "host:port"; the port is split out automatically.
+redis_host = "redis-XXXXX.cXXX.eu-north-1-1.ec2.cloud.redislabs.com:XXXXX"
+
+# Cloudflare (Phase 3 edge). The provider authenticates with this token on EVERY apply (it refreshes
+# the edge resources), so it must be set even for an SSM-only change. The token is a secret.
+cloudflare_api_token  = "REPLACE_WITH_CLOUDFLARE_API_TOKEN"
+cloudflare_account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"

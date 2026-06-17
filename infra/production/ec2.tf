@@ -30,6 +30,14 @@ resource "aws_instance" "app" {
   }
 
   tags = { Name = "${var.project}-api" }
+
+  # The AMI comes from AWS's "latest AL2023" SSM pointer (data.tf), which moves whenever AWS publishes
+  # a new image — and a changed AMI forces instance replacement. Ignore that drift so a routine apply
+  # never destroys the running box; an OS/AMI refresh is then a deliberate
+  # `terraform apply -replace=aws_instance.app` (the self-heal user_data brings the new box back up).
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 output "instance_id" {
