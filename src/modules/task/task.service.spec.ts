@@ -2577,3 +2577,268 @@ describe('TaskService.getDailyCounts', () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 });
+
+/**
+ * Builds a TaskOccurrenceException with sensible defaults for delta tests.
+ */
+const makeException = (
+  overrides: Partial<TaskOccurrenceException> = {},
+): TaskOccurrenceException =>
+  ({
+    id: 'exc-1',
+    taskId: 'task-1',
+    originalStartAt: new Date('2026-06-20T10:00:00.000Z'),
+    isSkipped: false,
+    overrideStartAt: null,
+    overrideEndAt: null,
+    overrideTitle: null,
+    completedAt: null,
+    createdAt: new Date('2026-06-19T16:22:00.000Z'),
+    updatedAt: new Date('2026-06-20T09:14:50.000Z'),
+    ...overrides,
+  }) as TaskOccurrenceException;
+
+describe('TaskService.findChangedSince (delta endpoint)', () => {
+  /**
+   * Reads the `updatedAt`/`deletedAt` MoreThan boundary off a where clause, or
+   * null when the field is absent.
+   */
+  const moreThanBoundary = (
+    where: FindOptionsWhere<Task>,
+    field: 'updatedAt' | 'deletedAt',
+  ): Date | null => {
+    const operand = where[field];
+
+    if (operatorType(operand) !== 'moreThan') return null;
+
+    return (operand as unknown as FindOperatorLike).value as Date;
+  };
+
+  /**
+   * Routes the three reads `findChangedSince` issues off the where clause:
+   * - `updatedAt: MoreThan` → changed series rows
+   * - `deletedAt: MoreThan` (withDeleted) → soft-deleted rows
+   * - bare `{ calendarId }` (id select) → the calendar's series-id rows
+   */
+  const routedChangedFindAll = (fixtures: {
+    changed?: Task[];
+    deleted?: Task[];
+    seriesIds?: Task[];
+  }) =>
+    jest.fn((options?: FindManyOptions<Task>) => {
+      const where = (options?.where ?? {}) as FindOptionsWhere<Task>;
+
+      if (moreThanBoundary(where, 'updatedAt'))
+        return Promise.resolve(fixtures.changed ?? []);
+
+      if (options?.withDeleted || moreThanBoundary(where, 'deletedAt'))
+        return Promise.resolve(fixtures.deleted ?? []);
+
+      return Promise.resolve(fixtures.seriesIds ?? []);
+    });
+
+  /**
+   * Wires a TaskService with routed task-db reads and a stub exception service
+   * exposing `findChangedForTasks`. Calendar ownership resolves to user-1 / cal-1.
+   */
+  const buildService = (
+    fixtures: {
+      changed?: Task[];
+      deleted?: Task[];
+      seriesIds?: Task[];
+      exceptions?: TaskOccurrenceException[];
+    } = {},
+    calendarDbOverride?: {
+      findOneBy: jest.Mock;
+      findAllByOwner: jest.Mock;
+    },
+  ) => {
+    const findAll = routedChangedFindAll(fixtures);
+    const taskDb = { findAll };
+    const calendarDb = calendarDbOverride ?? buildCalendarDatabaseService();
+    const exceptionService = {
+      findChangedForTasks: jest
+        .fn()
+        .mockResolvedValue(fixtures.exceptions ?? []),
+    };
+    const service = new TaskService(
+      taskDb as never,
+      calendarDb as never,
+      buildGroupDatabaseService() as never,
+      new RecurrenceRuleService(null as never) as never,
+      exceptionService as never,
+    );
+
+    return { service, findAll, exceptionService, calendarDb };
+  };
+
+  /**
+   * Returns the `findAll` options object from the call matching `predicate`, or
+   * throws if no such call was recorded — keeps each test's assertions free of
+   * optional-chaining noise.
+   */
+  const findOptions = (
+    findAll: jest.Mock,
+    predicate: (options: FindManyOptions<Task>) => boolean,
+  ): FindManyOptions<Task> => {
+    const calls = findAll.mock.calls as Array<[FindManyOptions<Task>?]>;
+    const match = calls.find((call) => predicate(call[0] ?? {}));
+
+    if (!match || !match[0]) throw new Error('no matching findAll call');
+
+    return match[0];
+  };
+
+  /**
+   * Returns the where clause of the changed-series read (`updatedAt: MoreThan`).
+   */
+  const changedWhere = (findAll: jest.Mock): FindOptionsWhere<Task> =>
+    (findOptions(findAll, (options) =>
+      Boolean(
+        moreThanBoundary(
+          (options.where ?? {}) as FindOptionsWhere<Task>,
+          'updatedAt',
+        ),
+      ),
+    ).where ?? {}) as FindOptionsWhere<Task>;
+
+  const SINCE = new Date('2026-06-20T12:00:00.000Z');
+
+  it('returns the changed series rows with the recurrence relation requested', async () => {
+    const changed = [makeTask({ id: 'task-1', recurrenceRuleId: 'rule-1' })];
+    const { service, findAll } = buildService({ changed });
+
+    const result = await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(result.tasks).toEqual(changed);
+
+    const changedOptions = findOptions(findAll, (options) =>
+      Boolean(
+        moreThanBoundary(
+          (options.where ?? {}) as FindOptionsWhere<Task>,
+          'updatedAt',
+        ),
+      ),
+    );
+
+    expect(changedOptions.relations).toEqual({ recurrenceRule: true });
+    expect(changedWhere(findAll).calendarId).toBe('cal-1');
+  });
+
+  it('returns soft-deleted series ids via a withDeleted read', async () => {
+    const deleted = [
+      makeTask({ id: 'task-old-1' }),
+      makeTask({ id: 'task-old-2' }),
+    ];
+    const { service, findAll } = buildService({ deleted });
+
+    const result = await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(result.deleted).toEqual(['task-old-1', 'task-old-2']);
+
+    const deletedOptions = findOptions(
+      findAll,
+      (options) => options.withDeleted === true,
+    );
+
+    expect(
+      moreThanBoundary(
+        (deletedOptions.where ?? {}) as FindOptionsWhere<Task>,
+        'deletedAt',
+      ),
+    ).toEqual(SINCE);
+  });
+
+  it('returns changed exceptions scoped to the calendar series ids', async () => {
+    const exceptions = [makeException({ id: 'exc-1' })];
+    const seriesIds = [makeTask({ id: 'task-1' }), makeTask({ id: 'task-2' })];
+    const { service, exceptionService } = buildService({
+      exceptions,
+      seriesIds,
+    });
+
+    const result = await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(result.exceptions).toEqual(exceptions);
+    expect(exceptionService.findChangedForTasks).toHaveBeenCalledWith(
+      ['task-1', 'task-2'],
+      SINCE,
+    );
+  });
+
+  it('uses `since` as the strict lower bound on changed and deleted reads', async () => {
+    const { service, findAll } = buildService({});
+
+    await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(moreThanBoundary(changedWhere(findAll), 'updatedAt')).toEqual(SINCE);
+  });
+
+  it('skips all reads on the first call (since=null) and returns only the cursor', async () => {
+    const { service, findAll, exceptionService } = buildService({});
+
+    const result = await service.findChangedSince('user-1', null, 'cal-1');
+
+    expect(result.tasks).toEqual([]);
+    expect(result.deleted).toEqual([]);
+    expect(result.exceptions).toEqual([]);
+    expect(result.serverTime).toBeInstanceOf(Date);
+    expect(findAll).not.toHaveBeenCalled();
+    expect(exceptionService.findChangedForTasks).not.toHaveBeenCalled();
+  });
+
+  it('returns a server-clock cursor (serverTime) on a delta call', async () => {
+    const before = Date.now();
+    const { service } = buildService({});
+
+    const result = await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(result.serverTime).toBeInstanceOf(Date);
+    expect(result.serverTime.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it('excludes todos from the changed set when includeTodos is false', async () => {
+    const { service, findAll } = buildService({});
+
+    await service.findChangedSince('user-1', SINCE, 'cal-1', {
+      includeTodos: false,
+    });
+
+    expect(operatorType(changedWhere(findAll).startAt)).toBe('not');
+  });
+
+  it('includes todos by default (no startAt constraint on the changed read)', async () => {
+    const { service, findAll } = buildService({});
+
+    await service.findChangedSince('user-1', SINCE, 'cal-1');
+
+    expect(changedWhere(findAll).startAt).toBeUndefined();
+  });
+
+  it('throws 403 when the calendar belongs to another user', async () => {
+    const calendarDbOverride = {
+      findOneBy: jest.fn().mockResolvedValue({
+        id: 'cal-1',
+        ownerId: 'someone-else',
+      } as Calendar),
+      findAllByOwner: jest.fn().mockResolvedValue([]),
+    };
+    const { service } = buildService({}, calendarDbOverride);
+
+    await expect(
+      service.findChangedSince('user-1', SINCE, 'cal-1'),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('throws 404 when the calendar does not exist', async () => {
+    const calendarDbOverride = {
+      findOneBy: jest.fn().mockResolvedValue(null),
+      findAllByOwner: jest.fn().mockResolvedValue([]),
+    };
+    const { service } = buildService({}, calendarDbOverride);
+
+    await expect(
+      service.findChangedSince('user-1', SINCE, 'missing-cal'),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+});

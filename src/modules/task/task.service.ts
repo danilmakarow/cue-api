@@ -22,6 +22,7 @@ import {
   RecurrenceRule,
   Task,
   TaskGroup,
+  TaskOccurrenceException,
 } from '@/modules/database/entities';
 import {
   CalendarDatabaseService,
@@ -127,6 +128,28 @@ export interface RecurringEditProposal {
 }
 
 /**
+ * Options narrowing a change-detection (delta) read.
+ */
+export interface FindChangedOptions {
+  includeTodos?: boolean;
+}
+
+/**
+ * The precise delta returned by `findChangedSince`. `tasks` are the changed
+ * series rows (recurrence relation hydrated), `deleted` the soft-deleted series
+ * ids, `exceptions` the changed per-occurrence overrides, and `serverTime` the
+ * opaque cursor the client echoes on its next call. On the first call (no
+ * `since`), the service returns empty arrays and only the cursor, letting the
+ * client fall back to a full per-window SWR sync.
+ */
+export interface ChangedSince {
+  tasks: Task[];
+  deleted: string[];
+  exceptions: TaskOccurrenceException[];
+  serverTime: Date;
+}
+
+/**
  * Service handling Task CRUD, completion, recurrence-aware reads, and the three
  * recurring-edit scopes (this occurrence / this-and-following / all).
  */
@@ -219,6 +242,79 @@ export class TaskService {
       },
       order: { startAt: 'ASC' },
     });
+  }
+
+  /**
+   * Computes the precise change-delta for a calendar since the opaque cursor
+   * `since`: the changed series rows (with their recurrence rule hydrated), the
+   * ids of series soft-deleted after `since` (visible via `.withDeleted()`),
+   * and the per-occurrence overrides changed after `since`. `serverTime` is the
+   * server-clock instant captured BEFORE the reads, returned as the cursor the
+   * client echoes next time — using the server clock (not the client's) avoids
+   * skew, and capturing it first guarantees no change is missed between the
+   * reads and the stamp (at worst a change is re-reported, which is idempotent).
+   *
+   * On the first call `since` is null: the client has no cursor yet, so there is
+   * nothing to diff against — return empty sets and just hand back `serverTime`
+   * for the client to store, letting the normal full per-window SWR sync cover
+   * the initial load.
+   *
+   * Scoped to a single calendar the user owns (404/403 on miss). `includeTodos`
+   * defaults to true so timeless todos are diffed alongside timed tasks.
+   */
+  async findChangedSince(
+    userId: string,
+    since: Date | null,
+    calendarId: string,
+    opts: FindChangedOptions = {},
+  ): Promise<ChangedSince> {
+    await this.ensureCalendarOwnedByUser(calendarId, userId);
+
+    // Capture the cursor before any read so a write landing mid-read is at worst
+    // re-reported on the next delta, never skipped.
+    const serverTime = new Date();
+
+    if (since === null) {
+      return { tasks: [], deleted: [], exceptions: [], serverTime };
+    }
+
+    const includeTodos = opts.includeTodos ?? true;
+
+    const changedTasks = await this.taskDatabaseService.findAll({
+      where: {
+        calendarId,
+        updatedAt: MoreThan(since),
+        ...(includeTodos ? {} : { startAt: Not(IsNull()) }),
+      },
+      relations: { recurrenceRule: true },
+      order: { updatedAt: 'ASC' },
+    });
+
+    // `.withDeleted()` is required for soft-deleted rows to be visible at all;
+    // we then keep only those whose tombstone (`deletedAt`) landed after the
+    // cursor so the client can drop exactly the newly-removed series.
+    const deletedRows = await this.taskDatabaseService.findAll({
+      where: {
+        calendarId,
+        deletedAt: MoreThan(since),
+      },
+      withDeleted: true,
+    });
+    const deleted = deletedRows.map((task) => task.id);
+
+    // Exceptions are keyed by taskId, not calendarId, so scope the changed-
+    // exception read to this calendar's (non-deleted) series ids.
+    const seriesRows = await this.taskDatabaseService.findAll({
+      where: { calendarId },
+      select: { id: true },
+    });
+    const exceptions =
+      await this.taskOccurrenceExceptionService.findChangedForTasks(
+        seriesRows.map((task) => task.id),
+        since,
+      );
+
+    return { tasks: changedTasks, deleted, exceptions, serverTime };
   }
 
   /**

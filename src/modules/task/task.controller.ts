@@ -14,6 +14,8 @@ import {
 import { ApiParam, ApiTags } from '@nestjs/swagger';
 
 import {
+  ChangesDTO,
+  ChangesQuery,
   CompletionResultDTO,
   DailyCountsDTO,
   DailyCountsQuery,
@@ -25,6 +27,7 @@ import {
   UpdateTaskDto,
   toOccurrenceDTO,
   toTaskDTO,
+  toTaskOccurrenceExceptionDTO,
 } from './dtos';
 import { CreateTaskDto } from './dtos';
 import { TaskService } from './task.service';
@@ -101,6 +104,38 @@ export class TaskController {
     );
 
     return { counts };
+  }
+
+  /**
+   * Returns the precise change-delta for a calendar since the opaque cursor
+   * `since` (the previous response's `serverTime`). Declared before `@Get(':id')`
+   * so the literal `changes` path is matched ahead of the parametric id route.
+   * On the first call `since` is omitted — the response carries empty sets and
+   * only the cursor, letting the client fall back to full per-window SWR.
+   */
+  @Get('changes')
+  @Swagger({
+    summary: 'Get changed/deleted series + exceptions since an opaque cursor.',
+    responseDto: ChangesDTO,
+    responseStatus: 200,
+  })
+  async getChanges(
+    @CurrentUser() user: User,
+    @Query() query: ChangesQuery,
+  ): Promise<ChangesDTO> {
+    const delta = await this.taskService.findChangedSince(
+      user.id,
+      query.since ? new Date(query.since) : null,
+      query.calendarId,
+      { includeTodos: query.includeTodos },
+    );
+
+    return {
+      tasks: delta.tasks.map(toTaskDTO),
+      deleted: delta.deleted,
+      exceptions: delta.exceptions.map(toTaskOccurrenceExceptionDTO),
+      serverTime: delta.serverTime.toISOString(),
+    };
   }
 
   /**

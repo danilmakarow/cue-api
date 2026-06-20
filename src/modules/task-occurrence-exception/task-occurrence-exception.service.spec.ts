@@ -16,16 +16,27 @@ const buildDatabaseService = () => ({
   ),
 });
 
+/**
+ * Builds a task-database stub exposing only `touchUpdatedAt` — the parent-bump
+ * the exception write path now calls so override changes surface in the delta
+ * endpoint.
+ */
+const buildTaskDatabaseService = () => ({
+  touchUpdatedAt: jest.fn().mockResolvedValue(undefined),
+});
+
 describe('TaskOccurrenceExceptionService', () => {
   describe('findForTask', () => {
     it('reads all exception rows for the task', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const rows = [{ id: 'exc-1' }] as TaskOccurrenceException[];
 
       databaseService.findAllBy.mockResolvedValue(rows);
 
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
 
       const result = await service.findForTask('task-1');
@@ -40,8 +51,10 @@ describe('TaskOccurrenceExceptionService', () => {
   describe('upsertOverride — insert path', () => {
     it('creates a new exception when none exists for the coordinate', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
       const originalStart = new Date('2026-06-02T13:00:00.000Z');
       const overrideStartAt = new Date('2026-06-02T18:00:00.000Z');
@@ -66,12 +79,17 @@ describe('TaskOccurrenceExceptionService', () => {
       });
       expect(databaseService.save).toHaveBeenCalledTimes(1);
       expect(result.id).toBe('exc-1');
+      // Landmine fix: a new override bumps the parent Task.updatedAt so the
+      // delta endpoint sees it.
+      expect(taskDatabaseService.touchUpdatedAt).toHaveBeenCalledWith('task-1');
     });
 
     it('defaults isSkipped to true when creating a skip', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
       const originalStart = new Date('2026-06-02T13:00:00.000Z');
 
@@ -88,6 +106,7 @@ describe('TaskOccurrenceExceptionService', () => {
   describe('upsertOverride — update path', () => {
     it('mutates the existing row and saves it', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const originalStart = new Date('2026-06-02T13:00:00.000Z');
       const existing = {
         id: 'exc-1',
@@ -104,6 +123,7 @@ describe('TaskOccurrenceExceptionService', () => {
 
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
       const completedAt = new Date('2026-06-02T14:00:00.000Z');
 
@@ -112,10 +132,13 @@ describe('TaskOccurrenceExceptionService', () => {
       expect(databaseService.createInstance).not.toHaveBeenCalled();
       expect(existing.completedAt).toEqual(completedAt);
       expect(databaseService.save).toHaveBeenCalledWith(existing);
+      // Landmine fix: mutating an existing override also bumps the parent.
+      expect(taskDatabaseService.touchUpdatedAt).toHaveBeenCalledWith('task-1');
     });
 
     it('short-circuits without saving when nothing changed', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const originalStart = new Date('2026-06-02T13:00:00.000Z');
       const existingCompletedAt = new Date('2026-06-02T14:00:00.000Z');
       const existing = {
@@ -133,6 +156,7 @@ describe('TaskOccurrenceExceptionService', () => {
 
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
 
       const result = await service.upsertOverride('task-1', originalStart, {
@@ -143,10 +167,13 @@ describe('TaskOccurrenceExceptionService', () => {
 
       expect(databaseService.save).not.toHaveBeenCalled();
       expect(result).toBe(existing);
+      // No write happened, so the parent must not be touched either.
+      expect(taskDatabaseService.touchUpdatedAt).not.toHaveBeenCalled();
     });
 
     it('clears a field when an override is explicitly set back to null', async () => {
       const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
       const originalStart = new Date('2026-06-02T13:00:00.000Z');
       const existing = {
         id: 'exc-1',
@@ -163,6 +190,7 @@ describe('TaskOccurrenceExceptionService', () => {
 
       const service = new TaskOccurrenceExceptionService(
         databaseService as never,
+        taskDatabaseService as never,
       );
 
       await service.upsertOverride('task-1', originalStart, {

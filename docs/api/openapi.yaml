@@ -313,6 +313,72 @@ paths:
         '404':
           description: The calendar does not exist.
 
+  /tasks/changes:
+    get:
+      tags: [tasks]
+      summary: Precise change-delta for a calendar since an opaque cursor
+      description: |
+        Returns everything that changed in `calendarId` since the opaque cursor
+        `since` (the `serverTime` of the previous response, echoed verbatim):
+
+        - `tasks` — changed series rows (`updatedAt > since`), each with the
+          embedded `recurrence` rule.
+        - `deleted` — ids of series soft-deleted (`deletedAt > since`); visible
+          via `withDeleted`.
+        - `exceptions` — per-occurrence overrides changed since the cursor.
+          Exceptions are hard-deleted (no tombstone), so a *removed* exception is
+          surfaced indirectly by the parent Task's `updatedAt` bump (the write
+          path touches the parent).
+        - `serverTime` — the new opaque cursor (server clock, not the client's),
+          captured BEFORE the reads so no change is missed between read and stamp.
+
+        On the FIRST call, omit `since`: the response carries empty sets and only
+        the cursor for the client to store, and the client falls back to a full
+        per-window SWR sync for the initial load. The cursor is opaque — today an
+        ISO-8601 server time, internally swappable for a monotonic syncVersion
+        behind the same shape.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Calendar to diff. Must belong to the authenticated user.
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Opaque cursor — the previous response's `serverTime`, echoed
+            verbatim. Omit on the first call to force full per-window SWR.
+        - name: includeTodos
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: When false, timeless todos are excluded from the changed set.
+      responses:
+        '200':
+          description: The change-delta since the cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangesDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+
   /tasks/{id}:
     get:
       tags: [tasks]
@@ -873,6 +939,79 @@ components:
             '2026-06-20': 3
             '2026-06-21': 1
             '2026-06-23': 2
+
+    TaskOccurrenceExceptionDTO:
+      type: object
+      description: |
+        A per-occurrence override (skip / reschedule / rename / completion) on a
+        recurring task. Carried by GET /tasks/changes. Instance identity =
+        (taskId, originalStartAt).
+      required:
+        [id, taskId, originalStartAt, isSkipped, overrideStartAt, overrideEndAt,
+         overrideTitle, completedAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        taskId:
+          type: string
+          format: uuid
+          description: Parent series anchor id.
+        originalStartAt:
+          type: string
+          format: date-time
+          description: Rule-generated start this override applies to (instance key).
+        isSkipped:
+          type: boolean
+        overrideStartAt:
+          type: [string, 'null']
+          format: date-time
+        overrideEndAt:
+          type: [string, 'null']
+          format: date-time
+        overrideTitle:
+          type: [string, 'null']
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ChangesDTO:
+      type: object
+      description: |
+        The precise change-delta for a calendar. Returned by GET /tasks/changes.
+        Apply order on the client: drop `deleted` series, re-pull windows
+        overlapping each changed series, invalidate the window of each changed
+        exception's originalStartAt, then store `serverTime` as the next cursor.
+      required: [tasks, deleted, exceptions, serverTime]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskDTO'
+          description: Changed series rows (updatedAt > since), recurrence embedded.
+        deleted:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Series ids soft-deleted since the cursor (deletedAt > since).
+          example: ['task-old-1', 'task-old-2']
+        exceptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskOccurrenceExceptionDTO'
+          description: Per-occurrence overrides changed since the cursor.
+        serverTime:
+          type: string
+          format: date-time
+          description: New opaque cursor (server clock); echo as `since` next time.
+          example: '2026-06-20T14:35:22.145Z'
 
     TaskGroupDTO:
       type: object

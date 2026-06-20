@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
+import { In, MoreThan } from 'typeorm';
 
 import { TaskOccurrenceException } from '@/modules/database/entities';
-import { TaskOccurrenceExceptionDatabaseService } from '@/modules/database/services';
+import {
+  TaskDatabaseService,
+  TaskOccurrenceExceptionDatabaseService,
+} from '@/modules/database/services';
 
 /**
  * The mutable per-instance override fields an upsert may set. `originalStart`
@@ -23,6 +27,7 @@ export interface OccurrenceOverrideChanges {
 export class TaskOccurrenceExceptionService {
   constructor(
     private readonly taskOccurrenceExceptionDatabaseService: TaskOccurrenceExceptionDatabaseService,
+    private readonly taskDatabaseService: TaskDatabaseService,
   ) {}
 
   /**
@@ -30,6 +35,25 @@ export class TaskOccurrenceExceptionService {
    */
   async findForTask(taskId: string): Promise<TaskOccurrenceException[]> {
     return this.taskOccurrenceExceptionDatabaseService.findAllBy({ taskId });
+  }
+
+  /**
+   * Returns the exception rows for the given task ids that changed strictly
+   * after `since`. Backs the delta endpoint: exceptions are hard-deleted (no
+   * tombstone), so a removal is made visible to the client by the parent Task's
+   * `updatedAt` touch rather than appearing here. Returns an empty array when
+   * no task ids are supplied.
+   */
+  async findChangedForTasks(
+    taskIds: string[],
+    since: Date,
+  ): Promise<TaskOccurrenceException[]> {
+    if (taskIds.length === 0) return [];
+
+    return this.taskOccurrenceExceptionDatabaseService.findAllBy({
+      taskId: In(taskIds),
+      updatedAt: MoreThan(since),
+    });
   }
 
   /**
@@ -55,7 +79,14 @@ export class TaskOccurrenceExceptionService {
 
       if (!mutated) return existing;
 
-      return this.taskOccurrenceExceptionDatabaseService.save(existing);
+      const saved =
+        await this.taskOccurrenceExceptionDatabaseService.save(existing);
+
+      // Bump the parent Task.updatedAt so this exception write is visible to the
+      // delta endpoint (the parent is otherwise untouched by an exception save).
+      await this.taskDatabaseService.touchUpdatedAt(taskId);
+
+      return saved;
     }
 
     const created = this.taskOccurrenceExceptionDatabaseService.createInstance({
@@ -68,7 +99,14 @@ export class TaskOccurrenceExceptionService {
       completedAt: changes.completedAt ?? null,
     });
 
-    return this.taskOccurrenceExceptionDatabaseService.save(created);
+    const saved =
+      await this.taskOccurrenceExceptionDatabaseService.save(created);
+
+    // Same touch on the create path: a brand-new override must surface in the
+    // parent series' delta window.
+    await this.taskDatabaseService.touchUpdatedAt(taskId);
+
+    return saved;
   }
 
   /**
