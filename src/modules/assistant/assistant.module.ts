@@ -7,14 +7,20 @@ import { AssistantService } from './assistant.service';
 import { MemoryExtractorService } from './background/memory-extractor.service';
 import { SummarizerService } from './background/summarizer.service';
 import { CommandHandlerService } from './commands/command-handler.service';
+import { ConflictResolverService } from './conflict/conflict-resolver.service';
+import { HeldConflictStore } from './conflict/held-conflict.store';
 import { ContextBuilderService } from './context-builder.service';
 import { LinkingService } from './linking.service';
+import { ToolLoopService } from './orchestration/tool-loop.service';
+import { ReplyPresenter } from './reply/reply-presenter.service';
 import { ScheduleReaderService } from './schedule-reader.service';
+import { ConversationStore } from './session/conversation.store';
 import {
   PENDING_INTERACTION_STORE,
   PendingInteractionService,
 } from './session/pending-interaction.store';
 import { PendingQuestionCleanupService } from './session/pending-question-cleanup.service';
+import { TurnAuditStore } from './session/turn-audit.store';
 import { TurnRunnerService } from './session/turn-runner.service';
 import { ToolDispatcherService } from './tools/tool-dispatcher.service';
 import { WebhookRegistrarService } from './webhook-registrar.service';
@@ -60,15 +66,21 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
   controllers: [AssistantWebhookController],
   providers: [
     AssistantConfig,
+    ReplyPresenter,
     ScheduleReaderService,
     ContextBuilderService,
     ToolDispatcherService,
+    ToolLoopService,
     CommandHandlerService,
     LinkingService,
     SummarizerService,
     MemoryExtractorService,
     AssistantService,
     TurnRunnerService,
+    ConversationStore,
+    TurnAuditStore,
+    HeldConflictStore,
+    ConflictResolverService,
     PendingInteractionService,
     PendingQuestionCleanupService,
     {

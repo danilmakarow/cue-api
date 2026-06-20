@@ -83,7 +83,6 @@ const buildConsumer = (
     beginLinking: jest.fn().mockResolvedValue('Please connect in the app.'),
   };
   const assistantService = {
-    handleText: jest.fn().mockResolvedValue(undefined),
     handleCommand: jest.fn().mockResolvedValue(undefined),
     handleCallback: jest.fn().mockResolvedValue(undefined),
   };
@@ -95,12 +94,13 @@ const buildConsumer = (
       .fn()
       .mockResolvedValue(options.hasPendingQuestion ?? false),
   };
-  // A REAL TurnRunnerService wired to the mocked orchestrator: the convergence
-  // point delegates straight into handleText, so the existing routing
-  // assertions (handleText called with the right params) stay green in place.
-  const turnRunner = new TurnRunnerService(
-    assistantService as unknown as AssistantService,
-  );
+  // Story 8 (ADR 0036): the turn lifecycle now lives ON TurnRunnerService, so the
+  // model-driven flows converge at `turnRunner.runFromMessage` (the convergence
+  // point) rather than `assistantService.handleText`. We mock the runner here so
+  // the routing assertions target the seam the consumer actually dispatches to.
+  const turnRunner = {
+    runFromMessage: jest.fn().mockResolvedValue(undefined),
+  } as unknown as jest.Mocked<TurnRunnerService>;
   const config = {
     dedupeTtlSeconds: 3600,
     translateVoiceToEnglish: false,
@@ -153,9 +153,9 @@ describe('WebhookConsumer', () => {
 
     expect(harness.connector.fetchMedia).toHaveBeenCalledWith(normalized.media);
     expect(harness.stt.transcribe).toHaveBeenCalledTimes(1);
-    expect(harness.assistantService.handleText).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'user-1' }),
+    expect(harness.turnRunner.runFromMessage).toHaveBeenCalledWith(
       expect.objectContaining({
+        user: expect.objectContaining({ id: 'user-1' }),
         text: 'move my 3pm to 4',
         vendorChatId: 'chat-1',
       }),
@@ -187,7 +187,7 @@ describe('WebhookConsumer', () => {
     const [, message] = harness.connector.sendMessage.mock.calls[0];
 
     expect(message.text).toMatch(/didn't come through|hear/i);
-    expect(harness.assistantService.handleText).not.toHaveBeenCalled();
+    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
   });
 
   it('drops a duplicate update without processing', async () => {
@@ -205,7 +205,7 @@ describe('WebhookConsumer', () => {
     expect(
       harness.telegramLinkDatabaseService.findByTelegramChatId,
     ).not.toHaveBeenCalled();
-    expect(harness.assistantService.handleText).not.toHaveBeenCalled();
+    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
   });
 
   it('sends the linking prompt for an unlinked chat and never calls the orchestrator', async () => {
@@ -225,7 +225,7 @@ describe('WebhookConsumer', () => {
       null,
     );
     expect(harness.connector.sendMessage).toHaveBeenCalledTimes(1);
-    expect(harness.assistantService.handleText).not.toHaveBeenCalled();
+    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
   });
 
   it('routes a text message to the orchestrator for a linked user', async () => {
@@ -240,9 +240,9 @@ describe('WebhookConsumer', () => {
 
     await harness.consumer.process(buildJob('{"update_id":104}'));
 
-    expect(harness.assistantService.handleText).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'user-1' }),
+    expect(harness.turnRunner.runFromMessage).toHaveBeenCalledWith(
       expect.objectContaining({
+        user: expect.objectContaining({ id: 'user-1' }),
         text: 'what is on tomorrow?',
         correlationId: 'cid-1',
       }),
@@ -278,7 +278,7 @@ describe('WebhookConsumer', () => {
     };
     const harness = buildConsumer(normalized);
 
-    harness.assistantService.handleText.mockRejectedValue(new Error('db down'));
+    harness.turnRunner.runFromMessage.mockRejectedValue(new Error('db down'));
 
     await expect(
       harness.consumer.process(buildJob('{"update_id":106}')),

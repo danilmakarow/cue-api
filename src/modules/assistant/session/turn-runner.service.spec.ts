@@ -1,5 +1,11 @@
-import { AssistantService } from './assistant.service';
-import { ConflictCallbackAction, HeldConflictWrite } from './assistant.types';
+import { ConversationStore } from './conversation.store';
+import { TurnAuditStore } from './turn-audit.store';
+import { TurnRunnerService } from './turn-runner.service';
+import { HeldConflictWrite } from '../assistant.types';
+import { ConflictResolverService } from '../conflict/conflict-resolver.service';
+import { HeldConflictStore } from '../conflict/held-conflict.store';
+import { ToolLoopService } from '../orchestration/tool-loop.service';
+import { ReplyPresenter } from '../reply/reply-presenter.service';
 import {
   AiStopReason,
   CompletionResult,
@@ -42,10 +48,12 @@ const CONVERSATION = { id: 'conv-1', userId: 'user-1' } as Conversation;
 const CHAT_ID = '12345';
 
 /**
- * Assembles an AssistantService with jest mocks for every collaborator, exposing
+ * Assembles a TurnRunnerService with jest mocks for every collaborator, exposing
  * the mocks so tests can program the AI connector and assert on the vendor /
  * redis / dispatcher. Defaults are the common happy path (existing conversation,
- * generous caps).
+ * generous caps). REAL layer instances (stores, presenter, conflict resolver,
+ * tool loop) wrap the same DB-service / vendor / redis mocks so every assertion
+ * observes the identical persistence + send + loop calls through the new layers.
  */
 const buildHarness = () => {
   const ai = { complete: jest.fn(), completeStructured: jest.fn() };
@@ -66,7 +74,6 @@ const buildHarness = () => {
     build: jest.fn().mockResolvedValue({ system: [], messages: [], tools: [] }),
   };
   const toolDispatcher = { dispatch: jest.fn() };
-  const commandHandler = { handle: jest.fn() };
   const summarizer = { maybeSummarize: jest.fn().mockResolvedValue(undefined) };
   const memoryExtractor = { extract: jest.fn().mockResolvedValue(undefined) };
   const taskService = {
@@ -83,6 +90,17 @@ const buildHarness = () => {
     createInstance: jest.fn((partial) => partial),
     save: jest.fn(async (entity) => entity),
   };
+  // Story 8: conversation/audit persistence now lives in dedicated L3 stores.
+  // The turn runner delegates to these; we wrap REAL store instances around the
+  // same DB-service mocks so every existing createInstance/save assertion (and
+  // the `assistantReplies` helper) observes the identical persistence calls.
+  const conversationStore = new ConversationStore(
+    conversationDatabaseService as never,
+    conversationMessageDatabaseService as never,
+  );
+  const turnAuditStore = new TurnAuditStore(
+    conversationMessageDatabaseService as never,
+  );
   // The pending-interaction write side (ADR 0010). Defaults are inert: no open
   // question, every claim misses — so the existing non-ask suites are unaffected.
   const pendingInteraction = {
@@ -93,22 +111,54 @@ const buildHarness = () => {
     claimById: jest.fn().mockResolvedValue(null),
     claimHotByUser: jest.fn().mockResolvedValue(null),
   };
-
-  const service = new AssistantService(
-    ai as never,
-    vendor as never,
-    alert as never,
+  // Story 8 (L9 reply/egress): the turn runner no longer holds the vendor
+  // connector — it delegates every send to the ReplyPresenter, the sole caller of
+  // vendor.sendMessage/sendActions/acknowledgeCallback. We wrap a REAL presenter
+  // around the same vendor mock so every existing vendor.* assertion observes the
+  // identical send calls (text, keyboards, callback acks) through the new layer.
+  const replyPresenter = new ReplyPresenter(vendor as never);
+  // Story 8 (L8 conflict layer, ADR 0006): the deterministic held-conflict state
+  // + replay now live in dedicated providers. We wrap REAL instances around the
+  // same redis / config / taskService / replyPresenter / conversationStore mocks
+  // so every existing redis.set/getdel, taskService.*, and vendor.* assertion
+  // observes the identical calls through the new layer — no assertion changes.
+  const heldConflictStore = new HeldConflictStore(
     redis as never,
+    config as never,
+  );
+  const conflictResolver = new ConflictResolverService(
+    taskService as never,
+    heldConflictStore,
+    replyPresenter,
+    conversationStore,
+  );
+  // Story 8 (L4 tool-loop, the keystone): the agent loop now lives in a dedicated
+  // ToolLoopService. We wrap a REAL instance around the same ai / config /
+  // contextBuilder / toolDispatcher / conflictResolver mocks so every existing
+  // ai.complete, contextBuilder.build, and toolDispatcher.dispatch assertion
+  // observes the identical loop calls through the new layer — no assertion changes.
+  const toolLoop = new ToolLoopService(
+    ai as never,
     config as never,
     contextBuilder as never,
     toolDispatcher as never,
-    commandHandler as never,
+    conflictResolver,
+  );
+
+  // Story 8 (L3 turn runner, ADR 0036): the turn lifecycle now OWNS handleText /
+  // resumeAnswer / finishTurn + the held-hold + ask-suspend tail. The runner is
+  // assembled around the same REAL layer instances + mocks above so every
+  // assertion below observes the identical persistence / send / loop calls.
+  const service = new TurnRunnerService(
+    alert as never,
+    toolLoop as never,
     summarizer as never,
     memoryExtractor as never,
-    taskService as never,
-    conversationDatabaseService as never,
-    conversationMessageDatabaseService as never,
+    conversationStore as never,
+    turnAuditStore as never,
     pendingInteraction as never,
+    replyPresenter as never,
+    heldConflictStore as never,
   );
 
   return {
@@ -137,7 +187,7 @@ const assistantReplies = (conversationMessageDatabaseService: {
     .filter((partial) => partial.role === ConversationMessageRole.ASSISTANT)
     .map((partial) => partial.content);
 
-describe('AssistantService (orchestrator)', () => {
+describe('TurnRunnerService (turn lifecycle)', () => {
   it('runs a tool_use round, dispatches, re-invokes, and replies on end_turn', async () => {
     const harness = buildHarness();
     const call = toolCall('list_tasks', {
@@ -281,7 +331,7 @@ describe('AssistantService (orchestrator)', () => {
       vendorMessageId: null,
     });
 
-    // The map the orchestrator handed the context builder to seed the agenda…
+    // The map the runner handed the context builder to seed the agenda…
     const seededMap = harness.contextBuilder.build.mock.calls[0][0].handleMap;
 
     expect(seededMap).toBeDefined();
@@ -526,183 +576,6 @@ describe('AssistantService (orchestrator)', () => {
     const [, payload] = harness.redis.set.mock.calls[0];
 
     expect(JSON.parse(payload)).toMatchObject({ vendorChatId: CHAT_ID });
-  });
-
-  it('resumes a held write on the confirm callback and writes deterministically', async () => {
-    const harness = buildHarness();
-    const held: HeldConflictWrite = {
-      userId: USER.id,
-      vendorChatId: CHAT_ID,
-      action: {
-        kind: 'create_event',
-        calendarId: 'cal-1',
-        title: 'Dentist',
-        startAt: '2026-06-02T15:00:00Z',
-        endAt: '2026-06-02T16:00:00Z',
-        timezone: 'UTC',
-        notes: null,
-      },
-    };
-
-    harness.redis.getdel.mockResolvedValue(
-      JSON.stringify({
-        userId: held.userId,
-        vendorChatId: held.vendorChatId,
-        actions: [held.action],
-      }),
-    );
-    harness.taskService.create.mockResolvedValue({
-      id: 't-1',
-      title: 'Dentist',
-    });
-
-    await harness.service.handleCallback(USER, {
-      callbackId: 'cb-1',
-      callbackData: `${ConflictCallbackAction.CONFIRM}:token-1`,
-      vendorChatId: CHAT_ID,
-    });
-
-    expect(harness.vendor.acknowledgeCallback).toHaveBeenCalledWith('cb-1');
-    expect(harness.taskService.create).toHaveBeenCalledTimes(1);
-    expect(harness.ai.complete).not.toHaveBeenCalled();
-
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-    expect(reply.text).toMatch(/booked/i);
-  });
-
-  it('executes a confirmed held recurring CREATE verbatim, with its recurrence (Story 9)', async () => {
-    const harness = buildHarness();
-
-    harness.redis.getdel.mockResolvedValue(
-      JSON.stringify({
-        userId: USER.id,
-        vendorChatId: CHAT_ID,
-        actions: [
-          {
-            kind: 'create_recurring_event',
-            calendarId: 'cal-1',
-            title: 'Standup',
-            startAt: '2026-06-10T09:00:00Z',
-            endAt: '2026-06-10T09:15:00Z',
-            timezone: 'UTC',
-            notes: null,
-            groupId: null,
-            isAllDay: false,
-            requiresCompletion: true,
-            recurrence: { frequency: 'WEEKLY', byWeekday: [0, 1, 2, 3, 4] },
-          },
-        ],
-      }),
-    );
-    harness.taskService.create.mockResolvedValue({
-      id: 't-1',
-      title: 'Standup',
-    });
-
-    await harness.service.handleCallback(USER, {
-      callbackId: 'cb-r1',
-      callbackData: `${ConflictCallbackAction.CONFIRM}:token-r1`,
-      vendorChatId: CHAT_ID,
-    });
-
-    expect(harness.taskService.create).toHaveBeenCalledTimes(1);
-
-    // The recurrence rides along verbatim — the series is created, not silently
-    // dropped, with the conflict check bypassed (the user chose "book anyway").
-    const createArg = harness.taskService.create.mock.calls[0][1];
-
-    expect(createArg.recurrence).toMatchObject({
-      frequency: 'WEEKLY',
-      byWeekday: [0, 1, 2, 3, 4],
-    });
-    expect(harness.ai.complete).not.toHaveBeenCalled();
-
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-    expect(reply.text).toMatch(/booked/i);
-  });
-
-  it('executes a confirmed held recurring EDIT at its chosen scope (Story 9)', async () => {
-    const harness = buildHarness();
-
-    harness.redis.getdel.mockResolvedValue(
-      JSON.stringify({
-        userId: USER.id,
-        vendorChatId: CHAT_ID,
-        actions: [
-          {
-            kind: 'update_recurring_event',
-            taskId: 't-1',
-            editScope: 'this_and_following',
-            originalStart: '2026-06-10T09:00:00.000Z',
-            title: null,
-            startAt: '2026-06-10T10:00:00Z',
-            endAt: '2026-06-10T10:30:00Z',
-            groupId: null,
-            recurrence: null,
-          },
-        ],
-      }),
-    );
-    harness.taskService.splitSeries.mockResolvedValue({
-      id: 't-2',
-      title: 'Standup',
-    });
-
-    await harness.service.handleCallback(USER, {
-      callbackId: 'cb-r2',
-      callbackData: `${ConflictCallbackAction.CONFIRM}:token-r2`,
-      vendorChatId: CHAT_ID,
-    });
-
-    // The chosen scope (this_and_following) replays as a splitSeries call with
-    // the held coordinate + changes — never a plain master update.
-    expect(harness.taskService.splitSeries).toHaveBeenCalledTimes(1);
-    expect(harness.taskService.update).not.toHaveBeenCalled();
-
-    const [, taskId, , changes] = harness.taskService.splitSeries.mock.calls[0];
-
-    expect(taskId).toBe('t-1');
-    expect(changes).toMatchObject({
-      startAt: '2026-06-10T10:00:00Z',
-      endAt: '2026-06-10T10:30:00Z',
-    });
-
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-    expect(reply.text).toMatch(/moved/i);
-  });
-
-  it('cancels a held write on the cancel callback without writing', async () => {
-    const harness = buildHarness();
-
-    harness.redis.getdel.mockResolvedValue(
-      JSON.stringify({
-        userId: USER.id,
-        vendorChatId: CHAT_ID,
-        actions: [
-          {
-            kind: 'update_event',
-            taskId: 't-1',
-            startAt: 'a',
-            endAt: null,
-          },
-        ],
-      }),
-    );
-
-    await harness.service.handleCallback(USER, {
-      callbackId: 'cb-2',
-      callbackData: `${ConflictCallbackAction.CANCEL}:token-2`,
-      vendorChatId: CHAT_ID,
-    });
-
-    expect(harness.taskService.update).not.toHaveBeenCalled();
-
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-    expect(reply.text).toMatch(/cancelled/i);
   });
 
   it('replies gracefully and persists nothing extra when the AI errors terminally', async () => {
@@ -1244,7 +1117,7 @@ describe('AssistantService (orchestrator)', () => {
     const askCall = toolCall('ask_user', { question: 'When works for you?' });
 
     // One round: the model calls ask_user. The dispatcher returns the askUser
-    // SENTINEL (no DB touched by the tool itself — the orchestrator suspends).
+    // SENTINEL (no DB touched by the tool itself — the runner suspends).
     harness.ai.complete.mockResolvedValueOnce(
       completion({ stopReason: AiStopReason.TOOL_USE, toolCalls: [askCall] }),
     );
@@ -1525,56 +1398,5 @@ describe('AssistantService (orchestrator)', () => {
       { vendorChatId: CHAT_ID },
       { text: 'Morning or evening?' },
     );
-  });
-
-  it('applies what it can and reports failures when one held action throws (no rethrow, no retry)', async () => {
-    const harness = buildHarness();
-
-    harness.redis.getdel.mockResolvedValue(
-      JSON.stringify({
-        userId: USER.id,
-        vendorChatId: CHAT_ID,
-        actions: [
-          {
-            kind: 'create_event',
-            calendarId: 'cal-1',
-            title: 'Lesson A',
-            startAt: '2026-06-13T08:00:00Z',
-            endAt: '2026-06-13T11:00:00Z',
-            timezone: 'UTC',
-            notes: null,
-          },
-          {
-            kind: 'create_event',
-            calendarId: 'cal-1',
-            title: 'Lesson B',
-            startAt: '2026-06-14T08:00:00Z',
-            endAt: '2026-06-14T11:00:00Z',
-            timezone: 'UTC',
-            notes: null,
-          },
-        ],
-      }),
-    );
-    harness.taskService.create
-      .mockResolvedValueOnce({ id: 't-a', title: 'Lesson A' })
-      .mockRejectedValueOnce(new Error('calendar gone'));
-
-    // Must not throw, so the BullMQ job never retries against the burned token.
-    await expect(
-      harness.service.handleCallback(USER, {
-        callbackId: 'cb-3',
-        callbackData: `${ConflictCallbackAction.CONFIRM}:token-3`,
-        vendorChatId: CHAT_ID,
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(harness.taskService.create).toHaveBeenCalledTimes(2);
-
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-    // Honest partial result: what succeeded AND what to retry.
-    expect(reply.text).toMatch(/booked "Lesson A"/);
-    expect(reply.text).toMatch(/couldn't apply "Lesson B"/i);
   });
 });
