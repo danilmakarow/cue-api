@@ -6,7 +6,7 @@ import { ASSISTANT_SYSTEM_PROMPT } from './assistant.prompts';
 import { formatTaskLine } from './event-formatting';
 import { ScheduleReaderService } from './schedule-reader.service';
 import { HandleMap } from './tools/handle-map';
-import { ASSISTANT_TOOL_SCHEMAS } from './tools/tool-schemas';
+import { toolRegistry } from './tools/tool-registry';
 import { PromptBlock, PromptRole, ToolSchema } from '@/modules/ai/ai.types';
 import {
   ConversationMessage,
@@ -298,6 +298,8 @@ export class ContextBuilderService {
       { role: PromptRole.USER, content: finalUserContent },
     ];
 
-    return { system, tools: ASSISTANT_TOOL_SCHEMAS, messages };
+    const tools = await toolRegistry.toSchemas();
+
+    return { system, tools, messages };
   }
 }

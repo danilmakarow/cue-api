@@ -254,6 +254,65 @@ paths:
         '404':
           description: The calendar does not exist.
 
+  /tasks/daily-counts:
+    get:
+      tags: [tasks]
+      summary: Per-day task occurrence counts in a calendar and date range
+      description: |
+        Returns the number of task occurrences bucketed onto each local date
+        (`YYYY-MM-DD`, in each task's timezone) within the half-open window
+        `[from, to)` for `calendarId`. Occurrence-aware: each recurring anchor is
+        expanded (exceptions applied) and every resulting occurrence contributes
+        to its date bucket — a weekly task with 4 occurrences in range adds 4
+        across the respective days. Counts on the same local date are summed and
+        zero-count days are omitted from the response.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Calendar to count for. Must belong to the authenticated user.
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive lower bound of the window (ISO-8601).
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Exclusive upper bound of the window (ISO-8601).
+        - name: includeCompleted
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, completed occurrences are counted.
+      responses:
+        '200':
+          description: Per-day occurrence counts for the window.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyCountsDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: The calendar is owned by another user.
+        '404':
+          description: The calendar does not exist.
+
   /tasks/{id}:
     get:
       tags: [tasks]
@@ -796,6 +855,24 @@ components:
           type: boolean
         isException:
           type: boolean
+
+    DailyCountsDTO:
+      type: object
+      description: |
+        Per-day occurrence counts. Returned by GET /tasks/daily-counts. The
+        `counts` map is keyed by local date (YYYY-MM-DD, in each task's
+        timezone); zero-count days are omitted.
+      required: [counts]
+      properties:
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Occurrence count per local date (YYYY-MM-DD).
+          example:
+            '2026-06-20': 3
+            '2026-06-21': 1
+            '2026-06-23': 2
 
     TaskGroupDTO:
       type: object

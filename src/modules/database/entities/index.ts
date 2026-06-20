@@ -32,3 +32,11 @@ export {
   UserMemoryFactType,
   UserMemoryFactSource,
 } from './user-memory-fact.entity';
+export {
+  PendingQuestion,
+  PendingQuestionStatus,
+} from './pending-question.entity';
+export type {
+  PendingQuestionPayload,
+  PendingQuestionOption,
+} from './pending-question.entity';

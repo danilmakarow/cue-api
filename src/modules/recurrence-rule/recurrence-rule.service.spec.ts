@@ -823,6 +823,54 @@ describe('RecurrenceRuleService.expandOccurrences', () => {
   });
 });
 
+describe('RecurrenceRuleService.previewSeriesOccurrences (Story 9)', () => {
+  let service: RecurrenceRuleService;
+
+  beforeEach(() => {
+    // Pure + I/O-free: the DB service is never touched when previewing a series.
+    service = new RecurrenceRuleService(null as never);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('expands a bounded COUNT series from the proposed anchor', () => {
+    const result = service.previewSeriesOccurrences({
+      title: 'Standup',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      timezone: 'America/New_York',
+      recurrence: {
+        frequency: RecurrenceFrequency.WEEKLY,
+        endType: RecurrenceEndType.COUNT,
+        count: 3,
+      },
+    });
+
+    expect(
+      result.map((occ) => localDate(occ.occurrenceStart, 'America/New_York')),
+    ).toEqual(['2026-06-01', '2026-06-08', '2026-06-15']);
+    expect(result.every((occ) => occ.isRecurring)).toBe(true);
+  });
+
+  it('bounds a NEVER-ending rule to the look-ahead horizon (never unbounded)', () => {
+    const result = service.previewSeriesOccurrences({
+      title: 'Daily',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      timezone: 'America/New_York',
+      recurrence: { frequency: RecurrenceFrequency.DAILY },
+    });
+
+    // ~2 years of daily occurrences — finite, capped well under the engine's
+    // MAX_OCCURRENCES_PER_WINDOW, and the scan returns rather than hanging.
+    expect(result.length).toBeGreaterThan(700);
+    expect(result.length).toBeLessThan(740);
+  });
+});
+
 describe('RecurrenceRuleService CRUD', () => {
   const buildDatabaseService = () => ({
     createInstance: jest.fn((partial: Partial<RecurrenceRule>) => partial),

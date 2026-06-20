@@ -5,9 +5,12 @@ import { Redis } from 'ioredis';
 
 import { AssistantConfig } from './assistant.config';
 import {
+  AskUserOption,
   ConflictCallbackAction,
+  CorrectionReason,
   HeldConflictBatch,
   HeldConflictWrite,
+  HeldRecurrence,
   HeldWriteAction,
   ToolDispatchContext,
   ToolRoundAuditPayload,
@@ -17,18 +20,33 @@ import { MemoryExtractorService } from './background/memory-extractor.service';
 import { SummarizerService } from './background/summarizer.service';
 import { CommandHandlerService } from './commands/command-handler.service';
 import { ContextBuilderService } from './context-builder.service';
+import { ASK_CALLBACK_PREFIX } from './ingress/inbound-router';
+import { PendingInteractionService } from './session/pending-interaction.store';
 import { HandleMap } from './tools/handle-map';
 import { ToolDispatcherService } from './tools/tool-dispatcher.service';
-import { SCHEDULE_FETCH_TOOLS, WRITE_TOOLS } from './tools/tool-schemas';
+import { SCHEDULE_FETCH_TOOLS, WRITE_TOOLS } from './tools/tool-registry';
+import { ToolName } from './tools/tool-schemas';
 import { heldConflictKey } from '../redis/redis.constants';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import { AiConnector } from '@/modules/ai/ai-connector.abstract';
 import { ACTIVE_AI_CONNECTOR } from '@/modules/ai/ai.module';
-import { AiModelRole, AiStopReason, ToolRound } from '@/modules/ai/ai.types';
+import {
+  AiModelRole,
+  AiStopReason,
+  AiToolChoice,
+  PromptBlock,
+  PromptRole,
+  ToolRound,
+  ToolResultBlock,
+} from '@/modules/ai/ai.types';
+import { AlertConnector } from '@/modules/alert/alert-connector.abstract';
+import { ACTIVE_ALERT_CONNECTOR } from '@/modules/alert/alert.module';
+import { AlertSeverity } from '@/modules/alert/alert.types';
 import {
   Conversation,
   ConversationMessageContentType,
   ConversationMessageRole,
+  PendingQuestion,
   User,
 } from '@/modules/database/entities';
 import {
@@ -37,7 +55,11 @@ import {
 } from '@/modules/database/services';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
-import { TaskService } from '@/modules/task/task.service';
+import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
+import {
+  RecurringEditProposal,
+  TaskService,
+} from '@/modules/task/task.service';
 
 /** Reply sent when the AI fails after its bounded retries (spec error table). */
 const AI_FAILURE_REPLY =
@@ -46,6 +68,23 @@ const AI_FAILURE_REPLY =
 /** Reply sent when a turn hits the overall tool round-trip ceiling. */
 const ROUNDTRIP_CEILING_REPLY =
   'That took more steps than I can take in one go — could you narrow it down a little?';
+
+/**
+ * Reply sent when the model's final, no-tool-call turn stopped on `max_tokens`:
+ * the text we hold is a possibly mid-sentence fragment, so we send an honest
+ * "I had to cut that short" rather than relay a truncated reply that could read
+ * as complete (or, worse, half-confirm an action). The user can ask to continue.
+ */
+const TRUNCATED_REPLY =
+  "I had to cut that short — ask me to continue and I'll finish.";
+
+/**
+ * Reply sent when the model's final turn stopped on `refusal`: the model
+ * declined to answer, so we surface an honest, neutral decline instead of
+ * relaying whatever partial text (if any) rode along with the refusal.
+ */
+const REFUSAL_REPLY =
+  "I'm not able to help with that one — try rephrasing, or ask me something else.";
 
 /** Tool result returned once the per-turn schedule-fetch cap is reached. */
 const SCHEDULE_CAP_TOOL_RESULT =
@@ -72,16 +111,48 @@ const CLAIM_WITHOUT_WRITE_REPLY =
   "Hmm — I don't think that actually saved. Nothing was changed on my side. Could you try again?";
 
 /**
- * Detects the model asserting *its own* calendar mutation (EN + RU). Anchored to
- * a first-person subject for English ("I created / I've booked / added it") and
- * to first-person verb stems for Russian (which drops the pronoun: "Создаю…",
- * "добавил"). Used only as the *positive* half — a {@link CLAIM_VETO_PATTERN}
- * match always overrides it, and it is consulted only when the model made no
- * write attempt at all (the pure-narration trap). Reporting an existing booking
- * ("the cancelled meeting was Friday") is not first-person and does not match.
+ * Corrective USER message appended to the conversation when the model narrates a
+ * change but calls no tools (ADR 0009 narration re-drive). It nudges the model
+ * to actually call the tools on the next round (issued with `tool_choice:'any'`)
+ * or to ask a clarifying question instead. This is a plain user `PromptBlock` —
+ * NEVER a synthetic `tool_result` (a `tool_result` with no matching `tool_use`
+ * is an Anthropic 400).
+ */
+const CORRECTIVE_NUDGE =
+  'You said you would make changes but called no tools, so nothing was saved. ' +
+  'If you intend to act, call the tools now to actually make the changes; ' +
+  'otherwise tell me what you need from me.';
+
+/**
+ * Honest reply sent when the narration re-drive budget is exhausted (ADR 0009
+ * `unresolved` outcome): we could not get the model to commit the action, so we
+ * say so plainly rather than claim success or stay silent. Never thrown — the
+ * BullMQ queue is `attempts:1`, so the turn must always answer.
+ */
+const CORRECTION_EXHAUSTED_REPLY =
+  "I wasn't able to make those changes just now — nothing was saved. Could you try again, perhaps one at a time?";
+
+/**
+ * Structured alert-event name fired when the narration re-drive budget is
+ * exhausted (ADR 0009). Stable + greppable so the escalation rate is countable
+ * regardless of the alert sink.
+ */
+const CORRECTION_EXHAUSTED_EVENT = 'assistant.correction_exhausted';
+
+/**
+ * Detects the model asserting *its own* calendar mutation (EN + RU). Matches a
+ * first-person subject for English ("I created / I've booked / added it"), a
+ * present-progressive gerund of a mutation verb ("Creating all seven…",
+ * "Adding it now") — the form an LLM tips into when it narrates a batch write
+ * and the first-person-past regex would miss — and first-person verb stems for
+ * Russian, which drops the pronoun ("Создаю…", "добавил"). A {@link
+ * CLAIM_VETO_PATTERN} match always overrides it. Reporting an existing booking
+ * ("the cancelled meeting was Friday") is neither first-person nor a gerund and
+ * does not match; a benign read summary ("done", "here's your agenda") has no
+ * mutation verb and does not match — so legitimate read-only turns never trip it.
  */
 const MUTATION_CLAIM_PATTERN =
-  /\bI(?:['’]ve|['’]ll|['’]m| have| just| will| already)?\s+(?:created|added|booked|scheduled|saved|set up|moved|rescheduled|updated|deleted|removed|cancell?ed|put (?:it|that|them))\b|\b(?:created|added|booked|scheduled|moved|saved|updated|rescheduled|deleted|removed|cancell?ed) (?:it|them|that|your)\b|созда(?:л|ю|м|ла)|добав(?:ил|лю|ляю|ила)|запис(?:ал|ала)|запланир(?:овал|ую)|перенёс|перенесл[аи]?|перенесу|обнов(?:ил|лю)|удал(?:ил|ю|ила)|сохран(?:ил|ю)/iu;
+  /\bI(?:['’]ve|['’]ll|['’]m| have| just| will| already)?\s+(?:created|added|booked|scheduled|saved|set up|moved|rescheduled|updated|deleted|removed|cancell?ed|put (?:it|that|them))\b|\b(?:created|added|booked|scheduled|moved|saved|updated|rescheduled|deleted|removed|cancell?ed) (?:it|them|that|your)\b|\b(?:creating|adding|booking|scheduling|saving|setting up|moving|rescheduling|updating|deleting|removing|cancell?ing)\b|созда(?:л|ю|м|ла)|добав(?:ил|лю|ляю|ила)|запис(?:ал|ала)|запланир(?:овал|ую)|перенёс|перенесл[аи]?|перенесу|обнов(?:ил|лю)|удал(?:ил|ю|ила)|сохран(?:ил|ю)/iu;
 
 /**
  * Vetoes a mutation "claim" that is actually a non-action: a negation ("nothing
@@ -92,11 +163,56 @@ const MUTATION_CLAIM_PATTERN =
 const CLAIM_VETO_PATTERN =
   /\b(?:not|n['’]t|nothing|never|already|unable|cannot|can['’]t|couldn['’]t|could not|won['’]t|would not|didn['’]t|don['’]t|no longer|want me to|shall i|should i|would you like)\b|(?:^|[\s,])(?:не|ни|ничего|нельзя|уже|хочешь|хотите)(?=[\s,.!?]|$)|не удалось|не получилось|\?\s*$/iu;
 
+/**
+ * The suspended session of an `ask_user` turn (ADR 0010), carried on the `ask`
+ * {@link LoopOutcome} so the orchestrator can persist + mirror it and resume on
+ * the user's answer. `toolRounds` are the accumulated rounds INCLUDING the
+ * assistant round that holds the `ask_user` `tool_use` but deliberately NOT its
+ * `tool_result` (the wire invariant — synthesized on resume against
+ * {@link askToolUseId}). The same shape feeds {@link PendingQuestionPayload}.
+ */
+interface AskSuspension {
+  toolRounds: ToolRound[];
+  askToolUseId: string;
+  question: string;
+  optionLabels: AskUserOption[];
+}
+
 /** The outcome of the tool-use loop for one user turn. */
 type LoopOutcome =
   | { kind: 'reply'; text: string }
   | { kind: 'held'; held: HeldConflictWrite[]; promptText: string }
+  | {
+      /**
+       * The model called `ask_user` (ADR 0010): suspend the turn. Carries the
+       * suspended session so the orchestrator persists a `pending_question` row,
+       * mirrors it to Redis, and sends the question — then ends the turn (never
+       * re-invokes the model here; the user's answer drives the resume).
+       */
+      kind: 'ask';
+      suspension: AskSuspension;
+    }
+  | {
+      /**
+       * The narration re-drive (ADR 0009) ran out of corrections without the
+       * model committing the action it claimed: escalate (alert + honest reply),
+       * never throw. Carries the budget actually spent for the structured event.
+       */
+      kind: 'unresolved';
+      corrections: number;
+    }
   | { kind: 'error' };
+
+/**
+ * The classification of a terminal (no-tool-call) turn (ADR 0009).
+ * `genuine` = a real answer / clarifying question / honest failure → send it.
+ * `narration_without_write` = the model described a change it never made (zero
+ * tool calls, zero commits, not a question) → re-drive it. The trigger is
+ * STRUCTURAL; the optional `reason` is a lexical logging hint only.
+ */
+type TerminalClassification =
+  | { kind: 'genuine' }
+  | { kind: 'narration_without_write'; reason: CorrectionReason };
 
 /**
  * The full result of one tool-use loop: the user-facing {@link LoopOutcome}, the
@@ -149,6 +265,26 @@ export interface HandleCallbackParams {
 }
 
 /**
+ * Parameters for resuming a suspended `ask_user` turn (ADR 0010) with the user's
+ * answer. `source` records how the answer arrived: a `callback` carries the
+ * `ask:<pendingQuestionId>:<optId>` data (+ the callback id to acknowledge), a
+ * `text` carries the raw free-text/transcript answer (resolved against the hot
+ * Redis window). Exactly one synthetic `tool_result` is fed back and the loop is
+ * re-entered (the model may suspend again).
+ */
+export interface ResumeAnswerParams {
+  source: 'callback' | 'text';
+  /** The raw inbound text: the callback data for a button, the message for text. */
+  text: string;
+  contentType: ConversationMessageContentType;
+  vendorChatId: string;
+  /** Present (and acknowledged) only for the button source. */
+  callbackId: string | null;
+  /** Correlation id threaded from the webhook; minted here if absent. */
+  correlationId?: string;
+}
+
+/**
  * The assistant orchestrator: it owns the inbound pipeline's post-resolution
  * stages — persist the turn, build context, drive the bounded tool-use loop,
  * reply, hold-and-confirm conflicting writes, and fire the post-turn background
@@ -163,6 +299,7 @@ export class AssistantService {
     @Inject(ACTIVE_AI_CONNECTOR) private readonly ai: AiConnector,
     @Inject(ACTIVE_VENDOR_CONNECTOR)
     private readonly vendor: ExternalVendorConnector,
+    @Inject(ACTIVE_ALERT_CONNECTOR) private readonly alert: AlertConnector,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: AssistantConfig,
     private readonly contextBuilder: ContextBuilderService,
@@ -173,6 +310,7 @@ export class AssistantService {
     private readonly taskService: TaskService,
     private readonly conversationDatabaseService: ConversationDatabaseService,
     private readonly conversationMessageDatabaseService: ConversationMessageDatabaseService,
+    private readonly pendingInteraction: PendingInteractionService,
   ) {}
 
   /**
@@ -305,61 +443,181 @@ export class AssistantService {
     conversationId: string,
     currentMessageText: string,
     correlationId: string,
+    resumeRounds?: ToolRound[],
   ): Promise<ToolLoopResult> {
     // One HandleMap per user turn: the context builder seeds it with an alias
     // per rendered agenda occurrence, and the SAME instance threads into every
     // tool-loop dispatch so those handles resolve when the model later mutates a
     // task. Aliases keep counting up within the turn (the dispatcher's list_tasks
     // appends to it) and stay stable across rounds.
+    //
+    // On an `ask_user` RESUME (ADR 0010) `resumeRounds` rehydrates the suspended
+    // turn's accumulated rounds — including the round carrying the `ask_user`
+    // `tool_use` WITH its now-synthesized answer `tool_result` already appended by
+    // the caller — so the very next `complete` continues exactly where the turn
+    // paused. The HandleMap is fresh (a stale cross-turn alias must not resolve);
+    // the model re-reads the day if it needs to act on a task.
     const handleMap = new HandleMap();
-    const prompt = await this.contextBuilder.build({
-      user,
-      conversationId,
-      currentMessageText,
-      handleMap,
-    });
-    const dispatchContext: ToolDispatchContext = {
-      userId: user.id,
-      user,
-      handleMap,
-      correlationId,
-    };
-
-    const toolRounds: ToolRound[] = [];
+    const toolRounds: ToolRound[] = resumeRounds ? [...resumeRounds] : [];
     const rounds: ToolRoundAuditPayload[] = [];
     let scheduleFetches = 0;
     let committedWrites = 0;
     let attemptedWrites = 0;
+    // Narration re-drive bookkeeping (ADR 0009). `corrections` counts the
+    // corrective re-invocations made so far; `forcedToolChoice` is set to 'any'
+    // for the SINGLE round immediately after a corrective nudge, then cleared.
+    let corrections = 0;
+    let forcedToolChoice: AiToolChoice | undefined;
 
     try {
+      // Context assembly is inside the try so a build failure (e.g. the rolling
+      // summary or agenda read throws) yields kind:'error' → AI_FAILURE_REPLY
+      // rather than escaping runToolLoop. On an attempts:1 inbound turn an
+      // uncaught throw here would surface no user-facing reply at all; every
+      // inbound turn must answer, so this path degrades gracefully like any
+      // other terminal failure.
+      const prompt = await this.contextBuilder.build({
+        user,
+        conversationId,
+        currentMessageText,
+        handleMap,
+      });
+      // A working copy of the volatile message tail: the narration re-drive
+      // appends a corrective USER block here (ADR 0009) so the nudge persists
+      // into every subsequent round. The cached prefix (system + tools) is
+      // untouched, so this never disturbs the ADR 0004 cache breakpoints.
+      const messages: PromptBlock[] = [...prompt.messages];
+      const dispatchContext: ToolDispatchContext = {
+        userId: user.id,
+        user,
+        handleMap,
+        correlationId,
+      };
+
       for (
         let roundtrip = 0;
         roundtrip < this.config.maxToolRoundtrips;
         roundtrip += 1
       ) {
+        // The forced tool choice (set by a corrective nudge) applies to THIS
+        // round only; clear it immediately so the next round reverts to 'auto'.
+        const roundToolChoice = forcedToolChoice;
+
+        forcedToolChoice = undefined;
+
         const result = await this.ai.complete({
           modelRole: AiModelRole.MAIN,
           system: prompt.system,
-          messages: prompt.messages,
+          messages,
           tools: prompt.tools,
           toolRounds,
+          toolChoice: roundToolChoice,
           features: { promptCaching: true, contextEditing: true },
           traceId: correlationId,
         });
 
-        if (
-          result.stopReason !== AiStopReason.TOOL_USE ||
-          !result.toolCalls?.length
-        ) {
-          return {
-            outcome: {
-              kind: 'reply',
-              text: result.text ?? ROUNDTRIP_CEILING_REPLY,
-            },
-            rounds,
+        // Continue purely on whether the turn emitted tool calls — NOT on the
+        // stop reason. A turn can carry `tool_use` blocks under a stop reason
+        // other than TOOL_USE (e.g. MAX_TOKENS, when the model is cut off mid
+        // tool-call burst): the previous `stopReason !== TOOL_USE` clause would
+        // have dropped those calls on the floor and returned a truncated reply,
+        // leaving the user's requested writes silently undispatched. Gating on
+        // content (`toolCalls?.length`) means every requested tool call is
+        // dispatched regardless of stop reason, and we only terminate when the
+        // model asked for no tools at all.
+        if (!result.toolCalls?.length) {
+          const classification = this.classifyTerminalTurn(
+            result.stopReason,
+            result.text,
             committedWrites,
             attemptedWrites,
-          };
+          );
+
+          // Genuine terminal (a real answer, a clarifying question, an honest
+          // failure, or a committed write): send it, branching on stop reason.
+          if (classification.kind === 'genuine') {
+            return {
+              outcome: {
+                kind: 'reply',
+                text: this.terminalReplyText(result.stopReason, result.text),
+              },
+              rounds,
+              committedWrites,
+              attemptedWrites,
+            };
+          }
+
+          // Narration without a write (ADR 0009). Re-drive is disabled
+          // (kill-switch) or out of budget → stop here; the caller's detect-and
+          // -mask guard turns the false-success text into an honest reply
+          // (kill-switch) and the budget-exhausted case escalates as
+          // `unresolved`.
+          if (corrections >= this.config.maxCorrections) {
+            // maxCorrections === 0 is the kill-switch: return the model's text
+            // as a normal reply so the existing isFalseSuccessReply guard masks
+            // it (today's detect-and-mask behaviour, unchanged).
+            if (this.config.maxCorrections === 0) {
+              return {
+                outcome: {
+                  kind: 'reply',
+                  text: this.terminalReplyText(result.stopReason, result.text),
+                },
+                rounds,
+                committedWrites,
+                attemptedWrites,
+              };
+            }
+
+            // Budget exhausted with re-drive enabled: escalate honestly.
+            rounds.push(
+              this.buildNarrationAuditRound(
+                correlationId,
+                roundtrip,
+                result.stopReason,
+                result.text,
+                classification.reason,
+              ),
+            );
+
+            return {
+              outcome: { kind: 'unresolved', corrections },
+              rounds,
+              committedWrites,
+              attemptedWrites,
+            };
+          }
+
+          // Within budget: record the narration round, append the corrective
+          // USER nudge (NOT a synthetic tool_result), force a tool call on the
+          // NEXT round only, and re-invoke the model.
+          rounds.push(
+            this.buildNarrationAuditRound(
+              correlationId,
+              roundtrip,
+              result.stopReason,
+              result.text,
+              classification.reason,
+            ),
+          );
+
+          if (result.text && result.text.length > 0) {
+            messages.push({
+              role: PromptRole.ASSISTANT,
+              content: result.text,
+            });
+          }
+
+          messages.push({ role: PromptRole.USER, content: CORRECTIVE_NUDGE });
+
+          forcedToolChoice = 'any';
+          corrections += 1;
+
+          this.logger.warn(
+            `[cid=${correlationId}] Narration without write (reason=${classification.reason}); ` +
+              `re-driving with tool_choice:any (correction ${corrections}/${this.config.maxCorrections})`,
+          );
+
+          continue;
         }
 
         const roundToolCalls = result.toolCalls;
@@ -393,10 +651,56 @@ export class AssistantService {
             dispatchContext,
           );
 
+          // `ask_user` (ADR 0010): the model wants to suspend and ask the user.
+          // STOP here and return the suspended session — the accumulated rounds
+          // INCLUDING this round's assistant `tool_use`s but WITHOUT this call's
+          // `tool_result` (the wire invariant; the answer is appended on resume).
+          // Any sibling tool calls already dispatched this round keep their
+          // results, so the paired structure stays valid; the ask call alone is
+          // left unpaired-until-resume. Never re-invokes the model here.
+          if (outcome.askUser) {
+            steps.push({
+              name: toolCall.name,
+              input: toolCall.input,
+              resultContent: outcome.content,
+              isError: false,
+              held: false,
+            });
+            rounds.push({
+              correlationId,
+              round: roundtrip,
+              stopReason: result.stopReason,
+              assistantText: result.text ?? null,
+              steps,
+            });
+            toolRounds.push({
+              toolCalls: roundToolCalls,
+              toolResults: roundResults,
+              assistantText: result.text,
+            });
+
+            return {
+              outcome: {
+                kind: 'ask',
+                suspension: {
+                  toolRounds,
+                  askToolUseId: toolCall.id,
+                  question: outcome.askUser.question,
+                  optionLabels: outcome.askUser.options,
+                },
+              },
+              rounds,
+              committedWrites,
+              attemptedWrites,
+            };
+          }
+
           // A held conflict no longer aborts the batch (failure mode #2): record
           // it, hand the model a benign tool result, and keep dispatching the
           // rest of the round — non-conflicting writes still commit. All collected
-          // conflicts are confirmed together after the round.
+          // conflicts are confirmed together after the round. A single-write tool
+          // (`create_task` / `update_task`) reports ONE via `heldConflict` and
+          // produces no committed write, so it stops here entirely.
           if (outcome.heldConflict) {
             const heldContent =
               'Held for the user to confirm (time conflict); not executed yet.';
@@ -420,6 +724,19 @@ export class AssistantService {
             continue;
           }
 
+          // A BATCH tool (`create_tasks`) reports every held item via the plural
+          // `heldConflicts`; collect them all into the same batch-hold, then fall
+          // through so its own (real) tool result and committed/attempted counts
+          // are still recorded — a batch can both hold some items AND commit others.
+          if (outcome.heldConflicts) {
+            for (const held of outcome.heldConflicts) {
+              heldConflicts.push({
+                write: held.write,
+                promptText: held.promptText,
+              });
+            }
+          }
+
           const isError = outcome.isError ?? false;
 
           roundResults.push({
@@ -432,15 +749,16 @@ export class AssistantService {
             input: toolCall.input,
             resultContent: outcome.content,
             isError,
-            held: false,
+            held: (outcome.heldConflicts?.length ?? 0) > 0,
           });
 
+          // Write accounting: a batch tool supplies its own committed/attempted
+          // counts; a single-write tool omits them, so fall back to today's exact
+          // per-call +1 (one attempt; one commit unless it errored). Non-write
+          // tools touch neither counter.
           if (WRITE_TOOLS.has(toolCall.name)) {
-            attemptedWrites += 1;
-
-            if (!isError) {
-              committedWrites += 1;
-            }
+            attemptedWrites += outcome.attemptedCount ?? 1;
+            committedWrites += outcome.committedCount ?? (isError ? 0 : 1);
           }
         }
 
@@ -494,6 +812,30 @@ export class AssistantService {
   }
 
   /**
+   * Resolves the user-facing text for a terminal (no-tool-call) turn, branching
+   * on the stop reason so we never relay an unreliable fragment. MAX_TOKENS means
+   * the held text is a truncated cut-off, so we send an honest "cut that short"
+   * rather than a reply that could read as complete; REFUSAL means the model
+   * declined, so we surface a neutral decline; any other terminal reason relays
+   * the model's own text, falling back to the round-trip-ceiling line when it
+   * produced none.
+   */
+  private terminalReplyText(
+    stopReason: AiStopReason,
+    text: string | undefined,
+  ): string {
+    if (stopReason === AiStopReason.MAX_TOKENS) {
+      return TRUNCATED_REPLY;
+    }
+
+    if (stopReason === AiStopReason.REFUSAL) {
+      return REFUSAL_REPLY;
+    }
+
+    return text ?? ROUNDTRIP_CEILING_REPLY;
+  }
+
+  /**
    * Builds the confirmation prompt for one or more held conflicts. A single
    * conflict with nothing else committed keeps the dispatcher's own wording; a
    * batch (or a partial success) reports how many already saved and lists the
@@ -508,11 +850,7 @@ export class AssistantService {
     }
 
     const titles = held
-      .map((conflict) =>
-        conflict.write.action.kind === 'create_event'
-          ? `"${conflict.write.action.title}"`
-          : 'a move',
-      )
+      .map((conflict) => this.heldActionLabel(conflict.write.action))
       .join(', ');
     const prefix =
       committedWrites > 0
@@ -526,6 +864,93 @@ export class AssistantService {
     return `${prefix}${overlap} — book ${
       held.length === 1 ? 'it' : 'them all'
     } anyway, or cancel?`;
+  }
+
+  /**
+   * Classifies a terminal (no-tool-call) turn into `genuine` vs
+   * `narration_without_write` (ADR 0009). The re-drive trigger is STRUCTURAL:
+   * zero committed writes AND not a clarifying question / honest failure (the
+   * {@link CLAIM_VETO_PATTERN} hard floor) AND a positive signal that the model
+   * *intended* a write but performed none —
+   *  - a write WAS attempted but every one errored (`attemptedWrites > 0`), or
+   *  - NO write was attempted yet the text narrates a mutation
+   *    ({@link MUTATION_CLAIM_PATTERN}, which now also catches the English gerund
+   *    "Creating all seven…" the first-person regex missed).
+   *
+   * Any committed write (incl. a partial batch) is genuine. A non-`END_TURN`
+   * terminal (MAX_TOKENS truncation, REFUSAL, etc.) is genuine and gets the
+   * honest reply branch — a truncated fragment is not a narration. A pure
+   * read-only Q&A turn ("done", "here's your agenda") narrates no mutation and
+   * is genuine, so legitimate reads are never forced into a write. This mirrors
+   * the {@link isFalseSuccessReply} positive signals exactly: Story 1 RE-DRIVES
+   * where the kill-switch path still MASKS.
+   */
+  private classifyTerminalTurn(
+    stopReason: AiStopReason,
+    text: string | undefined,
+    committedWrites: number,
+    attemptedWrites: number,
+  ): TerminalClassification {
+    if (committedWrites > 0) {
+      return { kind: 'genuine' };
+    }
+
+    // Only a clean END_TURN can be a narration; a truncation/refusal/other
+    // terminal is genuine and gets the honest reply branch, never a re-drive.
+    if (stopReason !== AiStopReason.END_TURN) {
+      return { kind: 'genuine' };
+    }
+
+    const replyText = text ?? '';
+
+    // The veto is the hard floor: a question / negation / honest failure is a
+    // genuine terminal and must never be forced to write or re-driven.
+    if (CLAIM_VETO_PATTERN.test(replyText)) {
+      return { kind: 'genuine' };
+    }
+
+    // A write was attempted but every one failed: re-drive so the model can
+    // retry the action rather than relay a success-sounding line.
+    if (attemptedWrites > 0) {
+      return {
+        kind: 'narration_without_write',
+        reason: 'writes_errored',
+      };
+    }
+
+    // No write attempted: re-drive only when the text actually narrates a
+    // mutation. A benign read summary trips neither pattern and stays genuine.
+    if (MUTATION_CLAIM_PATTERN.test(replyText)) {
+      return {
+        kind: 'narration_without_write',
+        reason: 'claim_without_writes',
+      };
+    }
+
+    return { kind: 'genuine' };
+  }
+
+  /**
+   * Builds the audit row for a re-driven narration round (ADR 0009): a terminal
+   * turn that produced text but no tool calls, tagged with the diagnostic
+   * `correctionReason` so re-drive frequency is greppable. It carries no steps
+   * (no tools ran).
+   */
+  private buildNarrationAuditRound(
+    correlationId: string,
+    round: number,
+    stopReason: AiStopReason,
+    text: string | undefined,
+    reason: CorrectionReason,
+  ): ToolRoundAuditPayload {
+    return {
+      correlationId,
+      round,
+      stopReason,
+      assistantText: text ?? null,
+      steps: [],
+      correctionReason: reason,
+    };
   }
 
   /**
@@ -612,12 +1037,236 @@ export class AssistantService {
   }
 
   /**
+   * Suspends an `ask_user` turn (ADR 0010): persists the durable
+   * `pending_question` row (carrying the in-flight session) + its Redis hot
+   * mirror via {@link PendingInteractionService}, sends the question (plain text
+   * when no options, else an inline keyboard whose callback data is
+   * `ask:<rowId>:<optId>`), and persists the question as the assistant reply so
+   * it survives in the conversation. The turn ENDS here — the model is never
+   * re-invoked; the user's later answer drives the resume. Never throws (the
+   * BullMQ queue is attempts:1) beyond what the send/persist helpers already
+   * swallow.
+   */
+  private async suspendAndAsk(
+    user: User,
+    conversation: Conversation,
+    vendorChatId: string,
+    suspension: AskSuspension,
+    correlationId: string,
+  ): Promise<void> {
+    const pending = await this.pendingInteraction.createPendingQuestion(
+      user.id,
+      {
+        conversationId: conversation.id,
+        askToolUseId: suspension.askToolUseId,
+        payload: {
+          toolRounds: suspension.toolRounds,
+          question: suspension.question,
+          optionLabels: suspension.optionLabels,
+          correlationId,
+          vendorChatId,
+        },
+      },
+    );
+
+    const vendorMessageId = await this.sendQuestion(
+      vendorChatId,
+      suspension.question,
+      suspension.optionLabels,
+      pending.id,
+      correlationId,
+    );
+
+    await this.persistMessage(
+      conversation,
+      ConversationMessageRole.ASSISTANT,
+      ConversationMessageContentType.TEXT,
+      suspension.question,
+      vendorMessageId,
+    );
+
+    this.logger.log(
+      `[cid=${correlationId}] Suspended ask_user (pending ${pending.id}, ${suspension.optionLabels.length} options) for user ${user.id}`,
+    );
+  }
+
+  /**
+   * Sends an `ask_user` question: a plain text message when there are no options,
+   * else an inline keyboard with one button per option (callback data
+   * `ask:<pendingQuestionId>:<optId>`). Each path swallows a send failure with a
+   * log (mirroring {@link sendReply}) and returns the outbound vendor message id
+   * (or null) so the persisted assistant message can reference it. A keyboard send
+   * has no per-message id to thread back, so it returns null.
+   */
+  private async sendQuestion(
+    vendorChatId: string,
+    question: string,
+    options: AskUserOption[],
+    pendingQuestionId: string,
+    correlationId: string,
+  ): Promise<string | null> {
+    if (options.length === 0) {
+      return this.sendReply(vendorChatId, question, correlationId);
+    }
+
+    try {
+      await this.vendor.sendActions(
+        { vendorChatId },
+        {
+          text: question,
+          buttons: [
+            options.map((option) => ({
+              label: option.label,
+              callbackData: `${ASK_CALLBACK_PREFIX}${pendingQuestionId}:${option.id}`,
+            })),
+          ],
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId}] Failed to send ask_user keyboard to ${vendorChatId}: ${message}`,
+      );
+    }
+
+    return null;
+  }
+
+  /**
    * Fires the post-turn background jobs (rolling summary + memory extraction)
    * without blocking the reply (ADR 0005). Each job catches its own errors.
    */
   private triggerBackgroundJobs(conversationId: string, userId: string): void {
     void this.summarizer.maybeSummarize(conversationId);
     void this.memoryExtractor.extract(conversationId, userId);
+  }
+
+  /**
+   * Maps a {@link HeldRecurrence} (the rule grammar as it survived the Redis JSON
+   * round-trip) back to a `CreateRecurrenceRuleDto` for replay. The string enum
+   * fields are cast to their nominal enum types — the held values are exactly the
+   * enum members, only their static type was widened to `string` for storage.
+   */
+  private toCreateRecurrenceDto(
+    recurrence: HeldRecurrence,
+  ): CreateRecurrenceRuleDto {
+    return {
+      frequency: recurrence.frequency as CreateRecurrenceRuleDto['frequency'],
+      interval: recurrence.interval,
+      byWeekday: recurrence.byWeekday,
+      byMonthDay: recurrence.byMonthDay,
+      byMonth: recurrence.byMonth,
+      endType: recurrence.endType as CreateRecurrenceRuleDto['endType'],
+      endDate: recurrence.endDate,
+      count: recurrence.count,
+    };
+  }
+
+  /**
+   * A short human-readable label for a held action, used in the failure log and
+   * the "couldn't apply X" reply.
+   */
+  private heldActionLabel(action: HeldWriteAction): string {
+    if (
+      action.kind === 'create_event' ||
+      action.kind === 'create_recurring_event'
+    ) {
+      return `"${action.title}"`;
+    }
+
+    return 'a move';
+  }
+
+  /**
+   * Executes ONE confirmed held action verbatim, bypassing the conflict check the
+   * user already overrode ("book anyway"). Returns whether it counts as a `booked`
+   * (create) or `moved` (update) outcome plus a label, so {@link executeHeldBatch}
+   * can summarize the batch. The recurring shapes (Story 9) replay the exact
+   * `TaskService` call the dispatcher's check would have committed: a recurring
+   * create with its full payload + rule, a recurring edit at its chosen scope.
+   */
+  private async executeHeldAction(
+    action: HeldWriteAction,
+    userId: string,
+  ): Promise<{ kind: 'booked' | 'moved'; label: string }> {
+    if (action.kind === 'create_event') {
+      const created = await this.taskService.create(userId, {
+        calendarId: action.calendarId,
+        title: action.title,
+        notes: action.notes ?? undefined,
+        startAt: action.startAt,
+        endAt: action.endAt ?? undefined,
+        timezone: action.timezone,
+      });
+
+      return { kind: 'booked', label: `"${created.title}"` };
+    }
+
+    if (action.kind === 'create_recurring_event') {
+      const created = await this.taskService.create(userId, {
+        calendarId: action.calendarId,
+        title: action.title,
+        notes: action.notes ?? undefined,
+        startAt: action.startAt,
+        endAt: action.endAt,
+        isAllDay: action.isAllDay,
+        timezone: action.timezone,
+        requiresCompletion: action.requiresCompletion,
+        groupId: action.groupId ?? undefined,
+        recurrence: this.toCreateRecurrenceDto(action.recurrence),
+      });
+
+      return { kind: 'booked', label: `"${created.title}"` };
+    }
+
+    if (action.kind === 'update_recurring_event') {
+      const updated = await this.executeHeldRecurringEdit(action, userId);
+
+      return { kind: 'moved', label: `"${updated.title}"` };
+    }
+
+    const updated = await this.taskService.update(userId, action.taskId, {
+      startAt: action.startAt,
+      endAt: action.endAt,
+    });
+
+    return { kind: 'moved', label: `"${updated.title}"` };
+  }
+
+  /**
+   * Replays a confirmed recurring EDIT at its originally chosen scope (Story 9):
+   * `all` updates the master, `this_and_following` splits the series — the same
+   * two `TaskService` calls the dispatcher would have made, now with the conflict
+   * check bypassed. Returns the resulting task so the batch summary can name it.
+   */
+  private async executeHeldRecurringEdit(
+    action: Extract<HeldWriteAction, { kind: 'update_recurring_event' }>,
+    userId: string,
+  ): Promise<{ title: string }> {
+    const changes: RecurringEditProposal & {
+      groupId?: string | null;
+      recurrence?: CreateRecurrenceRuleDto;
+    } = {
+      ...(action.title !== null ? { title: action.title } : {}),
+      ...(action.startAt !== null ? { startAt: action.startAt } : {}),
+      ...(action.endAt !== null ? { endAt: action.endAt } : {}),
+      ...(action.groupId !== null ? { groupId: action.groupId } : {}),
+      ...(action.recurrence
+        ? { recurrence: this.toCreateRecurrenceDto(action.recurrence) }
+        : {}),
+    };
+
+    if (action.editScope === 'this_and_following') {
+      return this.taskService.splitSeries(
+        userId,
+        action.taskId,
+        new Date(action.originalStart),
+        changes,
+      );
+    }
+
+    return this.taskService.update(userId, action.taskId, changes);
   }
 
   /**
@@ -639,37 +1288,21 @@ export class AssistantService {
     const failed: string[] = [];
 
     for (const action of actions) {
-      const label =
-        action.kind === 'create_event' ? `"${action.title}"` : 'a move';
-
       try {
-        if (action.kind === 'create_event') {
-          const created = await this.taskService.create(userId, {
-            calendarId: action.calendarId,
-            title: action.title,
-            notes: action.notes ?? undefined,
-            startAt: action.startAt,
-            endAt: action.endAt ?? undefined,
-            timezone: action.timezone,
-          });
+        const result = await this.executeHeldAction(action, userId);
 
-          booked.push(`"${created.title}"`);
-          continue;
+        if (result.kind === 'booked') {
+          booked.push(result.label);
+        } else {
+          moved.push(result.label);
         }
-
-        const updated = await this.taskService.update(userId, action.taskId, {
-          startAt: action.startAt,
-          endAt: action.endAt,
-        });
-
-        moved.push(`"${updated.title}"`);
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'unknown error';
 
-        failed.push(label);
+        failed.push(this.heldActionLabel(action));
         this.logger.warn(
-          `[cid=${correlationId ?? 'none'}] Held write failed (${action.kind} ${label}): ${message}`,
+          `[cid=${correlationId ?? 'none'}] Held write failed (${action.kind} ${this.heldActionLabel(action)}): ${message}`,
         );
       }
     }
@@ -714,8 +1347,41 @@ export class AssistantService {
       params.vendorMessageId,
     );
 
-    const { outcome, rounds, committedWrites, attemptedWrites } =
-      await this.runToolLoop(user, conversation.id, params.text, correlationId);
+    const result = await this.runToolLoop(
+      user,
+      conversation.id,
+      params.text,
+      correlationId,
+    );
+
+    await this.finishTurn(
+      user,
+      conversation,
+      params.vendorChatId,
+      result,
+      correlationId,
+    );
+  }
+
+  /**
+   * The shared post-loop tail (ADR 0006/0009/0010): persists the audit trail,
+   * then branches on the {@link LoopOutcome} — `held` parks + asks via inline
+   * keyboard, `ask` suspends the turn (ADR 0010), `error` sends the AI-failure
+   * line, `unresolved` escalates honestly (alert + reply), and a plain reply runs
+   * the false-success guard before sending + persisting and firing the background
+   * jobs. Single-sourced so a fresh turn ({@link handleText}) and an `ask_user`
+   * resume ({@link resumeAnswer}) end identically — including the ability to
+   * suspend AGAIN when the resumed model asks a follow-up question. Never throws
+   * (attempts:1); every helper it calls swallows its own send/persist failure.
+   */
+  private async finishTurn(
+    user: User,
+    conversation: Conversation,
+    vendorChatId: string,
+    result: ToolLoopResult,
+    correlationId: string,
+  ): Promise<void> {
+    const { outcome, rounds, committedWrites, attemptedWrites } = result;
 
     // Persist the tool-loop audit trail regardless of how the turn ended.
     await this.persistToolRounds(conversation.id, rounds);
@@ -723,7 +1389,7 @@ export class AssistantService {
     if (outcome.kind === 'held') {
       await this.holdAndAsk(
         conversation,
-        params.vendorChatId,
+        vendorChatId,
         outcome.held,
         outcome.promptText,
       );
@@ -731,11 +1397,55 @@ export class AssistantService {
       return;
     }
 
-    if (outcome.kind === 'error') {
-      await this.sendReply(
-        params.vendorChatId,
-        AI_FAILURE_REPLY,
+    if (outcome.kind === 'ask') {
+      await this.suspendAndAsk(
+        user,
+        conversation,
+        vendorChatId,
+        outcome.suspension,
         correlationId,
+      );
+
+      return;
+    }
+
+    if (outcome.kind === 'error') {
+      await this.sendReply(vendorChatId, AI_FAILURE_REPLY, correlationId);
+
+      return;
+    }
+
+    // Narration re-drive exhausted (ADR 0009): the model never committed the
+    // action it claimed within the correction budget. Escalate via the alert
+    // sink (structured event) AND send an honest reply. This MUST NOT throw —
+    // the BullMQ queue is attempts:1, so a throw would lose the turn silently.
+    if (outcome.kind === 'unresolved') {
+      this.alert.capture({
+        name: CORRECTION_EXHAUSTED_EVENT,
+        severity: AlertSeverity.ERROR,
+        message:
+          'Narration re-drive budget exhausted; the model never committed the claimed action.',
+        context: {
+          correlationId,
+          userId: user.id,
+          corrections: outcome.corrections,
+          attemptedWrites,
+          committedWrites,
+        },
+      });
+
+      const vendorMessageId = await this.sendReply(
+        vendorChatId,
+        CORRECTION_EXHAUSTED_REPLY,
+        correlationId,
+      );
+
+      await this.persistMessage(
+        conversation,
+        ConversationMessageRole.ASSISTANT,
+        ConversationMessageContentType.TEXT,
+        CORRECTION_EXHAUSTED_REPLY,
+        vendorMessageId,
       );
 
       return;
@@ -743,6 +1453,9 @@ export class AssistantService {
 
     // Guard (failure mode #1): the reply sounds like success but nothing actually
     // committed — refuse to confirm an action that never happened, and flag it.
+    // This is now defence-in-depth: with re-drive enabled the loop already
+    // re-drove a narration turn, so this fires mainly under the kill-switch
+    // (ASSISTANT_MAX_CORRECTIONS=0), restoring today's detect-and-mask behaviour.
     let replyText = outcome.text;
 
     if (this.isFalseSuccessReply(replyText, committedWrites, attemptedWrites)) {
@@ -755,7 +1468,7 @@ export class AssistantService {
     }
 
     const vendorMessageId = await this.sendReply(
-      params.vendorChatId,
+      vendorChatId,
       replyText,
       correlationId,
     );
@@ -873,6 +1586,189 @@ export class AssistantService {
       ConversationMessageContentType.TEXT,
       reply,
       vendorMessageId,
+    );
+  }
+
+  /**
+   * Resumes a suspended `ask_user` turn (ADR 0010) with the user's answer — the
+   * one path that DOES re-invoke the model (distinct from the deterministic
+   * conflict callback above). It acknowledges a button tap, atomically claims the
+   * pending question (a button claims its row by id even after the Redis TTL /a
+   * restart; free text claims the user's hot window), maps the answer to a label,
+   * appends EXACTLY ONE synthetic `ask_user` `tool_result` paired to the suspended
+   * `askToolUseId`, and re-enters the tool loop with the rehydrated rounds so the
+   * model continues (it may ask again). A null claim means the question was
+   * already answered (a double-answer race) or the hot window lapsed for a
+   * free-text reply — ignored gracefully so the turn is never double-resumed.
+   */
+  async resumeAnswer(user: User, params: ResumeAnswerParams): Promise<void> {
+    const correlationId = params.correlationId ?? randomUUID();
+
+    if (params.source === 'callback' && params.callbackId) {
+      await this.vendor.acknowledgeCallback(params.callbackId);
+    }
+
+    const claim = await this.claimPending(user, params, correlationId);
+
+    if (!claim) {
+      // Already answered (race / superseded) or the hot window lapsed for a
+      // free-text reply. A button after the window still claims from Postgres
+      // above; a lapsed free-text answer falls through to nothing here (the
+      // router would have routed it as a fresh turn anyway).
+      this.logger.log(
+        `[cid=${correlationId}] No claimable pending question for user ${user.id} (${params.source}); ignoring.`,
+      );
+
+      return;
+    }
+
+    const conversation = await this.getOrCreateConversation(user.id);
+
+    // Persist the user's answer as their turn so the thread reads naturally (the
+    // chosen option's label, or the raw free text).
+    await this.persistMessage(
+      conversation,
+      ConversationMessageRole.USER,
+      params.contentType,
+      claim.answerLabel,
+      null,
+    );
+
+    const resumedRounds = this.appendSyntheticAnswer(
+      claim.pending,
+      claim.answerLabel,
+    );
+    const result = await this.runToolLoop(
+      user,
+      conversation.id,
+      '',
+      correlationId,
+      resumedRounds,
+    );
+
+    await this.finishTurn(
+      user,
+      conversation,
+      params.vendorChatId,
+      result,
+      correlationId,
+    );
+  }
+
+  /**
+   * Atomically claims the pending question for a resume and resolves the answer's
+   * human label. A button parses `ask:<pendingQuestionId>:<optId>` and claims that
+   * row by id (durable, works after the Redis TTL), mapping `optId → label` from
+   * the stored option map (falling back to the raw id if the option vanished); a
+   * free-text answer claims the user's hot window and uses the raw text as the
+   * label. Returns null when nothing was claimable (already answered / window
+   * lapsed). Never re-invokes the model.
+   */
+  private async claimPending(
+    user: User,
+    params: ResumeAnswerParams,
+    correlationId: string,
+  ): Promise<{ pending: PendingQuestion; answerLabel: string } | null> {
+    if (params.source === 'callback') {
+      const { pendingQuestionId, optionId } = this.parseAskCallback(
+        params.text,
+      );
+
+      if (!pendingQuestionId) {
+        return null;
+      }
+
+      const pending = await this.pendingInteraction.claimById(
+        user.id,
+        pendingQuestionId,
+      );
+
+      if (!pending) {
+        return null;
+      }
+
+      const matched = pending.payload.optionLabels.find(
+        (option) => option.id === optionId,
+      );
+
+      return { pending, answerLabel: matched?.label ?? optionId };
+    }
+
+    const pending = await this.pendingInteraction.claimHotByUser(user.id);
+
+    if (!pending) {
+      return null;
+    }
+
+    this.logger.log(
+      `[cid=${correlationId}] Resuming pending ${pending.id} from free text for user ${user.id}`,
+    );
+
+    return { pending, answerLabel: params.text };
+  }
+
+  /**
+   * Parses an `ask:<pendingQuestionId>:<optId>` callback into its parts. The
+   * prefix is stripped, then the remainder is split once on the first colon so an
+   * option id may itself contain colons. Missing parts come back as empty strings
+   * (the caller treats an empty id as not-claimable).
+   */
+  private parseAskCallback(callbackData: string): {
+    pendingQuestionId: string;
+    optionId: string;
+  } {
+    const body = callbackData.startsWith(ASK_CALLBACK_PREFIX)
+      ? callbackData.slice(ASK_CALLBACK_PREFIX.length)
+      : callbackData;
+    const separatorIndex = body.indexOf(':');
+
+    if (separatorIndex === -1) {
+      return { pendingQuestionId: body, optionId: '' };
+    }
+
+    return {
+      pendingQuestionId: body.slice(0, separatorIndex),
+      optionId: body.slice(separatorIndex + 1),
+    };
+  }
+
+  /**
+   * Rehydrates the suspended `toolRounds` and appends EXACTLY ONE synthetic
+   * `ask_user` `tool_result` (ADR 0010 wire invariant), paired to the stored
+   * `askToolUseId`, carrying the user's answer as its content. The result is
+   * appended to the LAST suspended round — the one whose assistant `tool_use`
+   * holds the unanswered `ask_user` call — so the round becomes a valid
+   * tool_use→tool_result pair and the Anthropic Messages API never sees an
+   * interleaved/unpaired block (which would 400). Returns a fresh array (the
+   * persisted payload is left untouched).
+   */
+  private appendSyntheticAnswer(
+    pending: PendingQuestion,
+    answerLabel: string,
+  ): ToolRound[] {
+    const rounds = pending.payload.toolRounds;
+    const syntheticResult: ToolResultBlock = {
+      toolCallId: pending.askToolUseId,
+      content: answerLabel,
+    };
+
+    if (rounds.length === 0) {
+      // Defensive: a suspended turn always carries the ask round, but never crash
+      // a resume — fabricate the minimal valid pair so the model still continues.
+      return [
+        {
+          toolCalls: [
+            { id: pending.askToolUseId, name: ToolName.ASK_USER, input: {} },
+          ],
+          toolResults: [syntheticResult],
+        },
+      ];
+    }
+
+    return rounds.map((round, index) =>
+      index === rounds.length - 1
+        ? { ...round, toolResults: [...round.toolResults, syntheticResult] }
+        : round,
     );
   }
 }

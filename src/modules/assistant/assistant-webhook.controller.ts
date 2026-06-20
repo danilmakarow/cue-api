@@ -107,7 +107,10 @@ export class AssistantWebhookController {
     };
     const jobId = createHash('sha256').update(bodyString).digest('hex');
 
-    await this.webhookQueue.add('inbound', job, { jobId });
+    // attempts:1 per-job is the guaranteed override of the global attempts:5
+    // default — the inbound pipeline is non-idempotent, so a replay would
+    // re-run committed calendar writes and double-book (ADR-0026).
+    await this.webhookQueue.add('inbound', job, { jobId, attempts: 1 });
 
     this.logger.log(
       `[cid=${correlationId}] enqueued ${connector.vendor} update jobId=${jobId.slice(0, 12)}`,

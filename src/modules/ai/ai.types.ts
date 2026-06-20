@@ -75,6 +75,16 @@ export interface ToolSchema {
 }
 
 /**
+ * Vendor-neutral tool-choice directive for one round-trip. `'auto'` lets the
+ * model decide (the default — equivalent to omitting it); `'any'` forces it to
+ * call some tool (no specific one); `{ name }` forces that exact tool. The
+ * connector translates this to its provider's wire shape and DEGRADES to "let
+ * the model decide" (never throws) when the request carries no tools — a forced
+ * choice with nothing to choose from is meaningless, not an error.
+ */
+export type AiToolChoice = 'auto' | 'any' | { name: string };
+
+/**
  * A model's request to invoke a tool. The orchestrator dispatches it and feeds
  * the outcome back as a `ToolResultBlock` on the next round-trip.
  */
@@ -142,6 +152,13 @@ export interface CompletionRequest {
   toolRounds?: ToolRound[];
   maxTokens?: number;
   features?: AiFeatureFlags;
+  /**
+   * Optional tool-choice directive for this round-trip (vendor-neutral). Omitted
+   * or `'auto'` means the model decides; `'any'` forces some tool call; `{ name }`
+   * forces a specific tool. The narration re-drive (ADR 0009) sets `'any'` for
+   * the next round only to nudge a stalled model into actually calling its tools.
+   */
+  toolChoice?: AiToolChoice;
   /**
    * Opaque correlation id for this user turn, threaded controller → queue →
    * loop. Logged (never sent to the provider) so a failed round-trip can be tied

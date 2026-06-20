@@ -94,8 +94,21 @@ export interface HeldConflictWrite {
 
 /**
  * The concrete write a {@link HeldConflictWrite} will perform on confirmation.
- * Discriminated by `kind`; today only event creation can be held (the only
- * conflict-producing write in v1), but the shape leaves room for updates.
+ * Discriminated by `kind`. Four shapes:
+ * - `create_event` — a single one-off create (the original conflict-producing
+ *   write).
+ * - `update_event` — a single one-off timed move.
+ * - `create_recurring_event` — a whole proposed recurring SERIES held as ONE
+ *   write because at least one of its occurrences overlaps an existing event
+ *   (Story 9); on confirm it is created verbatim with its `recurrence` payload,
+ *   bypassing the conflict check (the user chose "book the series anyway").
+ * - `update_recurring_event` — a recurring EDIT whose time/recurrence change
+ *   introduces an overlap (Story 9); on confirm it re-runs the chosen-scope edit
+ *   verbatim, bypassing the check.
+ *
+ * The recurring shapes carry the full payload the dispatcher resolved so the
+ * orchestrator's confirm-time executor needs no re-resolution — it replays the
+ * exact `TaskService` call the check would have committed.
  */
 export type HeldWriteAction =
   | {
@@ -112,7 +125,51 @@ export type HeldWriteAction =
       taskId: string;
       startAt: string;
       endAt: string | null;
+    }
+  | {
+      kind: 'create_recurring_event';
+      calendarId: string;
+      title: string;
+      startAt: string;
+      endAt: string;
+      timezone: string;
+      notes: string | null;
+      groupId: string | null;
+      isAllDay: boolean;
+      requiresCompletion: boolean;
+      /** The validated rule grammar, serialized as it crossed the dispatcher. */
+      recurrence: HeldRecurrence;
+    }
+  | {
+      kind: 'update_recurring_event';
+      taskId: string;
+      /** The recurring-edit scope the user originally chose. */
+      editScope: EditScope;
+      /** The occurrence coordinate the edit targets (ISO), for scoped writes. */
+      originalStart: string;
+      title: string | null;
+      startAt: string | null;
+      endAt: string | null;
+      groupId: string | null;
+      /** A rule change carried with the edit, or null when only time changed. */
+      recurrence: HeldRecurrence | null;
     };
+
+/**
+ * The serialized recurrence rule grammar carried inside a held recurring write.
+ * Mirrors `CreateRecurrenceRuleDto` field-for-field (it survives a Redis JSON
+ * round-trip), so the executor can pass it straight back to `TaskService`.
+ */
+export interface HeldRecurrence {
+  frequency: string;
+  interval?: number;
+  byWeekday?: number[];
+  byMonthDay?: number[];
+  byMonth?: number[];
+  endType?: string;
+  endDate?: string;
+  count?: number;
+}
 
 /**
  * A batch of held writes stashed in Redis under one callback token. A single
@@ -148,10 +205,23 @@ export interface ToolStepRecord {
 }
 
 /**
+ * Why a terminal narration turn was re-driven (ADR 0009), recorded as a logging
+ * hint on the audit payload so re-drive frequency is greppable.
+ * `claim_without_writes` = the model narrated a mutation but called no tools and
+ * committed nothing; `writes_errored` = a write was attempted but all failed.
+ * Purely diagnostic — the re-drive trigger itself is STRUCTURAL (zero tools +
+ * zero commits + not-a-question), never this lexical hint.
+ */
+export type CorrectionReason = 'claim_without_writes' | 'writes_errored';
+
+/**
  * The structured `toolPayload` of one persisted `role = tool` message: a whole
  * tool-loop round — the model's stop reason, any text it produced alongside the
  * calls, and one {@link ToolStepRecord} per dispatched tool. Makes "what did the
  * assistant actually do on turn X" a single SQL query against `toolPayload`.
+ *
+ * `correctionReason` is set only on a re-driven narration round (ADR 0009) so a
+ * SQL/log query can measure re-drive frequency before/after the change.
  */
 export interface ToolRoundAuditPayload {
   correlationId: string;
@@ -159,6 +229,7 @@ export interface ToolRoundAuditPayload {
   stopReason: string;
   assistantText: string | null;
   steps: ToolStepRecord[];
+  correctionReason?: CorrectionReason;
 }
 
 /**
@@ -176,10 +247,61 @@ export interface ToolDispatchOutcome {
   /**
    * Present when the tool produced a conflicting write that must be held and
    * confirmed by the user; the orchestrator stops the loop and asks via inline
-   * keyboard rather than re-invoking the model.
+   * keyboard rather than re-invoking the model. Used by the single-write tools
+   * (`create_task`, `update_task`) — a batch tool reports many via
+   * {@link ToolDispatchOutcome.heldConflicts} instead.
    */
   heldConflict?: {
     promptText: string;
     write: HeldConflictWrite;
   };
+  /**
+   * Present when a BATCH tool (`create_tasks`) produced one or more conflicting
+   * writes: every held item is carried so the orchestrator collects them all
+   * into the existing batch-hold confirmation alongside the items that did
+   * commit. Each entry mirrors the singular {@link heldConflict} shape. The
+   * singular and plural fields are mutually exclusive — a single-write tool sets
+   * the former, a batch tool the latter.
+   */
+  heldConflicts?: {
+    promptText: string;
+    write: HeldConflictWrite;
+  }[];
+  /**
+   * Number of writes a BATCH tool actually committed this call (non-error,
+   * non-held). The orchestrator adds this to `committedWrites` so the
+   * saved-changes count is accurate; absent for a single-write tool, where the
+   * loop falls back to its existing per-call +1 accounting.
+   */
+  committedCount?: number;
+  /**
+   * Number of write attempts a BATCH tool made this call (every item it tried to
+   * create, committed or held or errored). The orchestrator adds this to
+   * `attemptedWrites`; absent for a single-write tool (loop falls back to +1).
+   */
+  attemptedCount?: number;
+  /**
+   * Present when the tool is `ask_user` (ADR 0010): the question the model wants
+   * to ask and the optional tappable quick-replies. It is a SENTINEL — the tool
+   * touches no database; the orchestrator recognizes it, STOPS the loop, and
+   * suspends the turn (persists a `pending_question` row + Redis mirror, sends the
+   * question), resuming on the user's answer. Disjoint from `heldConflict[s]` (the
+   * deterministic ADR-0006 path that never re-invokes the model).
+   */
+  askUser?: {
+    question: string;
+    options: AskUserOption[];
+  };
+}
+
+/**
+ * One tappable quick-reply offered alongside an `ask_user` question, normalized
+ * out of the tool input. `id` is the stable key echoed on the callback
+ * (`ask:<row>:<id>`); `label` is the button text. Capped at four by the tool
+ * schema (ADR 0010). Structurally identical to the entity's
+ * `PendingQuestionOption`, kept here so the dispatch boundary owns no entity import.
+ */
+export interface AskUserOption {
+  id: string;
+  label: string;
 }

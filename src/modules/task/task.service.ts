@@ -29,7 +29,10 @@ import {
   TaskGroupDatabaseService,
 } from '@/modules/database/services';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
-import { RecurrenceRuleService } from '@/modules/recurrence-rule/recurrence-rule.service';
+import {
+  ProposedSeries,
+  RecurrenceRuleService,
+} from '@/modules/recurrence-rule/recurrence-rule.service';
 import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
 import {
   OccurrenceOverrideChanges,
@@ -92,6 +95,34 @@ export interface SplitSeriesChanges {
   startAt?: string | null;
   endAt?: string | null;
   groupId?: string | null;
+  recurrence?: CreateRecurrenceRuleDto;
+}
+
+/**
+ * The set of existing-event clashes a PROPOSED recurring series would introduce,
+ * found by expanding the proposal over the bounded look-ahead horizon and
+ * overlap-checking each generated occurrence (Story 9). `conflictDates` lists the
+ * distinct occurrence start dates that clash (so the assistant can say "overlaps
+ * on N date(s)"); `conflictingTasks` is the de-duplicated set of existing tasks
+ * clashed against. An empty `conflictDates` means the series is clear within the
+ * horizon and may commit as a normal recurring create/edit.
+ */
+export interface RecurringSeriesConflicts {
+  conflictDates: Date[];
+  conflictingTasks: Task[];
+}
+
+/**
+ * The proposed change to an existing recurring series, for the write-side edit
+ * conflict check (Story 9). Each field, when provided, retargets the effective
+ * series the check expands; omitted fields keep the task's current value.
+ * `recurrence` set to a DTO replaces the rule grammar; omitted keeps the current
+ * rule. The check only runs (and can only clash) for a TIMED effective series.
+ */
+export interface RecurringEditProposal {
+  startAt?: string;
+  endAt?: string;
+  title?: string;
   recurrence?: CreateRecurrenceRuleDto;
 }
 
@@ -240,6 +271,44 @@ export class TaskService {
         this.startSortKey(left.occurrenceStart) -
         this.startSortKey(right.occurrenceStart),
     );
+  }
+
+  /**
+   * Returns per-day occurrence counts over the half-open window `[from, to)` for
+   * the given calendar. Reuses `findOccurrencesInRange` for expansion (recurrence
+   * rules expanded, exceptions applied, DST-correct) and buckets each occurrence
+   * onto its local date (`YYYY-MM-DD`) in the task's timezone. Counts on the same
+   * local date are summed; zero-count days are absent from the result. Completed
+   * occurrences are filtered before bucketing per `includeCompleted`. Throws 404/403
+   * when the calendar is missing or owned by another user, 400 on an empty window
+   * (all delegated to `findOccurrencesInRange`).
+   */
+  async getDailyCounts(
+    userId: string,
+    from: Date,
+    to: Date,
+    opts: { calendarId?: string; includeCompleted?: boolean } = {},
+  ): Promise<Record<string, number>> {
+    const occurrences = await this.findOccurrencesInRange(userId, from, to, {
+      calendarId: opts.calendarId,
+      includeCompleted: opts.includeCompleted,
+    });
+
+    const counts: Record<string, number> = {};
+
+    for (const occurrence of occurrences) {
+      // Timeless todos (null start) are not surfaced here — includeTodos stays
+      // off — but guard anyway so a null never buckets onto a bogus date.
+      if (occurrence.occurrenceStart === null) continue;
+
+      const localDate = DateTime.fromJSDate(occurrence.occurrenceStart, {
+        zone: occurrence.task.timezone,
+      }).toISODate() as string;
+
+      counts[localDate] = (counts[localDate] ?? 0) + 1;
+    }
+
+    return counts;
   }
 
   /**
@@ -684,6 +753,152 @@ export class TaskService {
       (left, right) =>
         this.startSortKey(left.startAt) - this.startSortKey(right.startAt),
     );
+  }
+
+  /**
+   * Conflict-checks a PROPOSED recurring series — the write-side counterpart of
+   * `findOverlapping` for a whole series (Story 9). It expands the proposal over
+   * the bounded look-ahead horizon (`RecurrenceRuleService.previewSeriesOccurrences`,
+   * itself capped by `MAX_OCCURRENCES_PER_WINDOW` / `MAX_GENERATION_STEPS`, so it
+   * can never hang), then overlap-checks every generated occurrence window against
+   * existing events via the SAME occurrence-aware `findOverlapping` the one-off
+   * hold trusts — so a "clear" verdict here and the per-occurrence write later
+   * never disagree. `excludeTaskId` drops the series being edited from its own
+   * scan (a recurring edit must not clash with its current occupancy).
+   *
+   * Returns the distinct clashing occurrence start dates and the de-duplicated
+   * existing tasks they clash against; an empty `conflictDates` means the series
+   * is clear within the horizon. Only a timed series (a concrete `endAt`) can
+   * conflict — callers pass one. A clash that first arises only beyond the horizon
+   * is an accepted, documented miss (see `PREVIEW_SERIES_HORIZON_DAYS`).
+   */
+  async findRecurringSeriesConflicts(
+    userId: string,
+    calendarId: string,
+    proposal: ProposedSeries,
+    excludeTaskId?: string,
+  ): Promise<RecurringSeriesConflicts> {
+    await this.ensureCalendarOwnedByUser(calendarId, userId);
+
+    const occurrences =
+      this.recurrenceRuleService.previewSeriesOccurrences(proposal);
+    const conflictDates: Date[] = [];
+    const conflictingTasks: Task[] = [];
+
+    for (const occurrence of occurrences) {
+      // Only timed occurrences (concrete start AND end) can overlap; a proposed
+      // series always carries an end, but the engine yields null-ended instances
+      // for an open-ended anchor — skip those defensively rather than probe.
+      if (
+        occurrence.occurrenceStart === null ||
+        occurrence.occurrenceEnd === null
+      ) {
+        continue;
+      }
+
+      const conflicts = await this.findOverlapping(
+        userId,
+        calendarId,
+        occurrence.occurrenceStart,
+        occurrence.occurrenceEnd,
+        excludeTaskId,
+      );
+
+      if (conflicts.length === 0) continue;
+
+      conflictDates.push(occurrence.occurrenceStart);
+      conflictingTasks.push(...conflicts);
+    }
+
+    return {
+      conflictDates,
+      conflictingTasks: this.dedupeById(conflictingTasks),
+    };
+  }
+
+  /**
+   * Conflict-checks a proposed EDIT to an existing recurring series (Story 9): it
+   * resolves the EFFECTIVE post-edit series (the proposed time/recurrence merged
+   * over the task's current values), then delegates to
+   * {@link findRecurringSeriesConflicts}, excluding the series being edited from
+   * its own scan (its current occupancy must not register as a clash).
+   *
+   * Returns no conflicts (an empty result) when the edit cannot produce a timed
+   * recurring series to check — the task is not recurring, the effective series
+   * has no concrete `startAt`/`endAt`, or neither the time nor the rule changed
+   * (so the occupancy is unchanged and was already conflict-free at create time).
+   */
+  async findRecurringEditConflicts(
+    userId: string,
+    taskId: string,
+    proposal: RecurringEditProposal,
+  ): Promise<RecurringSeriesConflicts> {
+    const task = await this.findByIdWithRule(userId, taskId);
+
+    const effectiveRecurrence =
+      proposal.recurrence ?? this.ruleToCreateDto(task.recurrenceRule ?? null);
+
+    // Not a recurring series after the edit ⇒ nothing series-shaped to check.
+    if (!effectiveRecurrence) {
+      return { conflictDates: [], conflictingTasks: [] };
+    }
+
+    const timeChanged =
+      proposal.startAt !== undefined || proposal.endAt !== undefined;
+    const recurrenceChanged = proposal.recurrence !== undefined;
+
+    // Neither the window nor the rule moved ⇒ occupancy is unchanged; it was
+    // already conflict-free when first created, so re-checking is pure cost.
+    if (!timeChanged && !recurrenceChanged) {
+      return { conflictDates: [], conflictingTasks: [] };
+    }
+
+    const startAt = proposal.startAt
+      ? new Date(proposal.startAt)
+      : task.startAt;
+    const endAt = proposal.endAt ? new Date(proposal.endAt) : task.endAt;
+
+    // Only a timed series (a concrete window) can overlap; an open-ended or
+    // timeless effective series is non-conflicting by construction.
+    if (!startAt || !endAt) {
+      return { conflictDates: [], conflictingTasks: [] };
+    }
+
+    return this.findRecurringSeriesConflicts(
+      userId,
+      task.calendarId,
+      {
+        title: proposal.title ?? task.title,
+        startAt,
+        endAt,
+        timezone: task.timezone,
+        recurrence: effectiveRecurrence,
+      },
+      taskId,
+    );
+  }
+
+  /**
+   * Maps a persisted `RecurrenceRule` back to the `CreateRecurrenceRuleDto` shape
+   * the conflict-preview expects, so an edit that changes only the TIME (not the
+   * rule) still expands the series against its CURRENT rule. Returns null when no
+   * rule is supplied (a non-recurring task).
+   */
+  private ruleToCreateDto(
+    rule: RecurrenceRule | null,
+  ): CreateRecurrenceRuleDto | null {
+    if (!rule) return null;
+
+    return {
+      frequency: rule.frequency,
+      interval: rule.interval,
+      byWeekday: rule.byWeekday ?? undefined,
+      byMonthDay: rule.byMonthDay ?? undefined,
+      byMonth: rule.byMonth ?? undefined,
+      endType: rule.endType,
+      endDate: rule.endDate ?? undefined,
+      count: rule.count ?? undefined,
+    };
   }
 
   /**

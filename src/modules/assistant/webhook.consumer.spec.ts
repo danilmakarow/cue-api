@@ -4,6 +4,8 @@ import { AssistantConfig } from './assistant.config';
 import { AssistantService } from './assistant.service';
 import { WebhookQueueJob } from './assistant.types';
 import { LinkingService } from './linking.service';
+import { PendingInteractionStore } from './session/pending-interaction.store';
+import { TurnRunnerService } from './session/turn-runner.service';
 import { WebhookConsumer } from './webhook.consumer';
 import { User } from '@/modules/database/entities';
 import { ExternalVendorConnectorFactory } from '@/modules/external-vendor/external-vendor-connector.factory';
@@ -41,6 +43,7 @@ const buildConsumer = (
   options: {
     link?: { userId: string } | null;
     dedupeAcquired?: boolean;
+    hasPendingQuestion?: boolean;
   } = {},
 ) => {
   const connector = {
@@ -84,6 +87,20 @@ const buildConsumer = (
     handleCommand: jest.fn().mockResolvedValue(undefined),
     handleCallback: jest.fn().mockResolvedValue(undefined),
   };
+  // The pending-interaction store gates the free-text answer flow. For this wave
+  // it resolves false by default (no question is ever created), so a typed
+  // message routes as a fresh simple message exactly as before.
+  const pendingStore: jest.Mocked<PendingInteractionStore> = {
+    hasPendingQuestion: jest
+      .fn()
+      .mockResolvedValue(options.hasPendingQuestion ?? false),
+  };
+  // A REAL TurnRunnerService wired to the mocked orchestrator: the convergence
+  // point delegates straight into handleText, so the existing routing
+  // assertions (handleText called with the right params) stay green in place.
+  const turnRunner = new TurnRunnerService(
+    assistantService as unknown as AssistantService,
+  );
   const config = {
     dedupeTtlSeconds: 3600,
     translateVoiceToEnglish: false,
@@ -92,11 +109,13 @@ const buildConsumer = (
   const consumer = new WebhookConsumer(
     redis as never,
     stt,
+    pendingStore,
     vendorFactory,
     telegramLinkDatabaseService as never,
     userDatabaseService as never,
     linkingService as unknown as LinkingService,
     assistantService as unknown as AssistantService,
+    turnRunner,
     config,
   );
 
@@ -107,6 +126,8 @@ const buildConsumer = (
     stt,
     linkingService,
     assistantService,
+    pendingStore,
+    turnRunner,
     telegramLinkDatabaseService,
   };
 };

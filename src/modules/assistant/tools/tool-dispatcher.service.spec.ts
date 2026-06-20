@@ -50,6 +50,12 @@ const buildDispatcher = () => {
       calendarId: 'cal-1',
     }),
     findOverlapping: jest.fn().mockResolvedValue([]),
+    findRecurringSeriesConflicts: jest
+      .fn()
+      .mockResolvedValue({ conflictDates: [], conflictingTasks: [] }),
+    findRecurringEditConflicts: jest
+      .fn()
+      .mockResolvedValue({ conflictDates: [], conflictingTasks: [] }),
     setCompleted: jest.fn().mockResolvedValue(undefined),
     setOccurrenceCompleted: jest.fn().mockResolvedValue(undefined),
     applyOccurrenceOverride: jest.fn().mockResolvedValue(undefined),
@@ -248,6 +254,61 @@ describe('ToolDispatcherService', () => {
           .calls[0][3],
       ).toMatchObject({ groupId: 'grp-1' });
     });
+
+    it('caps a long agenda at the line limit and appends a "+N more" hint', async () => {
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      // 45 occurrences → 40 rendered + a single overflow hint line (5 hidden).
+      const occurrences = Array.from({ length: 45 }, (_unused, index) =>
+        buildOccurrence({
+          task: { id: `t-${index}`, isAllDay: false } as Task,
+          title: `Task ${index}`,
+        }),
+      );
+
+      (
+        harness.scheduleReader.occurrencesInRange as jest.Mock
+      ).mockResolvedValue(occurrences);
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('list_tasks', {}),
+        buildContext(handleMap),
+      );
+
+      const lines = outcome.content.split('\n');
+
+      // 40 task lines + 1 overflow line.
+      expect(lines).toHaveLength(41);
+      expect(lines[40]).toBe('(+5 more — narrow the range or filter by group)');
+      expect(outcome.countsAsScheduleFetch).toBe(true);
+      // Handles are minted ONLY for the 40 shown lines — the 41st is not seeded.
+      expect(handleMap.resolve('e40')?.taskId).toBe('t-39');
+      expect(handleMap.resolve('e41')).toBeUndefined();
+    });
+
+    it('does not append a "+N more" hint when the agenda fits the line limit', async () => {
+      const harness = buildDispatcher();
+      const occurrences = Array.from({ length: 40 }, (_unused, index) =>
+        buildOccurrence({
+          task: { id: `t-${index}`, isAllDay: false } as Task,
+          title: `Task ${index}`,
+        }),
+      );
+
+      (
+        harness.scheduleReader.occurrencesInRange as jest.Mock
+      ).mockResolvedValue(occurrences);
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('list_tasks', {}),
+        buildContext(new HandleMap()),
+      );
+
+      const lines = outcome.content.split('\n');
+
+      expect(lines).toHaveLength(40);
+      expect(outcome.content).not.toMatch(/more/);
+    });
   });
 
   describe('create_task', () => {
@@ -282,7 +343,7 @@ describe('ToolDispatcherService', () => {
       expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
     });
 
-    it('passes recurrence through and skips the overlap hold', async () => {
+    it('passes recurrence through and commits when the series is conflict-free (Story 9)', async () => {
       const harness = buildDispatcher();
 
       const outcome = await harness.dispatcher.dispatch(
@@ -301,8 +362,54 @@ describe('ToolDispatcherService', () => {
         frequency: 'WEEKLY',
         byWeekday: [0, 1, 2, 3, 4],
       });
-      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      // The whole proposed series is conflict-checked (not the one-off
+      // findOverlapping path); a clear verdict commits with no hold.
+      expect(
+        harness.taskService.findRecurringSeriesConflicts,
+      ).toHaveBeenCalledTimes(1);
       expect(outcome.heldConflict).toBeUndefined();
+    });
+
+    it('holds the WHOLE series when a recurring create overlaps existing events (Story 9)', async () => {
+      const harness = buildDispatcher();
+
+      (
+        harness.taskService.findRecurringSeriesConflicts as jest.Mock
+      ).mockResolvedValue({
+        conflictDates: [
+          new Date('2026-06-10T09:00:00.000Z'),
+          new Date('2026-06-17T09:00:00.000Z'),
+        ],
+        conflictingTasks: [{ id: 'task-x', title: 'Gym' } as Task],
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_task', {
+          title: 'Standup',
+          startAt: '2026-06-10T09:00:00.000Z',
+          endAt: '2026-06-10T09:15:00.000Z',
+          recurrence: { frequency: 'WEEKLY', byWeekday: [0, 1, 2, 3, 4] },
+        }),
+        buildContext(),
+      );
+
+      // The series is held, NOT committed.
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+      expect(outcome.heldConflict).toBeDefined();
+      expect(outcome.heldConflict?.write.action.kind).toBe(
+        'create_recurring_event',
+      );
+      expect(outcome.heldConflict?.promptText).toMatch(
+        /overlaps existing events on 2 dates/i,
+      );
+      expect(outcome.heldConflict?.promptText).toMatch(/Gym/);
+
+      // The held action carries the recurrence so the orchestrator can replay it.
+      const action = outcome.heldConflict?.write.action;
+
+      expect(
+        action?.kind === 'create_recurring_event' && action.recurrence,
+      ).toMatchObject({ frequency: 'WEEKLY', byWeekday: [0, 1, 2, 3, 4] });
     });
 
     it('rejects a COUNT recurrence missing count with a recoverable error (no write)', async () => {
@@ -426,6 +533,316 @@ describe('ToolDispatcherService', () => {
       expect(outcome.heldConflict).toBeDefined();
       expect(outcome.heldConflict?.promptText).toMatch(/Lunch with Ana/);
       expect(outcome.heldConflict?.write.action.kind).toBe('create_event');
+    });
+  });
+
+  describe('create_tasks (batch)', () => {
+    it('creates every task in input order when all are free (committedCount = N)', async () => {
+      const harness = buildDispatcher();
+
+      // Echo each title back so we can assert the per-item summary order.
+      (harness.taskService.create as jest.Mock).mockImplementation(
+        (_userId: string, dto: { title: string }) =>
+          Promise.resolve({ id: 'task-x', title: dto.title }),
+      );
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_tasks', {
+          tasks: [
+            { title: 'Lesson 1' },
+            { title: 'Lesson 2' },
+            { title: 'Lesson 3' },
+          ],
+        }),
+        buildContext(),
+      );
+
+      expect(harness.taskService.create).toHaveBeenCalledTimes(3);
+      // Fanned out in input order.
+      expect(
+        (harness.taskService.create as jest.Mock).mock.calls.map(
+          (call) => call[1].title,
+        ),
+      ).toEqual(['Lesson 1', 'Lesson 2', 'Lesson 3']);
+
+      expect(outcome.committedCount).toBe(3);
+      expect(outcome.attemptedCount).toBe(3);
+      expect(outcome.heldConflicts).toBeUndefined();
+      expect(outcome.isError).toBeUndefined();
+      // Per-item summary, in order.
+      expect(outcome.content).toBe(
+        '1: created "Lesson 1"; 2: created "Lesson 2"; 3: created "Lesson 3"',
+      );
+    });
+
+    it('commits the free items and returns the conflicting one as a held write', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.create as jest.Mock).mockImplementation(
+        (_userId: string, dto: { title: string }) =>
+          Promise.resolve({ id: 'task-x', title: dto.title }),
+      );
+      // Only the middle (timed) item overlaps; the bare-title ones never call
+      // findOverlapping, so it is queried exactly once and conflicts that once.
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other', title: 'Tennis' } as Task,
+      ]);
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_tasks', {
+          tasks: [
+            { title: 'Lesson 1' },
+            {
+              title: 'Lesson 2',
+              startAt: '2026-06-13T08:00:00.000Z',
+              endAt: '2026-06-13T11:00:00.000Z',
+            },
+            { title: 'Lesson 3' },
+          ],
+        }),
+        buildContext(),
+      );
+
+      // Two free items committed; the conflicting one was NOT written.
+      expect(harness.taskService.create).toHaveBeenCalledTimes(2);
+      expect(
+        (harness.taskService.create as jest.Mock).mock.calls.map(
+          (call) => call[1].title,
+        ),
+      ).toEqual(['Lesson 1', 'Lesson 3']);
+
+      expect(outcome.committedCount).toBe(2);
+      expect(outcome.attemptedCount).toBe(3);
+      expect(outcome.heldConflicts).toHaveLength(1);
+      expect(outcome.heldConflicts?.[0].write.action.kind).toBe('create_event');
+      expect(outcome.heldConflicts?.[0].promptText).toMatch(/Tennis/);
+      expect(outcome.content).toMatch(/2: held/);
+    });
+
+    it('rejects an over-25 batch with a recoverable validation error (no write)', async () => {
+      const harness = buildDispatcher();
+
+      const tasks = Array.from({ length: 26 }, (_unused, index) => ({
+        title: `Lesson ${index + 1}`,
+      }));
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_tasks', { tasks }),
+        buildContext(),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+      expect(outcome.committedCount).toBeUndefined();
+    });
+
+    it('rejects an empty batch with a recoverable validation error (no write)', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_tasks', { tasks: [] }),
+        buildContext(),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('check_availability', () => {
+    it('returns FREE for every slot and calls findOverlapping once per slot with exact bounds', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', {
+          slots: [
+            {
+              startAt: '2026-06-02T14:00:00.000Z',
+              endAt: '2026-06-02T15:00:00.000Z',
+            },
+            {
+              startAt: '2026-06-02T15:00:00.000Z',
+              endAt: '2026-06-02T16:00:00.000Z',
+            },
+          ],
+        }),
+        buildContext(),
+      );
+
+      // One probe per slot, each with that slot's exact [start, end) bounds and
+      // the resolved primary calendar — the SAME call the write-time hold uses.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledTimes(2);
+      expect(harness.taskService.findOverlapping).toHaveBeenNthCalledWith(
+        1,
+        'user-1',
+        'cal-1',
+        new Date('2026-06-02T14:00:00.000Z'),
+        new Date('2026-06-02T15:00:00.000Z'),
+        undefined,
+      );
+      expect(harness.taskService.findOverlapping).toHaveBeenNthCalledWith(
+        2,
+        'user-1',
+        'cal-1',
+        new Date('2026-06-02T15:00:00.000Z'),
+        new Date('2026-06-02T16:00:00.000Z'),
+        undefined,
+      );
+
+      expect(outcome.countsAsScheduleFetch).toBe(true);
+
+      const lines = outcome.content.split('\n');
+
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^Slot 1 \(.*\): FREE$/);
+      expect(lines[1]).toMatch(/^Slot 2 \(.*\): FREE$/);
+    });
+
+    it('reports a busy slot with the conflicting task minted as a handle', async () => {
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+
+      // The single (busy) slot conflicts with one existing task; the free slot
+      // returns []. findOverlapping is queried in order, once per slot.
+      (harness.taskService.findOverlapping as jest.Mock)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'task-7', title: 'Tennis' } as Task]);
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', {
+          slots: [
+            {
+              startAt: '2026-06-02T14:00:00.000Z',
+              endAt: '2026-06-02T15:00:00.000Z',
+            },
+            {
+              startAt: '2026-06-02T15:00:00.000Z',
+              endAt: '2026-06-02T16:00:00.000Z',
+            },
+          ],
+        }),
+        buildContext(handleMap),
+      );
+
+      const lines = outcome.content.split('\n');
+
+      expect(lines[0]).toMatch(/^Slot 1 \(.*\): FREE$/);
+      expect(lines[1]).toMatch(/Slot 2 \(.*\): BUSY — \[e1\] 'Tennis'/);
+      // The conflicting task is addressable by its minted handle (a master row,
+      // so originalStart is null).
+      expect(handleMap.resolve('e1')).toEqual({
+        taskId: 'task-7',
+        originalStart: null,
+      });
+    });
+
+    it('counts as a single schedule-fetch and never increments committedWrites', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', {
+          slots: [
+            {
+              startAt: '2026-06-02T14:00:00.000Z',
+              endAt: '2026-06-02T15:00:00.000Z',
+            },
+          ],
+        }),
+        buildContext(),
+      );
+
+      // A read, never a write: no create/update, no committed/attempted counts.
+      expect(outcome.countsAsScheduleFetch).toBe(true);
+      expect(outcome.committedCount).toBeUndefined();
+      expect(outcome.attemptedCount).toBeUndefined();
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+      expect(harness.taskService.update).not.toHaveBeenCalled();
+    });
+
+    it('passes excludeTaskId through to findOverlapping', async () => {
+      const harness = buildDispatcher();
+
+      await harness.dispatcher.dispatch(
+        toolCall('check_availability', {
+          slots: [
+            {
+              startAt: '2026-06-02T14:00:00.000Z',
+              endAt: '2026-06-02T15:00:00.000Z',
+              excludeTaskId: 'task-self',
+            },
+          ],
+        }),
+        buildContext(),
+      );
+
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledWith(
+        'user-1',
+        'cal-1',
+        new Date('2026-06-02T14:00:00.000Z'),
+        new Date('2026-06-02T15:00:00.000Z'),
+        'task-self',
+      );
+    });
+
+    it('skips an open-ended / rule-shaped slot with a recoverable note rather than a false FREE', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', {
+          slots: [
+            // endAt before startAt — cannot be point-checked.
+            {
+              startAt: '2026-06-02T15:00:00.000Z',
+              endAt: '2026-06-02T14:00:00.000Z',
+            },
+            {
+              startAt: '2026-06-02T16:00:00.000Z',
+              endAt: '2026-06-02T17:00:00.000Z',
+            },
+          ],
+        }),
+        buildContext(),
+      );
+
+      const lines = outcome.content.split('\n');
+
+      // The malformed slot is SKIPPED (never probed) and never called FREE; the
+      // valid slot is still checked.
+      expect(lines[0]).toMatch(/^Slot 1: SKIPPED/);
+      expect(lines[0]).not.toMatch(/FREE/);
+      expect(lines[1]).toMatch(/^Slot 2 \(.*\): FREE$/);
+      // findOverlapping ran only for the checkable slot.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects an over-25 batch with a recoverable validation error (no probes)', async () => {
+      const harness = buildDispatcher();
+
+      const slots = Array.from({ length: 26 }, (_unused, index) => ({
+        startAt: `2026-06-02T${String(index).padStart(2, '0')}:00:00.000Z`,
+        endAt: `2026-06-02T${String(index).padStart(2, '0')}:30:00.000Z`,
+      }));
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', { slots }),
+        buildContext(),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(outcome.countsAsScheduleFetch).toBeUndefined();
+    });
+
+    it('rejects an empty batch with a recoverable validation error (no probes)', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('check_availability', { slots: [] }),
+        buildContext(),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
     });
   });
 
@@ -736,6 +1153,137 @@ describe('ToolDispatcherService', () => {
       );
     });
 
+    it('holds an "all" recurring edit that introduces an overlap (Story 9)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+      });
+      (
+        harness.taskService.findRecurringEditConflicts as jest.Mock
+      ).mockResolvedValue({
+        conflictDates: [new Date('2026-06-10T10:00:00.000Z')],
+        conflictingTasks: [{ id: 'task-x', title: 'Lunch' } as Task],
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          endAt: '2026-06-03T10:30:00.000Z',
+          editScope: 'all',
+        }),
+        buildContext(handleMap),
+      );
+
+      // Held, not written — the conflict check ran with the proposed time.
+      expect(
+        harness.taskService.findRecurringEditConflicts,
+      ).toHaveBeenCalledWith('user-1', 'task-1', {
+        startAt: '2026-06-03T10:00:00.000Z',
+        endAt: '2026-06-03T10:30:00.000Z',
+      });
+      expect(harness.taskService.update).not.toHaveBeenCalled();
+      expect(outcome.heldConflict).toBeDefined();
+      expect(outcome.heldConflict?.write.action.kind).toBe(
+        'update_recurring_event',
+      );
+
+      const action = outcome.heldConflict?.write.action;
+
+      expect(
+        action?.kind === 'update_recurring_event' && action.editScope,
+      ).toBe('all');
+      expect(outcome.heldConflict?.promptText).toMatch(/Lunch/);
+    });
+
+    it('holds a "this_and_following" recurring edit that introduces an overlap (Story 9)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+      });
+      (
+        harness.taskService.findRecurringEditConflicts as jest.Mock
+      ).mockResolvedValue({
+        conflictDates: [new Date('2026-06-10T10:00:00.000Z')],
+        conflictingTasks: [{ id: 'task-x', title: 'Gym' } as Task],
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          endAt: '2026-06-03T10:30:00.000Z',
+          editScope: 'this_and_following',
+        }),
+        buildContext(handleMap),
+      );
+
+      // The split is NOT performed — the edit is held first.
+      expect(harness.taskService.splitSeries).not.toHaveBeenCalled();
+      expect(outcome.heldConflict?.write.action.kind).toBe(
+        'update_recurring_event',
+      );
+
+      const action = outcome.heldConflict?.write.action;
+
+      expect(
+        action?.kind === 'update_recurring_event' && action.editScope,
+      ).toBe('this_and_following');
+      expect(
+        action?.kind === 'update_recurring_event' && action.originalStart,
+      ).toBe(new Date('2026-06-03T09:00:00.000Z').toISOString());
+    });
+
+    it('commits a recurring "all" edit when the series stays conflict-free (Story 9)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          endAt: '2026-06-03T10:30:00.000Z',
+          editScope: 'all',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(
+        harness.taskService.findRecurringEditConflicts,
+      ).toHaveBeenCalledTimes(1);
+      expect(harness.taskService.update).toHaveBeenCalledTimes(1);
+      expect(outcome.heldConflict).toBeUndefined();
+    });
+
     it('holds a one-off timed move that overlaps an existing task', async () => {
       const harness = buildDispatcher();
 
@@ -944,6 +1492,34 @@ describe('ToolDispatcherService', () => {
       expect(outcome.content).toBe('Work, Home');
     });
 
+    it('caps a long group list and appends a "(+N more)" hint', async () => {
+      const harness = buildDispatcher();
+      // 45 groups → 40 names listed + a "(+5 more)" suffix.
+      const groups = Array.from(
+        { length: 45 },
+        (_unused, index) =>
+          ({ id: `g-${index}`, name: `Group ${index}` }) as TaskGroup,
+      );
+
+      (harness.taskGroupService.findAllForUser as jest.Mock).mockResolvedValue(
+        groups,
+      );
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('list_groups', {}),
+        buildContext(),
+      );
+
+      const content = outcome.content;
+
+      expect(content).toMatch(/\(\+5 more\)$/);
+      // Exactly 40 names precede the hint (39 separating commas).
+      expect(content.replace(' (+5 more)', '').split(', ')).toHaveLength(40);
+      expect(content).toContain('Group 0');
+      expect(content).toContain('Group 39');
+      expect(content).not.toContain('Group 40');
+    });
+
     it('creates a group in the primary calendar', async () => {
       const harness = buildDispatcher();
 
@@ -999,6 +1575,73 @@ describe('ToolDispatcherService', () => {
 
       expect(outcome.isError).toBe(true);
       expect(outcome.content).toMatch(/unknown tool/i);
+    });
+  });
+
+  describe('ask_user (ADR 0010)', () => {
+    it('returns the askUser sentinel and touches NO feature service / DB', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('ask_user', {
+          question: 'Which day works?',
+          options: [
+            { id: 'fri', label: 'Friday' },
+            { id: 'sat', label: 'Saturday' },
+          ],
+        }),
+        buildContext(),
+      );
+
+      expect(outcome.askUser).toEqual({
+        question: 'Which day works?',
+        options: [
+          { id: 'fri', label: 'Friday' },
+          { id: 'sat', label: 'Saturday' },
+        ],
+      });
+      expect(outcome.isError).toBeUndefined();
+
+      // The tool itself performs no calendar work — the orchestrator suspends.
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+      expect(harness.taskService.update).not.toHaveBeenCalled();
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.scheduleReader.occurrencesInRange).not.toHaveBeenCalled();
+    });
+
+    it('normalizes an omitted options list to an empty array (plain free-text question)', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('ask_user', { question: 'What time?' }),
+        buildContext(),
+      );
+
+      expect(outcome.askUser).toEqual({
+        question: 'What time?',
+        options: [],
+      });
+    });
+
+    it('rejects more than 4 options as a recoverable validation error (no sentinel)', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('ask_user', {
+          question: 'Pick one',
+          options: [
+            { id: 'a', label: 'A' },
+            { id: 'b', label: 'B' },
+            { id: 'c', label: 'C' },
+            { id: 'd', label: 'D' },
+            { id: 'e', label: 'E' },
+          ],
+        }),
+        buildContext(),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(outcome.askUser).toBeUndefined();
     });
   });
 });

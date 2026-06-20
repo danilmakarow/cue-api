@@ -35,9 +35,44 @@ export class AssistantConfig {
     });
   }
 
+  /**
+   * Narration re-drive budget per turn (ADR 0009): the number of corrective
+   * re-invocations allowed when the model claims a write but calls no tools.
+   * `0` disables re-drive (kill-switch → detect-and-mask). Strictly below
+   * {@link maxToolRoundtrips} so the round-trip ceiling is the outer bound.
+   */
+  get maxCorrections(): number {
+    return this.configService.get('ASSISTANT_MAX_CORRECTIONS', {
+      infer: true,
+    });
+  }
+
   /** TTL (seconds) for a held conflicting write awaiting user confirmation. */
   get heldConflictTtlSeconds(): number {
     return this.configService.get('ASSISTANT_HELD_CONFLICT_TTL_SECONDS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * TTL (seconds) for the hot Redis mirror of a suspended `ask_user` question
+   * (ADR 0010) — the free-text answer window. After it lapses a typed message is
+   * a fresh turn; a button still resumes from Postgres within the retention
+   * horizon.
+   */
+  get askUserTtlSeconds(): number {
+    return this.configService.get('ASSISTANT_ASK_USER_TTL_SECONDS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Hard durable retention (hours) for a suspended `ask_user` row (ADR 0010): a
+   * button answer resumes from Postgres anytime within this horizon, even after
+   * the Redis TTL and a process restart. The cleanup job expires rows past it.
+   */
+  get askUserRetentionHours(): number {
+    return this.configService.get('ASSISTANT_ASK_USER_RETENTION_HOURS', {
       infer: true,
     });
   }

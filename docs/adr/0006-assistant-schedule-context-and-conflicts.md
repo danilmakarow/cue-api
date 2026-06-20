@@ -1,6 +1,6 @@
 # 0006 — assistant-schedule-context-and-conflicts
 
-- **Status**: Accepted
+- **Status**: Accepted — **layer 4 (deterministic held-conflict resolution) superseded by [0011](0011-assistant-ai-judged-conflicts.md)** (2026-06-19); layers 1–3 remain in force.
 - **Date**: 2026-05-31
 - **Deciders**: @danil
 

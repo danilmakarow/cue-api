@@ -27,7 +27,7 @@ Core features beyond a plain TODO app:
 - **Auth**: **not yet implemented.** Planned: Apple Sign-In → JWT
 - **Notifications**: **not yet implemented.** Planned: APNs + `node-telegram-bot-api`
 - **Package manager**: pnpm 10.14
-- **Testing**: **not set up yet.** Will add Jest when controllers land.
+- **Testing**: Jest configured (`jest.config.js`); 27 `*.spec.ts` cover the assistant, AI/STT connectors, and the task / recurrence / group services.
 
 ## Architecture
 
@@ -218,8 +218,8 @@ Everything below is known-missing; don't treat absence as a bug.
 - **No auth.** Apple Sign-In → JWT + `AccessTokenGuard` is the plan. `User.appleUserId` column exists.
 - **No default calendar on signup.** When auth lands, signup MUST auto-create a default `Calendar` for the new user — otherwise `Task`/`TaskGroup`/`NotificationStrategy` inserts have no valid `calendarId`.
 - **No notification delivery.** `ScheduledNotification` rows are schema-only. Planned: BullMQ worker polling `status = PENDING AND fireAt <= now` (composite index already present), then APNs / Telegram clients.
-- **No recurrence expansion.** `RecurrenceRule` is schema-only; need a service that expands a rule into upcoming occurrences and materializes `ScheduledNotification` rows (respecting `TaskOccurrenceException`).
-- **No tests.** No Jest config, no `*.spec.ts` files.
+- **Recurrence expansion ships** (this line was stale): on-read expansion is implemented — `RecurrenceRuleService.expandOccurrences` + `TaskService.findOccurrencesInRange` return DST-correct occurrences with `TaskOccurrenceException` applied (RRULE is still never materialized — ADR 0002). Remaining: notification fan-out from rules (tracked under *No notification delivery* below).
+- **Tests exist** (this line was stale): Jest configured + **27 `*.spec.ts`** across the assistant, AI/STT, and task/recurrence/group services. Remaining gap: an e2e harness + a CI coverage gate.
 - **No Swagger / Sentry / Winston.** Intentionally omitted from the initial scaffold.
 - **No `CalendarMember` / sharing.** Additive migration when sharing actually ships.
 - **Redis env vars not in Zod schema.** Add when Redis is consumed.

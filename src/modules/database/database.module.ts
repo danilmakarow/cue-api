@@ -9,6 +9,7 @@ import {
   Device,
   NotificationRule,
   NotificationStrategy,
+  PendingQuestion,
   RecurrenceRule,
   ScheduledNotification,
   Task,
@@ -26,6 +27,7 @@ import {
   DeviceRepository,
   NotificationRuleRepository,
   NotificationStrategyRepository,
+  PendingQuestionRepository,
   RecurrenceRuleRepository,
   ScheduledNotificationRepository,
   TaskGroupRepository,
@@ -43,6 +45,7 @@ import {
   DeviceDatabaseService,
   NotificationRuleDatabaseService,
   NotificationStrategyDatabaseService,
+  PendingQuestionDatabaseService,
   RecurrenceRuleDatabaseService,
   ScheduledNotificationDatabaseService,
   TaskDatabaseService,
@@ -77,6 +80,7 @@ import {
       ConversationMessage,
       ConversationSummary,
       UserMemoryFact,
+      PendingQuestion,
     ]),
   ],
   providers: [
@@ -95,6 +99,7 @@ import {
     ConversationMessageRepository,
     ConversationSummaryRepository,
     UserMemoryFactRepository,
+    PendingQuestionRepository,
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
@@ -110,6 +115,7 @@ import {
     ConversationMessageDatabaseService,
     ConversationSummaryDatabaseService,
     UserMemoryFactDatabaseService,
+    PendingQuestionDatabaseService,
   ],
   exports: [
     UserDatabaseService,
@@ -127,6 +133,7 @@ import {
     ConversationMessageDatabaseService,
     ConversationSummaryDatabaseService,
     UserMemoryFactDatabaseService,
+    PendingQuestionDatabaseService,
   ],
 })
 export class DatabaseModule {}

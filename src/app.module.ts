@@ -49,6 +49,9 @@ import { getDatabaseConfig, getDataSource } from '@/config/typeorm.config';
           db: configService.get('REDIS_DB', { infer: true }),
         },
         defaultJobOptions: {
+          // GLOBAL default for all queues. The inbound webhook queue overrides
+          // attempts to 1 at its own registerQueue + per-job (ADR-0026); this
+          // default stays at 5+backoff for every other/future queue.
           attempts: 5,
           backoff: { type: 'exponential', delay: 2000 },
           removeOnComplete: true,

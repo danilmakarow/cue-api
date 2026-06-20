@@ -24,7 +24,15 @@ export const getDatabaseConfig = (
     password: configService.get('DB_PASSWORD', { infer: true }),
     database: configService.get('DB_DATABASE', { infer: true }),
 
-    migrations: [path.resolve(__dirname, '../', 'migrations', '*{.ts,.js}')],
+    // Exclude colocated unit tests: a `*.spec.ts` / `*.test.ts` next to a
+    // migration must never be loaded as a migration. TypeORM's directory loader
+    // `require()`s every glob match at DataSource init, so a spec file would run
+    // `describe()/it()` outside a test runner (CLI/start:dev) or at the wrong
+    // time inside one — breaking boot. Prod is unaffected (compiled `.js` has no
+    // `.spec.js`), but dev, the typeorm CLI, and ts-jest e2e all resolve `.ts`.
+    migrations: [
+      path.resolve(__dirname, '../', 'migrations', '!(*.spec|*.test){.ts,.js}'),
+    ],
     entities: [path.resolve(__dirname, '../', '**', '*.entity{.ts,.js}')],
     migrationsRun: configService.get('DB_RUN_MIGRATIONS', { infer: true }),
     synchronize: configService.get('DB_SYNCHRONIZE', { infer: true }),

@@ -41,6 +41,9 @@ lerna-debug.log*
 .env.test.local
 .env.production.local
 .env.local
+# E2E test env: points at local docker-compose infra; may hold a real ANTHROPIC_API_KEY
+.env.test
+.env.e2e
 
 # temp directory
 .temp

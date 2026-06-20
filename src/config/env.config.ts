@@ -78,7 +78,20 @@ export const environmentSchema = z.object({
   ASSISTANT_APP_LINK_BASE_URL: z.string(),
   ASSISTANT_MAX_TOOL_ROUNDTRIPS: z.coerce.number().int().positive(),
   ASSISTANT_MAX_SCHEDULE_FETCHES: z.coerce.number().int().positive(),
+  // Narration re-drive budget (ADR 0009): how many corrective re-invocations a
+  // turn may make when the model narrates a write but calls no tools. Default 5;
+  // 0 is the kill-switch (reverts to detect-and-mask). Must stay strictly below
+  // ASSISTANT_MAX_TOOL_ROUNDTRIPS so the round-trip ceiling is the outer bound.
+  ASSISTANT_MAX_CORRECTIONS: z.coerce.number().int().min(0),
   ASSISTANT_HELD_CONFLICT_TTL_SECONDS: z.coerce.number().int().positive(),
+  // ask_user suspend/resume (ADR 0010). The hot Redis index TTL (the free-text
+  // answer window); after it lapses a typed message starts a fresh turn while a
+  // button still resumes from Postgres up to the retention horizon below.
+  ASSISTANT_ASK_USER_TTL_SECONDS: z.coerce.number().int().positive(),
+  // Hard durable retention (hours) for a suspended ask_user row: a button answer
+  // resumes from Postgres anytime within this horizon (even after the Redis TTL
+  // and a process restart); the cleanup job expires rows past it.
+  ASSISTANT_ASK_USER_RETENTION_HOURS: z.coerce.number().int().positive(),
   ASSISTANT_LINK_NONCE_TTL_SECONDS: z.coerce.number().int().positive(),
   ASSISTANT_DEDUPE_TTL_SECONDS: z.coerce.number().int().positive(),
   ASSISTANT_RECENT_WINDOW_SIZE: z.coerce.number().int().positive(),

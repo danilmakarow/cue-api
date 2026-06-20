@@ -19,6 +19,21 @@ export const LINK_NONCE_KEY_PREFIX = 'assistant:link';
 export const HELD_CONFLICT_KEY_PREFIX = 'assistant:held';
 
 /**
+ * Prefix for the hot pointer to a suspended `ask_user` question, keyed by the
+ * Cue user id. Its mere presence is the cheap `EXISTS` signal the inbound router
+ * uses to send a free-text reply into the answer flow while a question is open;
+ * its VALUE is the durable `pending_question` row id, so the free-text resolve
+ * `GETDEL`s the key (atomic claim of the hot window) and then claims that exact
+ * row in Postgres. Deliberately disjoint from {@link HELD_CONFLICT_KEY_PREFIX}
+ * (`assistant:ask` vs `assistant:held`) so the two suspend/resume paths never
+ * collide — see `docs/specs/assistant-layered-architecture.md`. Set by Story 5
+ * when an `ask_user` turn suspends (TTL `ASSISTANT_ASK_USER_TTL_SECONDS`) and
+ * cleared on claim; after it lapses a button answer still resumes from the
+ * durable table while a typed message becomes a fresh turn.
+ */
+export const PENDING_QUESTION_KEY_PREFIX = 'assistant:ask';
+
+/**
  * Builds the dedupe key for a vendor + dedupe id pair.
  */
 export const dedupeKey = (vendor: string, dedupeId: string): string =>
@@ -35,3 +50,11 @@ export const linkNonceKey = (nonce: string): string =>
  */
 export const heldConflictKey = (callbackId: string): string =>
   `${HELD_CONFLICT_KEY_PREFIX}:${callbackId}`;
+
+/**
+ * Builds the pending-question hot-pointer key for a Cue user id. Used by the
+ * inbound router's free-text fast-path (`EXISTS`) and set (value = the
+ * `pending_question` row id) when an `ask_user` turn suspends (Story 5).
+ */
+export const pendingQuestionKey = (userId: string): string =>
+  `${PENDING_QUESTION_KEY_PREFIX}:${userId}`;

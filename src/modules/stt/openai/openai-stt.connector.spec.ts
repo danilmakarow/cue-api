@@ -1,7 +1,3 @@
-import { MediaPayload } from '@/modules/external-vendor/external-vendor.types';
-import { SttConfigProvider } from '../stt.config';
-import { AudioTranscoder } from './audio-transcoder';
-
 // Jest hoists `jest.mock` above the imports, so the factory may only reference
 // variables whose names start with `mock` (jest's allow-list). The spies are
 // declared with that prefix and wired into the fake client below.
@@ -58,13 +54,16 @@ jest.mock('openai', () => {
 import { Logger } from '@nestjs/common';
 import * as OpenAiSdk from 'openai';
 
+import { SttConfigProvider } from '../stt.config';
 import {
   SttCapabilityNotSupportedError,
   SttPayloadTooLargeError,
   SttUnavailableError,
 } from '../stt.errors';
 import { SttProvider } from '../stt.types';
+import { AudioTranscoder } from './audio-transcoder';
 import { OpenAiSttConnector } from './openai-stt.connector';
+import { MediaPayload } from '@/modules/external-vendor/external-vendor.types';
 
 // The real `APIError` constructor takes 4 args, but our mock takes `(status,
 // message)` plus optional `(code, type, requestID)`. Re-type the mocked class

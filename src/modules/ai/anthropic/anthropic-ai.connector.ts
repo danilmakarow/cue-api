@@ -9,6 +9,7 @@ import {
   AiModelRole,
   AiProvider,
   AiStopReason,
+  AiToolChoice,
   AiUsage,
   CompletionRequest,
   CompletionResult,
@@ -53,6 +54,38 @@ const RETRYABLE_STATUSES = new Set([408, 409, 429]);
 /** Floor at/above which any HTTP status is a retryable server error. */
 const SERVER_ERROR_STATUS = 500;
 
+/** Anthropic's "service overloaded" HTTP status. */
+const OVERLOADED_STATUS = 529;
+
+/**
+ * Body marker for an overload, surfaced even when the SDK drops the 529 status
+ * mid-stream. Matched as a substring so it survives whatever wrapper text the
+ * SDK puts around the JSON error body.
+ */
+const OVERLOADED_BODY_MARKER = '"type":"overloaded_error"';
+
+/**
+ * True when a failed Anthropic call is an overload (529). Returns true when the
+ * HTTP status is exactly 529 OR — because the SDK sometimes drops the status
+ * mid-stream — when the error message/body carries the `"type":"overloaded_error"`
+ * substring. Exported so both the main-model fallback decision and
+ * {@link AnthropicAiConnector.describeAnthropicError} share one definition of
+ * "this is an overload". Reads only the status and the error message — never
+ * prompt, tool, or response content.
+ */
+export const is529 = (error: unknown): boolean => {
+  if (
+    error instanceof Anthropic.APIError &&
+    error.status === OVERLOADED_STATUS
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  return message.includes(OVERLOADED_BODY_MARKER);
+};
+
 /**
  * Provider-side detail extracted from a failed Anthropic call, for logging only.
  * Every field is metadata — never prompt, tool, or response content. `status`
@@ -64,6 +97,7 @@ interface AnthropicErrorDetail {
   errorType?: string;
   requestId?: string;
   retryable: boolean;
+  overloaded: boolean;
   message: string;
 }
 
@@ -259,6 +293,34 @@ export class AnthropicAiConnector extends AiConnector {
   }
 
   /**
+   * Translates a vendor-neutral {@link AiToolChoice} into Anthropic's
+   * `tool_choice` shape: `'any' → {type:'any'}`, `{name} → {type:'tool',name}`,
+   * `'auto' → {type:'auto'}`. Returns undefined when the directive is absent —
+   * the caller then omits `tool_choice` entirely (implicit `auto`, unchanged
+   * behaviour). DEGRADES to undefined (never throws) when there are no tools to
+   * choose from: a forced choice with an empty/absent tool set is meaningless,
+   * so we drop it rather than send the provider an unsatisfiable request.
+   */
+  private translateToolChoice(
+    toolChoice: AiToolChoice | undefined,
+    hasTools: boolean,
+  ): Anthropic.Messages.ToolChoice | undefined {
+    if (!toolChoice || !hasTools) {
+      return undefined;
+    }
+
+    if (toolChoice === 'auto') {
+      return { type: 'auto' };
+    }
+
+    if (toolChoice === 'any') {
+      return { type: 'any' };
+    }
+
+    return { type: 'tool', name: toolChoice.name };
+  }
+
+  /**
    * Normalizes an Anthropic stop reason into the provider-neutral enum. Unknown
    * or transient reasons (e.g. `pause_turn`) collapse to `OTHER`.
    */
@@ -412,8 +474,15 @@ export class AnthropicAiConnector extends AiConnector {
       params.tools = tools;
     }
 
-    if (overrides?.toolChoice) {
-      params.tool_choice = overrides.toolChoice;
+    // An explicit override (the `completeStructured` forced-tool path) wins;
+    // otherwise translate the request's vendor-neutral directive, degrading to
+    // an omitted choice when there are no tools to force.
+    const toolChoice =
+      overrides?.toolChoice ??
+      this.translateToolChoice(request.toolChoice, tools !== undefined);
+
+    if (toolChoice) {
+      params.tool_choice = toolChoice;
     }
 
     return params;
@@ -431,6 +500,7 @@ export class AnthropicAiConnector extends AiConnector {
     if (!(error instanceof Anthropic.APIError)) {
       return {
         retryable: false,
+        overloaded: is529(error),
         message: error instanceof Error ? error.message : String(error),
       };
     }
@@ -446,6 +516,7 @@ export class AnthropicAiConnector extends AiConnector {
       errorType: error.type ?? undefined,
       requestId: error.requestID ?? undefined,
       retryable,
+      overloaded: is529(error),
       message: error.message,
     };
   }
@@ -475,6 +546,7 @@ export class AnthropicAiConnector extends AiConnector {
       `maxTokens=${request.maxTokens ?? this.config.getMaxOutputTokens()} ` +
       `status=${detail.status ?? 'none'} errorType=${detail.errorType ?? 'none'} ` +
       `requestId=${detail.requestId ?? 'none'} retryable=${detail.retryable} ` +
+      `overloaded=${detail.overloaded} ` +
       `message=${detail.message}`;
     const stack = error instanceof Error ? error.stack : undefined;
 
@@ -482,10 +554,95 @@ export class AnthropicAiConnector extends AiConnector {
   }
 
   /**
+   * Emits a single metadata-only debug log of the prompt-cache token counters
+   * (`cache_read_input_tokens` / `cache_creation_input_tokens`, surfaced as the
+   * normalized cacheRead/cacheWrite usage) for a successful round-trip, so cache
+   * hit/miss behaviour is observable without reading any prompt or response
+   * content. Mirrors the metadata-only style of {@link logCompletionFailure}.
+   */
+  private logCacheUsage(
+    operation: string,
+    request: CompletionRequest,
+    usage: AiUsage,
+  ): void {
+    const modelRole = request.modelRole ?? AiModelRole.BACKGROUND;
+
+    this.logger.debug(
+      `Anthropic cache usage: operation=${operation} ` +
+        `traceId=${request.traceId ?? 'none'} ` +
+        `modelRole=${modelRole} ` +
+        `cacheReadTokens=${usage.cacheReadTokens} ` +
+        `cacheWriteTokens=${usage.cacheWriteTokens} ` +
+        `inputTokens=${usage.inputTokens} outputTokens=${usage.outputTokens}`,
+    );
+  }
+
+  /**
+   * Emits a single metadata-only info log recording a MAIN → fallback model swap
+   * after a post-retry 529 overload (ADR 0018: BACKGROUND is reused as the
+   * fallback — no new env var). Logs only the trace id and the two model ids —
+   * never prompt, tool, or response content.
+   */
+  private logFallbackSwap(
+    request: CompletionRequest,
+    fallbackModel: string,
+  ): void {
+    this.logger.warn(
+      `Anthropic 529 overload on MAIN — retrying once on fallback model: ` +
+        `operation=complete traceId=${request.traceId ?? 'none'} ` +
+        `fromModel=${this.config.getModelId(AiModelRole.MAIN)} ` +
+        `fromModelRole=${AiModelRole.MAIN} ` +
+        `toModel=${fallbackModel} toModelRole=${AiModelRole.BACKGROUND}`,
+    );
+  }
+
+  /**
+   * Re-issues the SAME request once on the fallback model after a post-retry 529
+   * on the MAIN model. Rebuilds the params with the BACKGROUND model id (ADR
+   * 0018 reuses BACKGROUND as the fallback — no dedicated env var) and re-invokes
+   * the model. Any failure here — a second 529 or anything else — is logged and
+   * rethrown raw so the orchestrator maps it to the graceful terminal reply.
+   */
+  private async completeOnFallbackModel(
+    request: CompletionRequest,
+    contextEditingEnabled: boolean,
+  ): Promise<CompletionResult> {
+    const fallbackModel = this.config.getModelId(AiModelRole.BACKGROUND);
+
+    this.logFallbackSwap(request, fallbackModel);
+
+    const fallbackParams = this.buildCreateParams(request);
+
+    fallbackParams.model = fallbackModel;
+
+    try {
+      const message = await this.createMessage(
+        fallbackParams,
+        contextEditingEnabled,
+      );
+      const result = this.toCompletionResult(message);
+
+      this.logCacheUsage('complete:fallback', request, result.usage);
+
+      return result;
+    } catch (fallbackError) {
+      this.logCompletionFailure('complete:fallback', request, fallbackError);
+      throw fallbackError;
+    }
+  }
+
+  /**
    * Performs one model round-trip and returns the normalized result. See the
-   * class doc for the single-round-trip boundary. A terminal provider failure
-   * (after the SDK's own retries) is logged with full provider detail, then
-   * rethrown raw so the orchestrator can map it to the graceful reply.
+   * class doc for the single-round-trip boundary.
+   *
+   * Overload fallback (Story 3b / ADR 0018): when the request targets the MAIN
+   * model and the call fails with a 529 overload AFTER the SDK's own retries are
+   * exhausted, the connector retries the SAME request exactly once on the
+   * fallback model (the BACKGROUND model id — reused, no new env var). Only MAIN
+   * is eligible; BACKGROUND and structured calls never fall back. A non-529
+   * failure is never retried with the fallback. If the fallback also fails (529
+   * or otherwise), the error propagates raw so the orchestrator can map it to the
+   * graceful reply.
    */
   async complete(request: CompletionRequest): Promise<CompletionResult> {
     const contextEditingEnabled =
@@ -496,10 +653,18 @@ export class AnthropicAiConnector extends AiConnector {
 
     try {
       const message = await this.createMessage(params, contextEditingEnabled);
+      const result = this.toCompletionResult(message);
 
-      return this.toCompletionResult(message);
+      this.logCacheUsage('complete', request, result.usage);
+
+      return result;
     } catch (error) {
       this.logCompletionFailure('complete', request, error);
+
+      if (request.modelRole === AiModelRole.MAIN && is529(error)) {
+        return this.completeOnFallbackModel(request, contextEditingEnabled);
+      }
+
       throw error;
     }
   }

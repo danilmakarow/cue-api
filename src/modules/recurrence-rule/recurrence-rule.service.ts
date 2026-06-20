@@ -26,6 +26,39 @@ const MAX_OCCURRENCES_PER_WINDOW = 1000;
 const MAX_GENERATION_STEPS = MAX_OCCURRENCES_PER_WINDOW * 64;
 
 /**
+ * How far ahead {@link RecurrenceRuleService.previewSeriesOccurrences} scans a
+ * proposed (not-yet-persisted) recurring series when conflict-checking a write
+ * (Story 9). A `NEVER`-ending or far-`UNTIL` rule is effectively infinite, so the
+ * scan is bounded to this horizon from the proposed anchor; within it the
+ * expander's own `MAX_OCCURRENCES_PER_WINDOW` cap still applies. Two years
+ * comfortably covers any realistic booking intent while keeping the scan — and
+ * the per-occurrence overlap probes it drives — finite and fast. A rule that
+ * only first clashes beyond this horizon is a documented, accepted miss (the
+ * read-side `check_availability` tool and the per-occurrence write check at
+ * commit time remain the backstops); it can never hang.
+ */
+const PREVIEW_SERIES_HORIZON_DAYS = 730;
+
+/** Milliseconds in a day, for the look-ahead horizon arithmetic. */
+const MILLIS_PER_DAY = 86_400_000;
+
+/**
+ * A proposed recurring series whose occurrences must be conflict-checked before
+ * it is persisted (Story 9). Mirrors the create/update payload: a concrete timed
+ * anchor (`startAt` + `endAt`), the per-task timezone, and the validated rule
+ * grammar. `endAt` is required — only a timed series (a concrete window) can
+ * overlap; a recurring todo without an end is non-conflicting by construction
+ * and is never previewed.
+ */
+export interface ProposedSeries {
+  title: string;
+  startAt: Date;
+  endAt: Date;
+  timezone: string;
+  recurrence: CreateRecurrenceRuleDto;
+}
+
+/**
  * Maps a luxon `DateTime.weekday` (1 = Monday … 7 = Sunday) back to the entity
  * encoding (0 = Monday … 6 = Sunday).
  */
@@ -437,6 +470,54 @@ export class RecurrenceRuleService {
     }
 
     return occurrences;
+  }
+
+  /**
+   * Expands a PROPOSED (not-yet-persisted) recurring series into its concrete
+   * occurrences across a bounded look-ahead horizon, for write-side conflict
+   * checking (Story 9). Pure and I/O-free: it builds an in-memory anchor + rule
+   * from the proposal and reuses {@link expandOccurrences}, so the conflict scan
+   * sees exactly the occurrences the series would generate once committed.
+   *
+   * The scan window runs from the proposed `startAt` to
+   * `PREVIEW_SERIES_HORIZON_DAYS` ahead, intersected with the rule's own
+   * UNTIL/COUNT termination by the expander. A `NEVER`-ending (effectively
+   * infinite) rule is therefore bounded to the horizon — the scan can never hang
+   * — and within it the expander's `MAX_OCCURRENCES_PER_WINDOW` cap still holds.
+   * A clash that only first arises beyond the horizon is an accepted, documented
+   * miss (see {@link PREVIEW_SERIES_HORIZON_DAYS}).
+   */
+  previewSeriesOccurrences(proposal: ProposedSeries): Occurrence[] {
+    // Non-persisted in-memory rule + anchor — `expandOccurrences` reads only
+    // these fields and performs no I/O, so the proposal needs no DB round-trip
+    // (the method stays pure, like the rest of the expansion engine).
+    const rule = {
+      id: 'preview-rule',
+      frequency: proposal.recurrence.frequency,
+      interval: proposal.recurrence.interval ?? 1,
+      byWeekday: proposal.recurrence.byWeekday ?? null,
+      byMonthDay: proposal.recurrence.byMonthDay ?? null,
+      byMonth: proposal.recurrence.byMonth ?? null,
+      endType: proposal.recurrence.endType ?? RecurrenceEndType.NEVER,
+      endDate: proposal.recurrence.endDate ?? null,
+      count: proposal.recurrence.count ?? null,
+    } as RecurrenceRule;
+    const anchor = {
+      id: 'preview',
+      title: proposal.title,
+      startAt: proposal.startAt,
+      endAt: proposal.endAt,
+      timezone: proposal.timezone,
+      completedAt: null,
+    } as Task;
+
+    const windowFrom = proposal.startAt;
+    const windowTo = new Date(
+      proposal.startAt.getTime() + PREVIEW_SERIES_HORIZON_DAYS * MILLIS_PER_DAY,
+    );
+
+    // No exceptions exist for a series that does not yet exist.
+    return this.expandOccurrences(anchor, rule, [], windowFrom, windowTo);
   }
 
   /**

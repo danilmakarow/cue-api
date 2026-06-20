@@ -150,6 +150,8 @@ Other `TaskService` additions:
 - For a **single** new/moved concrete occurrence `[start, end)`, expand all of the user's tasks **into that bounded day/window** and return any occurrence that overlaps (excluding the task being edited, by `(taskId, originalStart)`).
 - **Series-wide** clash detection (would a *new weekly rule* ever overlap an existing series across all time) is **out of scope v1** — unbounded and rarely what the user means. The single-occurrence check covers "book the dentist Tuesday 3pm" against whatever already recurs on that Tuesday.
 
+> ⚠️ **Write-side gap (post-ship finding, tracked separately).** `findOverlapping` is occurrence-aware and **does** detect clashes against existing recurring occupancy. But the assistant's dispatcher only *invokes* it for **non-recurring** creates and **one-off** moves (`tool-dispatcher.service.ts` guards the hold with `if (!recurrence && startAt && endAt)`; `updateRecurring` has no overlap check). So **creating or editing a recurring task currently bypasses the conflict hold entirely** — a new series can be booked over existing events silently. This is a defect in the *write path*, not the engine; it is tracked as a standalone fix and flagged in [assistant-layered-architecture.md](assistant-layered-architecture.md). The read-side `check_availability` tool mitigates but does not close it.
+
 ### Group service
 
 `TaskGroupService` (skeleton today) gains, following the pattern:

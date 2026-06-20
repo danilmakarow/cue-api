@@ -4,13 +4,14 @@
   "testEnvironment": "node",
   "testRegex": ".e2e-spec.ts$",
   "transform": {
-    "^.+\\.ts$": [
+    "^.+\\.(ts|js)$": [
       "ts-jest",
       {
-        "tsconfig": "tsconfig.spec.json"
+        "tsconfig": "test/tsconfig.e2e.json"
       }
     ]
   },
+  "transformIgnorePatterns": ["node_modules/(?!.*jose)"],
   "moduleNameMapper": {
     "^@/utils/(.*)$": "<rootDir>/src/common/utils/$1",
     "^@/config/(.*)$": "<rootDir>/src/config/$1",
@@ -24,5 +25,10 @@
     "^@/modules/(.*)$": "<rootDir>/src/modules/$1",
     "^@/(.*)$": "<rootDir>/src/$1"
   },
-  "setupFiles": ["<rootDir>/test/jest-setup.ts"]
+  "setupFiles": ["<rootDir>/test/e2e/jest-e2e-setup.ts"],
+  "globalSetup": "<rootDir>/test/e2e/global-setup.ts",
+  "globalTeardown": "<rootDir>/test/e2e/global-teardown.ts",
+  "testTimeout": 30000,
+  "maxWorkers": 1,
+  "forceExit": false
 }

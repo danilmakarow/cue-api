@@ -450,6 +450,196 @@ describe('TaskService.findOccurrencesInRange', () => {
   });
 });
 
+describe('TaskService recurring-series conflict checks (Story 9)', () => {
+  /**
+   * A `findAll` that honors the half-open timed-window intersection for the
+   * `timedWithEnd` fixtures, so each per-occurrence `findOverlapping` probe only
+   * clashes on the occurrence whose window actually overlaps the fixture — the
+   * precise behaviour the real query has. Other buckets stay empty.
+   */
+  const windowAwareFindAll = (timedWithEnd: Task[]) =>
+    jest.fn((options?: FindManyOptions<Task>) => {
+      const where = (options?.where ?? {}) as FindOptionsWhere<Task>;
+
+      // Only the timed-with-end clash query (startAt < endBound AND endAt >
+      // startBound, recurrenceRuleId IS NULL) reads the fixtures.
+      if (
+        operatorType(where.recurrenceRuleId) !== 'isNull' ||
+        operatorType(where.startAt) !== 'lessThan' ||
+        operatorType(where.endAt) !== 'moreThan'
+      ) {
+        return Promise.resolve([]);
+      }
+
+      const endBound = (where.startAt as unknown as FindOperatorLike)
+        .value as Date;
+      const startBound = (where.endAt as unknown as FindOperatorLike)
+        .value as Date;
+      const excluded = excludedId(where);
+
+      const rows = timedWithEnd.filter(
+        (task) =>
+          task.id !== excluded &&
+          (task.startAt as Date).getTime() < endBound.getTime() &&
+          (task.endAt as Date).getTime() > startBound.getTime(),
+      );
+
+      return Promise.resolve(rows);
+    });
+
+  const buildService = (timedWithEnd: Task[], anchorTask?: Task) => {
+    const taskDb = {
+      findAll: windowAwareFindAll(timedWithEnd),
+      findOne: jest.fn().mockResolvedValue(anchorTask ?? null),
+    };
+    const calendarDb = buildCalendarDatabaseService();
+    const realEngine = new RecurrenceRuleService(null as never);
+    const service = new TaskService(
+      taskDb as never,
+      calendarDb as never,
+      buildGroupDatabaseService() as never,
+      realEngine as never,
+      buildExceptionService() as never,
+    );
+
+    return { service, taskDb };
+  };
+
+  describe('findRecurringSeriesConflicts', () => {
+    it('reports no conflicts when no occurrence overlaps', async () => {
+      const { service } = buildService([]);
+
+      const result = await service.findRecurringSeriesConflicts(
+        'user-1',
+        'cal-1',
+        {
+          title: 'Standup',
+          startAt: zoned('2026-06-01T09:00'),
+          endAt: zoned('2026-06-01T09:30'),
+          timezone: 'America/New_York',
+          recurrence: {
+            frequency: RecurrenceFrequency.WEEKLY,
+            endType: RecurrenceEndType.COUNT,
+            count: 4,
+          },
+        },
+      );
+
+      expect(result.conflictDates).toHaveLength(0);
+      expect(result.conflictingTasks).toHaveLength(0);
+    });
+
+    it('flags the clashing occurrence date(s) when one occurrence overlaps', async () => {
+      // An existing event on the SECOND weekly occurrence (2026-06-08 09:00).
+      const existing = makeTask({
+        id: 't-existing',
+        title: 'Gym',
+        startAt: zoned('2026-06-08T09:00'),
+        endAt: zoned('2026-06-08T09:30'),
+      });
+      const { service } = buildService([existing]);
+
+      const result = await service.findRecurringSeriesConflicts(
+        'user-1',
+        'cal-1',
+        {
+          title: 'Standup',
+          startAt: zoned('2026-06-01T09:00'),
+          endAt: zoned('2026-06-01T09:30'),
+          timezone: 'America/New_York',
+          recurrence: {
+            frequency: RecurrenceFrequency.WEEKLY,
+            endType: RecurrenceEndType.COUNT,
+            count: 4,
+          },
+        },
+      );
+
+      // Exactly the one clashing date, and the existing task it clashes with.
+      expect(result.conflictDates.map((date) => localDate(date))).toEqual([
+        '2026-06-08',
+      ]);
+      expect(result.conflictingTasks.map((task) => task.id)).toEqual([
+        't-existing',
+      ]);
+    });
+
+    it('terminates without hanging on a NEVER-ending (infinite) rule', async () => {
+      const { service } = buildService([]);
+
+      const result = await service.findRecurringSeriesConflicts(
+        'user-1',
+        'cal-1',
+        {
+          title: 'Standup',
+          startAt: zoned('2026-06-01T09:00'),
+          endAt: zoned('2026-06-01T09:30'),
+          timezone: 'America/New_York',
+          // NEVER-ending: bounded only by the look-ahead horizon, never runs away.
+          recurrence: { frequency: RecurrenceFrequency.DAILY },
+        },
+      );
+
+      expect(result.conflictDates).toHaveLength(0);
+    });
+  });
+
+  describe('findRecurringEditConflicts', () => {
+    it('returns no conflicts when neither time nor rule changed', async () => {
+      const anchor = makeTask({
+        id: 't-1',
+        startAt: zoned('2026-06-01T09:00'),
+        endAt: zoned('2026-06-01T09:30'),
+        recurrenceRuleId: 'rule-1',
+        recurrenceRule: makeRule({ frequency: RecurrenceFrequency.WEEKLY }),
+      });
+      const { service } = buildService([], anchor);
+
+      const result = await service.findRecurringEditConflicts('user-1', 't-1', {
+        title: 'Renamed only',
+      });
+
+      expect(result.conflictDates).toHaveLength(0);
+    });
+
+    it('flags an overlap a TIME change introduces, excluding the edited series', async () => {
+      // The edited series' own occupancy (id t-1) must NOT count as a clash, but a
+      // different existing event on the moved occurrence must.
+      const anchor = makeTask({
+        id: 't-1',
+        startAt: zoned('2026-06-01T09:00'),
+        endAt: zoned('2026-06-01T09:30'),
+        recurrenceRuleId: 'rule-1',
+        recurrenceRule: makeRule({
+          frequency: RecurrenceFrequency.WEEKLY,
+          endType: RecurrenceEndType.COUNT,
+          count: 2,
+        }),
+      });
+      const other = makeTask({
+        id: 't-other',
+        title: 'Lunch',
+        startAt: zoned('2026-06-01T11:00'),
+        endAt: zoned('2026-06-01T11:30'),
+      });
+      const { service } = buildService([other], anchor);
+
+      // Move the series to 11:00 (overlapping Lunch on the first occurrence).
+      const result = await service.findRecurringEditConflicts('user-1', 't-1', {
+        startAt: zoned('2026-06-01T11:00').toISOString(),
+        endAt: zoned('2026-06-01T11:30').toISOString(),
+      });
+
+      expect(result.conflictingTasks.map((task) => task.id)).toContain(
+        't-other',
+      );
+      expect(result.conflictingTasks.map((task) => task.id)).not.toContain(
+        't-1',
+      );
+    });
+  });
+});
+
 describe('TaskService.create', () => {
   /**
    * Builds a TaskService with fully mocked collaborators for the write paths.
@@ -2162,5 +2352,228 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
 
     // No expansion without a rule — the task does not appear.
     expect(result).toHaveLength(0);
+  });
+});
+
+describe('TaskService.getDailyCounts', () => {
+  /**
+   * Wires a TaskService with the REAL recurrence engine (pure) and a routed
+   * task-database mock, so per-day bucketing is asserted over genuinely-expanded
+   * occurrences. `calendarDbOverride` lets ownership tests swap the calendar stub.
+   */
+  const buildService = (
+    fixtures: RangeFixtures,
+    options: {
+      exceptionService?: ReturnType<typeof buildExceptionService>;
+      calendarDbOverride?: { findOneBy: jest.Mock; findAllByOwner: jest.Mock };
+    } = {},
+  ) => {
+    const taskDb = { findAll: routedFindAll(fixtures) };
+    const calendarDb =
+      options.calendarDbOverride ?? buildCalendarDatabaseService();
+    const realEngine = new RecurrenceRuleService(null as never);
+    const service = new TaskService(
+      taskDb as never,
+      calendarDb as never,
+      buildGroupDatabaseService() as never,
+      realEngine as never,
+      (options.exceptionService ?? buildExceptionService()) as never,
+    );
+
+    return { service, calendarDb };
+  };
+
+  it('keys counts by ISO local date in the task timezone', async () => {
+    const oneOff = makeTask({
+      id: 't-oneoff',
+      startAt: zoned('2026-06-03T09:00'),
+      endAt: zoned('2026-06-03T10:00'),
+    });
+    const { service } = buildService({ timedWithEnd: [oneOff] });
+
+    const counts = await service.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      WINDOW_TO,
+      {
+        calendarId: 'cal-1',
+      },
+    );
+
+    expect(counts).toEqual({ '2026-06-03': 1 });
+  });
+
+  it('sums multiple occurrences landing on the same local date', async () => {
+    const morning = makeTask({
+      id: 't-am',
+      startAt: zoned('2026-06-03T08:00'),
+      endAt: zoned('2026-06-03T09:00'),
+    });
+    const evening = makeTask({
+      id: 't-pm',
+      startAt: zoned('2026-06-03T20:00'),
+      endAt: zoned('2026-06-03T21:00'),
+    });
+    const otherDay = makeTask({
+      id: 't-next',
+      startAt: zoned('2026-06-04T08:00'),
+      endAt: zoned('2026-06-04T09:00'),
+    });
+    const { service } = buildService({
+      timedWithEnd: [morning, evening, otherDay],
+    });
+
+    const counts = await service.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      WINDOW_TO,
+      {
+        calendarId: 'cal-1',
+      },
+    );
+
+    expect(counts).toEqual({ '2026-06-03': 2, '2026-06-04': 1 });
+  });
+
+  it('counts each occurrence of a recurring series in its date bucket', async () => {
+    const anchor = makeTask({
+      id: 't-daily',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      recurrenceRuleId: 'rule-1',
+      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+    });
+    const { service } = buildService({ recurring: [anchor] });
+
+    const counts = await service.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      zoned('2026-06-04T00:00'),
+      { calendarId: 'cal-1' },
+    );
+
+    // DAILY across [6/1, 6/4) → one occurrence each on 6/1, 6/2, 6/3.
+    expect(counts).toEqual({
+      '2026-06-01': 1,
+      '2026-06-02': 1,
+      '2026-06-03': 1,
+    });
+  });
+
+  it('buckets a fall-back DST day to its wall-clock local date', async () => {
+    // 2026-11-01 is the US fall-back day (02:00 EDT → 01:00 EST). A 09:00 local
+    // occurrence must still bucket onto 2026-11-01 regardless of the offset jump.
+    const dstOneOff = makeTask({
+      id: 't-dst',
+      startAt: zoned('2026-11-01T09:00'),
+      endAt: zoned('2026-11-01T10:00'),
+    });
+    const { service } = buildService({ timedWithEnd: [dstOneOff] });
+
+    const counts = await service.getDailyCounts(
+      'user-1',
+      zoned('2026-10-31T00:00'),
+      zoned('2026-11-03T00:00'),
+      { calendarId: 'cal-1' },
+    );
+
+    expect(counts).toEqual({ '2026-11-01': 1 });
+  });
+
+  it('excludes completed occurrences by default and includes them when asked', async () => {
+    const completed = makeTask({
+      id: 't-done',
+      startAt: zoned('2026-06-02T09:00'),
+      endAt: zoned('2026-06-02T10:00'),
+      completedAt: zoned('2026-06-02T10:05'),
+    });
+    const open = makeTask({
+      id: 't-open',
+      startAt: zoned('2026-06-03T09:00'),
+      endAt: zoned('2026-06-03T10:00'),
+    });
+    const fixtures = { timedWithEnd: [completed, open] };
+
+    const { service } = buildService(fixtures);
+    const defaultCounts = await service.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      WINDOW_TO,
+      { calendarId: 'cal-1' },
+    );
+
+    expect(defaultCounts).toEqual({ '2026-06-03': 1 });
+
+    const { service: service2 } = buildService(fixtures);
+    const withCompleted = await service2.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      WINDOW_TO,
+      { calendarId: 'cal-1', includeCompleted: true },
+    );
+
+    expect(withCompleted).toEqual({ '2026-06-02': 1, '2026-06-03': 1 });
+  });
+
+  it('omits zero-count days from the response', async () => {
+    const sparse = makeTask({
+      id: 't-sparse',
+      startAt: zoned('2026-06-05T09:00'),
+      endAt: zoned('2026-06-05T10:00'),
+    });
+    const { service } = buildService({ timedWithEnd: [sparse] });
+
+    const counts = await service.getDailyCounts(
+      'user-1',
+      WINDOW_FROM,
+      WINDOW_TO,
+      {
+        calendarId: 'cal-1',
+      },
+    );
+
+    // Only the single populated day appears; every empty day is absent.
+    expect(Object.keys(counts)).toEqual(['2026-06-05']);
+  });
+
+  it('rejects an empty window (delegated to findOccurrencesInRange)', async () => {
+    const { service } = buildService({});
+
+    await expect(
+      service.getDailyCounts('user-1', WINDOW_TO, WINDOW_FROM, {
+        calendarId: 'cal-1',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('throws 403 when the calendar belongs to another user', async () => {
+    const calendarDbOverride = {
+      findOneBy: jest.fn().mockResolvedValue({
+        id: 'cal-1',
+        ownerId: 'someone-else',
+      } as Calendar),
+      findAllByOwner: jest.fn().mockResolvedValue([]),
+    };
+    const { service } = buildService({}, { calendarDbOverride });
+
+    await expect(
+      service.getDailyCounts('user-1', WINDOW_FROM, WINDOW_TO, {
+        calendarId: 'cal-1',
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('throws 404 when the calendar does not exist', async () => {
+    const calendarDbOverride = {
+      findOneBy: jest.fn().mockResolvedValue(null),
+      findAllByOwner: jest.fn().mockResolvedValue([]),
+    };
+    const { service } = buildService({}, { calendarDbOverride });
+
+    await expect(
+      service.getDailyCounts('user-1', WINDOW_FROM, WINDOW_TO, {
+        calendarId: 'missing-cal',
+      }),
+    ).rejects.toMatchObject({ status: 404 });
   });
 });

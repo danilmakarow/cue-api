@@ -36,7 +36,6 @@ export class TaskGroupDTO {
   @ApiProperty({ format: 'uuid', nullable: true })
   defaultRecurrenceRuleId: string | null;
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   @ApiProperty({ type: () => RecurrenceRuleDTO, nullable: true })
   recurrence: RecurrenceRuleDTO | null;
 

@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Logger } from '@nestjs/common';
 import { z } from 'zod';
 
-import { AnthropicAiConnector } from './anthropic-ai.connector';
+import { AnthropicAiConnector, is529 } from './anthropic-ai.connector';
 import { AiConfig } from '../ai.config';
 import {
   AiModelRole,
@@ -518,6 +518,103 @@ describe('AnthropicAiConnector', () => {
       });
     });
 
+    it('translates toolChoice "any" into {type:"any"} when tools are present', async () => {
+      messagesCreate.mockResolvedValue(buildMessage({}));
+
+      await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'do it' }],
+        tools: [
+          {
+            name: 'create_task',
+            description: 'create',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ],
+        toolChoice: 'any',
+      });
+
+      expect(messagesCreate.mock.calls[0][0].tool_choice).toEqual({
+        type: 'any',
+      });
+    });
+
+    it('translates toolChoice {name} into {type:"tool",name} when tools are present', async () => {
+      messagesCreate.mockResolvedValue(buildMessage({}));
+
+      await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'create it' }],
+        tools: [
+          {
+            name: 'create_task',
+            description: 'create',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ],
+        toolChoice: { name: 'create_task' },
+      });
+
+      expect(messagesCreate.mock.calls[0][0].tool_choice).toEqual({
+        type: 'tool',
+        name: 'create_task',
+      });
+    });
+
+    it('translates toolChoice "auto" into {type:"auto"} when tools are present', async () => {
+      messagesCreate.mockResolvedValue(buildMessage({}));
+
+      await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'maybe' }],
+        tools: [
+          {
+            name: 'create_task',
+            description: 'create',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ],
+        toolChoice: 'auto',
+      });
+
+      expect(messagesCreate.mock.calls[0][0].tool_choice).toEqual({
+        type: 'auto',
+      });
+    });
+
+    it('omits tool_choice entirely when toolChoice is unset (implicit auto)', async () => {
+      messagesCreate.mockResolvedValue(buildMessage({}));
+
+      await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'hi' }],
+        tools: [
+          {
+            name: 'create_task',
+            description: 'create',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ],
+      });
+
+      expect(messagesCreate.mock.calls[0][0].tool_choice).toBeUndefined();
+    });
+
+    it('degrades a forced toolChoice to an omitted choice when there are no tools (never throws)', async () => {
+      messagesCreate.mockResolvedValue(buildMessage({}));
+
+      await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'no tools available' }],
+        toolChoice: 'any',
+      });
+
+      const body = messagesCreate.mock.calls[0][0];
+
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.tools).toBeUndefined();
+    });
+
     it('propagates raw SDK errors (no retry/wrapping in the connector)', async () => {
       const sdkError = new Error('429 rate limited');
 
@@ -530,6 +627,136 @@ describe('AnthropicAiConnector', () => {
         }),
       ).rejects.toBe(sdkError);
       expect(messagesCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('on a 529 on MAIN, retries once on the BACKGROUND model id and succeeds (Story 3b)', async () => {
+      const overload = new MockAnthropicApiError(
+        529,
+        'overloaded_error',
+        'req_overloaded',
+        '529 Overloaded',
+      );
+
+      messagesCreate.mockRejectedValueOnce(overload).mockResolvedValueOnce(
+        buildMessage({
+          stop_reason: 'end_turn',
+          model: MODEL_BACKGROUND,
+          content: [textBlock('Recovered on fallback.')],
+        }),
+      );
+
+      const result = await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'do it' }],
+      });
+
+      // One failed MAIN attempt + one fallback attempt.
+      expect(messagesCreate).toHaveBeenCalledTimes(2);
+      // The first call targets MAIN; the retry swaps to the BACKGROUND model id.
+      expect(messagesCreate.mock.calls[0][0].model).toBe(MODEL_MAIN);
+      expect(messagesCreate.mock.calls[1][0].model).toBe(MODEL_BACKGROUND);
+      // The loop never sees the 529 — it gets the fallback's result.
+      expect(result.stopReason).toBe(AiStopReason.END_TURN);
+      expect(result.text).toBe('Recovered on fallback.');
+    });
+
+    it('on a 529 on both MAIN and the fallback, rethrows the fallback error raw (Story 3b)', async () => {
+      const mainOverload = new MockAnthropicApiError(
+        529,
+        'overloaded_error',
+        'req_main',
+        '529 Overloaded',
+      );
+      const fallbackOverload = new MockAnthropicApiError(
+        529,
+        'overloaded_error',
+        'req_fallback',
+        '529 Overloaded again',
+      );
+
+      messagesCreate
+        .mockRejectedValueOnce(mainOverload)
+        .mockRejectedValueOnce(fallbackOverload);
+
+      await expect(
+        connector.complete({
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'do it' }],
+        }),
+      ).rejects.toBe(fallbackOverload);
+
+      // MAIN attempt + one fallback attempt, then it gives up.
+      expect(messagesCreate).toHaveBeenCalledTimes(2);
+      expect(messagesCreate.mock.calls[1][0].model).toBe(MODEL_BACKGROUND);
+    });
+
+    it('does not fall back on a non-529 failure on MAIN — rethrows raw (Story 3b)', async () => {
+      const serverError = new MockAnthropicApiError(
+        500,
+        'api_error',
+        'req_500',
+        '500 Internal',
+      );
+
+      messagesCreate.mockRejectedValue(serverError);
+
+      await expect(
+        connector.complete({
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'do it' }],
+        }),
+      ).rejects.toBe(serverError);
+
+      // No fallback attempt — exactly one call.
+      expect(messagesCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fall back when a 529 hits a BACKGROUND request — only MAIN swaps (Story 3b)', async () => {
+      const overload = new MockAnthropicApiError(
+        529,
+        'overloaded_error',
+        'req_bg',
+        '529 Overloaded',
+      );
+
+      messagesCreate.mockRejectedValue(overload);
+
+      await expect(
+        connector.complete({
+          modelRole: AiModelRole.BACKGROUND,
+          messages: [{ role: PromptRole.USER, content: 'summarize' }],
+        }),
+      ).rejects.toBe(overload);
+
+      // BACKGROUND is not eligible for the fallback swap — one call only.
+      expect(messagesCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back on a 529 whose status was dropped mid-stream (body marker only) (Story 3b)', async () => {
+      // The SDK sometimes surfaces an overload as a plain Error carrying the body
+      // string with no 529 status — is529 must still recognize it.
+      const droppedStatusOverload = new Error(
+        'stream error: {"type":"error","error":{"type":"overloaded_error"}}',
+      );
+
+      messagesCreate
+        .mockRejectedValueOnce(droppedStatusOverload)
+        .mockResolvedValueOnce(
+          buildMessage({
+            stop_reason: 'end_turn',
+            model: MODEL_BACKGROUND,
+            content: [textBlock('Recovered.')],
+          }),
+        );
+
+      const result = await connector.complete({
+        modelRole: AiModelRole.MAIN,
+        messages: [{ role: PromptRole.USER, content: 'do it' }],
+      });
+
+      expect(messagesCreate).toHaveBeenCalledTimes(2);
+      expect(messagesCreate.mock.calls[1][0].model).toBe(MODEL_BACKGROUND);
+      expect(result.text).toBe('Recovered.');
     });
 
     it('logs an error with operation + status then rethrows on an APIError', async () => {
@@ -545,9 +772,12 @@ describe('AnthropicAiConnector', () => {
 
       messagesCreate.mockRejectedValue(apiError);
 
+      // BACKGROUND is used here (not MAIN) so the 529 is NOT eligible for the
+      // Story-3b fallback swap — this test asserts the single error-log format +
+      // redaction, which only holds on the no-fallback path.
       await expect(
         connector.complete({
-          modelRole: AiModelRole.MAIN,
+          modelRole: AiModelRole.BACKGROUND,
           messages: [
             { role: PromptRole.USER, content: 'SECRET_PROMPT_CONTENT' },
           ],
@@ -706,5 +936,43 @@ describe('AnthropicAiConnector', () => {
 
       errorSpy.mockRestore();
     });
+  });
+});
+
+describe('is529', () => {
+  it('matches an APIError carrying HTTP status 529', () => {
+    const overload = new MockAnthropicApiError(
+      529,
+      'overloaded_error',
+      'req_overloaded',
+      '529 Overloaded',
+    );
+
+    expect(is529(overload)).toBe(true);
+  });
+
+  it('matches by the "overloaded_error" body substring when the status was dropped', () => {
+    // A 529 the SDK surfaced mid-stream with no status, only the body string.
+    const droppedStatus = new Error(
+      'stream error: {"type":"error","error":{"type":"overloaded_error"}}',
+    );
+
+    expect(is529(droppedStatus)).toBe(true);
+  });
+
+  it('does not match a non-529 APIError (e.g. a 500 with no overload marker)', () => {
+    const serverError = new MockAnthropicApiError(
+      500,
+      'api_error',
+      'req_500',
+      '500 Internal Server Error',
+    );
+
+    expect(is529(serverError)).toBe(false);
+  });
+
+  it('does not match a plain non-overload error', () => {
+    expect(is529(new Error('429 rate limited'))).toBe(false);
+    expect(is529('some string failure')).toBe(false);
   });
 });

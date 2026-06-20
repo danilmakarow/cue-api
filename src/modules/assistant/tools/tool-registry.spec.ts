@@ -1,0 +1,493 @@
+import { z } from 'zod';
+
+import { toolRegistry } from './tool-registry';
+import { buildTool } from './tool.contract';
+import { ToolSchema } from '@/modules/ai/ai.types';
+
+/** A trivially-valid Zod schema for the `buildTool` fail-closed tests. */
+const NOOP_SCHEMA = z.object({});
+
+/**
+ * The model-facing tool schemas EXACTLY as they were hand-written in
+ * `ASSISTANT_TOOL_SCHEMAS` before the registry migration (the uncommitted
+ * Phase A/B/C + Wave-1 state). This is the byte-equivalence oracle: the registry
+ * derives `toSchemas()` from the single-sourced tool definitions, and this test
+ * asserts the derived array is deep-equal — same names, descriptions, required
+ * arrays, and every nested field description — and in the same STABLE order
+ * (`create_tasks` appended last) so the cached tool-defs prefix never shifts
+ * (ADR 0004). Any drift in a tool's prompt or input_schema fails here.
+ */
+const recurrenceJsonSchema = {
+  type: 'object',
+  description:
+    'Makes the task repeat as ONE task with a single rule — never create copies for future dates.',
+  properties: {
+    frequency: {
+      type: 'string',
+      enum: ['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'],
+      description: 'How often the task repeats.',
+    },
+    interval: {
+      type: 'integer',
+      description: 'Repeat every N periods (default 1). E.g. 2 = every other.',
+    },
+    byWeekday: {
+      type: 'array',
+      items: { type: 'integer' },
+      description:
+        'Weekday ordinals 0=Mon … 6=Sun (e.g. [0,1,2,3,4] weekdays).',
+    },
+    byMonthDay: {
+      type: 'array',
+      items: { type: 'integer' },
+      description: 'Days of the month (1-31).',
+    },
+    byMonth: {
+      type: 'array',
+      items: { type: 'integer' },
+      description: 'Months (1-12).',
+    },
+    endType: {
+      type: 'string',
+      enum: ['NEVER', 'UNTIL_DATE', 'COUNT'],
+      description: 'When the series ends.',
+    },
+    endDate: {
+      type: 'string',
+      description: 'ISO date the series ends on; required for UNTIL_DATE.',
+    },
+    count: {
+      type: 'integer',
+      description: 'Number of occurrences; required for COUNT.',
+    },
+  },
+  required: ['frequency'],
+};
+
+const editScopeJsonSchema = {
+  type: 'string',
+  enum: ['this', 'this_and_following', 'all'],
+  description:
+    'For a repeating task: which instances to affect. Omit to be asked which scope; pass only when the user is unambiguous.',
+};
+
+const createTaskProperties = {
+  title: { type: 'string', description: 'Task title.' },
+  startAt: {
+    type: 'string',
+    description: 'ISO 8601 start datetime; omit for a timeless todo.',
+  },
+  endAt: {
+    type: 'string',
+    description: 'ISO 8601 end datetime; omit for an open-ended task.',
+  },
+  isAllDay: {
+    type: 'boolean',
+    description: 'Mark the task all-day.',
+  },
+  notes: { type: 'string', description: 'Optional notes.' },
+  group: {
+    type: 'string',
+    description:
+      'Optional group name; if it does not exist, confirm before creating one.',
+  },
+  recurrence: recurrenceJsonSchema,
+  requiresCompletion: {
+    type: 'boolean',
+    description: 'Whether the task must be completed (todos default true).',
+  },
+  timezone: {
+    type: 'string',
+    description:
+      'Optional IANA timezone; omit to use the user timezone from context.',
+  },
+  calendarId: {
+    type: 'string',
+    description: 'Optional calendar id; omit to use the primary calendar.',
+  },
+};
+
+const EXPECTED_SCHEMAS: ToolSchema[] = [
+  {
+    name: 'list_tasks',
+    description:
+      'List tasks in a date/time range and/or by group / completion. Returns lines prefixed with a bracketed handle like [e2] — use that handle to act on a task. Use only for dates beyond the schedule already in context.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: {
+          type: 'string',
+          description:
+            'ISO 8601 start of the range (inclusive). Defaults to today.',
+        },
+        to: {
+          type: 'string',
+          description:
+            'ISO 8601 end of the range (exclusive). Defaults to a week out.',
+        },
+        group: {
+          type: 'string',
+          description: 'Optional group name to filter by.',
+        },
+        includeCompleted: {
+          type: 'boolean',
+          description: 'Include completed tasks (default false).',
+        },
+        onlyTodos: {
+          type: 'boolean',
+          description: 'Return only timeless todos (no start time).',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'find_free_slots',
+    description:
+      'Find open time slots of at least the given duration within a range, around existing tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'ISO 8601 start of the range.' },
+        to: { type: 'string', description: 'ISO 8601 end of the range.' },
+        durationMinutes: {
+          type: 'integer',
+          description: 'Required slot length in minutes.',
+        },
+        calendarId: {
+          type: 'string',
+          description: 'Optional calendar id to scope to.',
+        },
+      },
+      required: ['from', 'to', 'durationMinutes'],
+    },
+  },
+  {
+    name: 'create_task',
+    description:
+      'Create a timed event, an all-day event, or a todo (omit startAt for a todo with no time). Supports recurrence (one task, one rule) and an optional group by name. A non-recurring timed task that overlaps an existing one is held for the user to confirm — do not resolve conflicts yourself.',
+    inputSchema: {
+      type: 'object',
+      properties: createTaskProperties,
+      required: ['title'],
+    },
+  },
+  {
+    name: 'update_task',
+    description:
+      'Update a task or occurrence by its handle (move its time, rename it, change its group or recurrence). For a repeating task, pass editScope; if you omit it you will be asked which scope. Overlaps on a one-off move are handled by the confirmation flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handle: {
+          type: 'string',
+          description: 'Bracketed handle of the task to update, e.g. e2.',
+        },
+        title: { type: 'string', description: 'New title.' },
+        startAt: {
+          type: 'string',
+          description: 'New ISO 8601 start datetime.',
+        },
+        endAt: {
+          type: ['string', 'null'],
+          description: 'New ISO 8601 end datetime, or null to clear it.',
+        },
+        group: { type: 'string', description: 'New group name.' },
+        recurrence: recurrenceJsonSchema,
+        editScope: editScopeJsonSchema,
+      },
+      required: ['handle'],
+    },
+  },
+  {
+    name: 'complete_task',
+    description:
+      'Mark a task or a single recurring occurrence complete or incomplete, by handle.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handle: {
+          type: 'string',
+          description: 'Bracketed handle of the task, e.g. e2.',
+        },
+        completed: {
+          type: 'boolean',
+          description: 'True to complete (default), false to reopen.',
+        },
+      },
+      required: ['handle'],
+    },
+  },
+  {
+    name: 'delete_task',
+    description:
+      'Delete a task or series by handle, or skip a single occurrence with editScope:"this". For a repeating task without editScope you will be asked which scope.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handle: {
+          type: 'string',
+          description: 'Bracketed handle of the task to delete, e.g. e2.',
+        },
+        editScope: editScopeJsonSchema,
+      },
+      required: ['handle'],
+    },
+  },
+  {
+    name: 'set_reminder',
+    description: 'Set a reminder offset on a task by handle.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handle: {
+          type: 'string',
+          description: 'Bracketed handle of the task, e.g. e2.',
+        },
+        offsetMinutes: {
+          type: 'integer',
+          description:
+            'Minutes relative to start; negative fires before (e.g. -15).',
+        },
+        channel: {
+          type: 'string',
+          enum: ['PUSH', 'TELEGRAM'],
+          description: 'Delivery channel.',
+        },
+      },
+      required: ['handle', 'offsetMinutes'],
+    },
+  },
+  {
+    name: 'list_groups',
+    description:
+      "List the user's task groups so you know what exists before assigning or filtering by group.",
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'create_group',
+    description:
+      'Create a task group (e.g. a new "Home reno" project). Confirm with the user before creating a group they did not explicitly ask for.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Group name.' },
+        color: { type: 'string', description: 'Optional color.' },
+        icon: { type: 'string', description: 'Optional icon.' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'create_tasks',
+    description:
+      'Create MANY tasks in one call, applied in the given order — prefer this over repeated create_task when the user asks for several at once (e.g. "create all seven driving lessons"). Each item is a full create_task input (timed event, all-day event, or todo, optionally recurring or grouped). Non-conflicting items are created immediately; any non-recurring timed item that overlaps an existing one is held for the user to confirm — the rest still commit, so a single overlap never aborts the batch. Up to 25 items per call: split a larger list across several calls.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 25,
+          description:
+            'The tasks to create, applied in order (1-25). Each item is a full create_task input; split a larger list across calls.',
+          items: {
+            type: 'object',
+            properties: createTaskProperties,
+            required: ['title'],
+          },
+        },
+      },
+      required: ['tasks'],
+    },
+  },
+  {
+    name: 'check_availability',
+    description:
+      'Check whether a list of specific proposed time slots are free, in ONE call — use this instead of probing slots one at a time. Each slot is a concrete window (startAt + endAt); returns a per-slot verdict (FREE, or BUSY with the conflicting tasks tagged by their [eN] handle so you can act on them). Up to 25 slots per call. This checks CONCRETE windows only: it does NOT accept a recurrence rule as a slot — expand a repeating proposal into its individual occurrences and pass those. It is a read, never a write: a "free" verdict here matches what a later create would see, but it does not book anything.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slots: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 25,
+          description:
+            'The proposed time slots to check, in order (1-25). Each is a concrete window; split a larger list across calls.',
+          items: {
+            type: 'object',
+            description:
+              'One concrete proposed time window to check. Pass a concrete start and end, never a recurrence rule.',
+            properties: {
+              startAt: {
+                type: 'string',
+                description: 'ISO 8601 start of the proposed slot (inclusive).',
+              },
+              endAt: {
+                type: 'string',
+                description: 'ISO 8601 end of the proposed slot (exclusive).',
+              },
+              calendarId: {
+                type: 'string',
+                description: 'Optional calendar id to scope the check to.',
+              },
+              excludeTaskId: {
+                type: 'string',
+                description:
+                  'Optional task id to exclude from its own conflict scan (e.g. when re-checking a move).',
+              },
+            },
+            required: ['startAt', 'endAt'],
+          },
+        },
+      },
+      required: ['slots'],
+    },
+  },
+  {
+    name: 'ask_user',
+    description:
+      'Ask the user ONE concise clarifying question and pause — use this when you genuinely need a missing detail (a time, a choice, a confirmation) before you can act, instead of guessing. Optionally offer up to 4 tappable quick-reply options ({ id, label }) when the answer is one of a few clear choices; omit them for an open free-text question. The turn SUSPENDS here: your question is sent to the user, and the same task automatically resumes with their answer fed back to you (you may then ask again or proceed). Ask at most one question at a time, and only when the answer would actually change what you do.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description:
+            'The single, concise clarifying question to ask the user. The turn suspends here and resumes when the user answers.',
+        },
+        options: {
+          type: 'array',
+          maxItems: 4,
+          description:
+            'Optional tappable quick-reply options (1-4). Offer them when the answer is one of a few clear choices; omit for an open free-text question.',
+          items: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                description:
+                  'Stable short option key echoed back when the user taps it (e.g. "fri", "1h"). Keep it terse and unique within the question.',
+              },
+              label: {
+                type: 'string',
+                description:
+                  'Human-facing button text shown to the user (e.g. "Friday").',
+              },
+            },
+            required: ['id', 'label'],
+          },
+        },
+      },
+      required: ['question'],
+    },
+  },
+];
+
+describe('ToolRegistry.toSchemas — byte-equivalence with the prior hand-written schemas', () => {
+  it('derives the model-facing schema array deep-equal to the original ASSISTANT_TOOL_SCHEMAS', async () => {
+    const derived = await toolRegistry.toSchemas();
+
+    expect(derived).toEqual(EXPECTED_SCHEMAS);
+  });
+
+  it('serializes to the exact same JSON bytes (cache-prefix stability, ADR 0004)', async () => {
+    const derived = await toolRegistry.toSchemas();
+
+    expect(JSON.stringify(derived)).toBe(JSON.stringify(EXPECTED_SCHEMAS));
+  });
+
+  it('keeps the stable append-only tool order with create_tasks last', async () => {
+    const derived = await toolRegistry.toSchemas();
+
+    expect(derived.map((tool) => tool.name)).toEqual([
+      'list_tasks',
+      'find_free_slots',
+      'create_task',
+      'update_task',
+      'complete_task',
+      'delete_task',
+      'set_reminder',
+      'list_groups',
+      'create_group',
+      'create_tasks',
+      'check_availability',
+      'ask_user',
+    ]);
+  });
+
+  it('carries the expected nested field descriptions for create_task (representative)', async () => {
+    const derived = await toolRegistry.toSchemas();
+    const createTask = derived.find((tool) => tool.name === 'create_task');
+    const properties = createTask?.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    const recurrence = properties.recurrence as {
+      properties: Record<string, { description?: string }>;
+    };
+
+    expect(properties.title.description).toBe('Task title.');
+    expect(properties.calendarId.description).toBe(
+      'Optional calendar id; omit to use the primary calendar.',
+    );
+    expect(recurrence.properties.frequency.description).toBe(
+      'How often the task repeats.',
+    );
+    expect(recurrence.properties.count.description).toBe(
+      'Number of occurrences; required for COUNT.',
+    );
+  });
+});
+
+describe('ToolRegistry derived accounting sets', () => {
+  it('derives the write tools from each tool isWrite() predicate', () => {
+    expect([...toolRegistry.writeNames()].sort()).toEqual(
+      [
+        'create_group',
+        'create_task',
+        'create_tasks',
+        'complete_task',
+        'delete_task',
+        'update_task',
+      ].sort(),
+    );
+  });
+
+  it('derives the schedule-fetch tools from each tool isScheduleFetch() predicate', () => {
+    expect([...toolRegistry.scheduleFetchNames()].sort()).toEqual(
+      ['check_availability', 'find_free_slots', 'list_tasks'].sort(),
+    );
+  });
+});
+
+describe('buildTool', () => {
+  it('spreads TOOL_DEFAULTS first so an omitted predicate fails closed', () => {
+    const tool = buildTool({
+      name: 'noop',
+      prompt: () => 'noop',
+      inputSchema: NOOP_SCHEMA,
+      run: () => Promise.resolve({ content: 'ok' }),
+    });
+
+    expect(tool.isWrite()).toBe(false);
+    expect(tool.isScheduleFetch()).toBe(false);
+  });
+
+  it('lets a definition override a fail-closed default', () => {
+    const tool = buildTool({
+      name: 'writer',
+      prompt: () => 'writer',
+      inputSchema: NOOP_SCHEMA,
+      isWrite: () => true,
+      run: () => Promise.resolve({ content: 'ok' }),
+    });
+
+    expect(tool.isWrite()).toBe(true);
+    expect(tool.isScheduleFetch()).toBe(false);
+  });
+});

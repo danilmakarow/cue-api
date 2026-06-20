@@ -14,3 +14,4 @@ export { ConversationRepository } from './conversation.repository';
 export { ConversationMessageRepository } from './conversation-message.repository';
 export { ConversationSummaryRepository } from './conversation-summary.repository';
 export { UserMemoryFactRepository } from './user-memory-fact.repository';
+export { PendingQuestionRepository } from './pending-question.repository';

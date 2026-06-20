@@ -15,6 +15,8 @@ import { ApiParam, ApiTags } from '@nestjs/swagger';
 
 import {
   CompletionResultDTO,
+  DailyCountsDTO,
+  DailyCountsQuery,
   ListTasksQuery,
   OccurrenceDTO,
   SetCompletionDto,
@@ -71,6 +73,34 @@ export class TaskController {
     );
 
     return occurrences.map(toOccurrenceDTO);
+  }
+
+  /**
+   * Returns per-day occurrence counts for the given calendar over `[from, to)`.
+   * Declared before `@Get(':id')` so the literal `daily-counts` path is matched
+   * ahead of the parametric id route.
+   */
+  @Get('daily-counts')
+  @Swagger({
+    summary: 'Get per-day task occurrence counts in a [from, to) window.',
+    responseDto: DailyCountsDTO,
+    responseStatus: 200,
+  })
+  async getDailyCounts(
+    @CurrentUser() user: User,
+    @Query() query: DailyCountsQuery,
+  ): Promise<DailyCountsDTO> {
+    const counts = await this.taskService.getDailyCounts(
+      user.id,
+      new Date(query.from),
+      new Date(query.to),
+      {
+        calendarId: query.calendarId,
+        includeCompleted: query.includeCompleted,
+      },
+    );
+
+    return { counts };
   }
 
   /**

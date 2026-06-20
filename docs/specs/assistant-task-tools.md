@@ -1,6 +1,8 @@
 # Assistant task-domain tools & per-turn handles
 
-- **Status**: Implemented
+> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · backlog → [ai-workflow-tasks](ai-workflow-tasks.md). This file remains the **deep design** for the tool surface, the per-turn handle scheme, and the addressing-rationale (Alternatives considered). The shipped surface is summarised in [ai-workflow §7](ai-workflow.md#7-tools-handles--recurrence); forthcoming tools are Stories 2/5/7 in the backlog.
+
+- **Status**: Implemented (deep design reference)
 - **Last updated**: 2026-06-03
 - **Owner**: @danil
 - **Related ADRs**: [0004 — assistant-prompt-composition-and-caching](../adr/0004-assistant-prompt-composition-and-caching.md) · [0006 — assistant-schedule-context-and-conflicts](../adr/0006-assistant-schedule-context-and-conflicts.md) · [0007 — provider-connector-abstraction](../adr/0007-provider-connector-abstraction.md)
@@ -98,6 +100,16 @@ The event-centric tools are **replaced** (not aliased) by a task-domain surface.
 - **`editScope`** ∈ `this` | `this_and_following` | `all`. **Omitted on a recurring task ⇒ the assistant asks** (next section). On a non-recurring task it's ignored.
 - **Groups are referenced by name, not handle.** Groups are few and user-named; the model sees the group list (context + `list_groups`) and passes a name. The dispatcher resolves name → group via `TaskGroupService.findByName`; **ambiguous** name ⇒ clarify; **missing** name ⇒ the model is told to confirm/`create_group` (never auto-create implicitly). This avoids a second volatile handle namespace above the cache line.
 
+### Forthcoming tools (assistant-layered-architecture refactor)
+
+The [layered-architecture refactor](assistant-layered-architecture.md) adds three tools and leans into heterogeneous **parallel tool calls** — the model may emit create + update + delete + lookup in one turn; the loop already dispatches all of a round's tool calls **serially, in emission order**:
+
+- **`ask_user`** — ask with 2–4 tappable options **or** a plain free-text answer (options optional); suspends the turn with a durable, resumable session ([ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md)).
+- **`create_tasks`** — batch create (`createTaskInput[]`), fanning out to `TaskService.create` in order; the token-efficient path for "create N".
+- **`check_availability`** — a **read** batch pre-flight: validate a list of `{ startAt, endAt }` slots in one call (occupancy via `findOverlapping`), so the model can check-then-create-or-clarify without N single probes. Advisory; the write-time hold stays the floor.
+
+These belong to that (Draft) spec; the surface above is what ships today. The narration re-drive that backstops batch writes is [ADR 0009](../adr/0009-assistant-narration-redrive.md).
+
 ### Recurring edits — choosing the scope
 
 A recurring edit must resolve to one of three scopes (the three operations from the [recurrence-expansion spec](recurrence-expansion.md#recurring-edit-semantics--the-three-scopes)): **this occurrence** → `applyOccurrenceOverride`, **this and following** → `splitSeries`, **all** → master `update`. `update_task` / `delete_task` accept an explicit `editScope` (`this` | `this_and_following` | `all`).
@@ -136,7 +148,7 @@ The [persona](telegram-ai-assistant.md#voice-and-persona) is unchanged. The "Wor
 | `editScope` omitted on a recurring task | Recoverable tool result asking the model to re-issue with a scope (`this` / `this_and_following` / `all`); the model asks the user one concise question. (Deferred: free inline-keyboard scope pick.) |
 | `editScope` / `recurrence` on a non-recurring task | Ignore scope; treat `recurrence` as "make it recurring" (a valid edit). |
 | `create_task` with neither time nor `requiresCompletion` resolvable | Default to a todo (`requiresCompletion: true`, no time). |
-| Overlapping write (timed) | Existing [ADR 0006](../adr/0006-assistant-schedule-context-and-conflicts.md) layer-4 conflict hold — unchanged, now occurrence-aware via [recurrence-expansion](recurrence-expansion.md#conflict-checking-with-recurrence). |
+| Overlapping write (timed) | Existing [ADR 0006](../adr/0006-assistant-schedule-context-and-conflicts.md) layer-4 conflict hold — occurrence-aware via [recurrence-expansion](recurrence-expansion.md#conflict-checking-with-recurrence). **Caveat (known gap):** only **non-recurring** creates / one-off moves run the hold today; **recurring** creates & edits bypass it — tracked as a standalone fix (see [recurrence-expansion](recurrence-expansion.md#conflict-checking-with-recurrence)). |
 | Tool validation error (bad recurrence combo, etc.) | Returned to the model as the tool result so it can correct — never a raw stack trace to the user. |
 
 ## Alternatives considered

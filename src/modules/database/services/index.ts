@@ -14,3 +14,4 @@ export { ConversationDatabaseService } from './conversation-database.service';
 export { ConversationMessageDatabaseService } from './conversation-message-database.service';
 export { ConversationSummaryDatabaseService } from './conversation-summary-database.service';
 export { UserMemoryFactDatabaseService } from './user-memory-fact-database.service';
+export { PendingQuestionDatabaseService } from './pending-question-database.service';

@@ -2,16 +2,23 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import { ZodError } from 'zod';
 
-import { ToolDispatchContext, ToolDispatchOutcome } from '../assistant.types';
+import {
+  HeldConflictWrite,
+  ToolDispatchContext,
+  ToolDispatchOutcome,
+} from '../assistant.types';
 import { formatTaskLine } from '../event-formatting';
 import { ScheduleReaderService } from '../schedule-reader.service';
 import { HandleMap, HandleTarget } from './handle-map';
+import { ToolRegistry, toolRegistry } from './tool-registry';
 import {
   RecurrenceInput,
-  ToolName,
+  askUserInputSchema,
+  checkAvailabilityInputSchema,
   completeTaskInputSchema,
   createGroupInputSchema,
   createTaskInputSchema,
+  createTasksInputSchema,
   deleteTaskInputSchema,
   findFreeSlotsInputSchema,
   listGroupsInputSchema,
@@ -19,15 +26,27 @@ import {
   setReminderInputSchema,
   updateTaskInputSchema,
 } from './tool-schemas';
+import { ToolHandlerHost } from './tool.contract';
 import { ToolCall } from '@/modules/ai/ai.types';
 import { CalendarService } from '@/modules/calendar/calendar.service';
 import { Task } from '@/modules/database/entities';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
-import { TaskService } from '@/modules/task/task.service';
+import {
+  RecurringSeriesConflicts,
+  TaskService,
+} from '@/modules/task/task.service';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
 
 /** Maximum free slots returned by `find_free_slots` to keep results compact. */
 const MAX_FREE_SLOTS = 5;
+
+/**
+ * Maximum rendered lines `list_tasks` / `list_groups` return before truncating.
+ * A long agenda dump bloats the model's context (and the audit row) for little
+ * gain — past this the model should narrow the range or filter by group, so the
+ * dispatcher slices to this many and appends a "+N more" hint.
+ */
+const MAX_LIST_LINES = 40;
 
 /** Default range when `list_tasks` is called without `from`/`to` (today → +7d). */
 const DEFAULT_LIST_DAYS = 7;
@@ -58,6 +77,28 @@ interface GroupResolution {
   outcome?: ToolDispatchOutcome;
 }
 
+/** A validated, parsed single-create input (shared by `create_task[s]`). */
+type CreateTaskInput = ReturnType<typeof createTaskInputSchema.parse>;
+
+/** Held conflict produced by a single create, ready for the batch-hold path. */
+interface CreateHeld {
+  promptText: string;
+  write: HeldConflictWrite;
+}
+
+/**
+ * Outcome of attempting one create (shared between `create_task` and the
+ * `create_tasks` fan-out). Exactly one field is set: `created` (committed, with
+ * its title), `held` (a non-recurring timed overlap parked for confirmation), or
+ * `error` (a recoverable resolution failure — missing calendar / group). The
+ * dispatcher branches on which is present.
+ */
+interface CreateAttempt {
+  created?: { title: string };
+  held?: CreateHeld;
+  error?: ToolDispatchOutcome;
+}
+
 /**
  * Translates a model {@link ToolCall} into a call on an existing feature service
  * (TaskService / TaskGroupService / CalendarService) and returns a normalized
@@ -69,15 +110,19 @@ interface GroupResolution {
  * coordinate; raw task ids never cross the model boundary.
  */
 @Injectable()
-export class ToolDispatcherService {
+export class ToolDispatcherService implements ToolHandlerHost {
   private readonly logger = new Logger(ToolDispatcherService.name);
+
+  private readonly registry: ToolRegistry;
 
   constructor(
     private readonly taskService: TaskService,
     private readonly taskGroupService: TaskGroupService,
     private readonly calendarService: CalendarService,
     private readonly scheduleReader: ScheduleReaderService,
-  ) {}
+  ) {
+    this.registry = toolRegistry;
+  }
 
   /**
    * Builds an error tool outcome from a thrown value without leaking a raw stack
@@ -192,7 +237,7 @@ export class ToolDispatcherService {
    * group-scoped) range, seeds each into the turn's handle map, and renders one
    * aliased line per occurrence. Counts against the schedule-fetch read cap.
    */
-  private async handleListTasks(
+  async handleListTasks(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -235,13 +280,22 @@ export class ToolDispatcherService {
     }
 
     const handleMap = this.handleMapOf(context);
-    const lines = filtered.map((occurrence) =>
+    // Slice BEFORE rendering so handles are only minted for the lines the model
+    // actually sees — seeding aliases for hidden occurrences would let the model
+    // reference a task it was never shown.
+    const overflow = filtered.length - MAX_LIST_LINES;
+    const shown = overflow > 0 ? filtered.slice(0, MAX_LIST_LINES) : filtered;
+    const lines = shown.map((occurrence) =>
       formatTaskLine(
         occurrence,
         context.user.timezone,
         handleMap.addOccurrence(occurrence),
       ),
     );
+
+    if (overflow > 0) {
+      lines.push(`(+${overflow} more — narrow the range or filter by group)`);
+    }
 
     return { content: lines.join('\n'), countsAsScheduleFetch: true };
   }
@@ -251,7 +305,7 @@ export class ToolDispatcherService {
    * start+end) in range and returns the gaps of at least `durationMinutes`.
    * Counts against the schedule-fetch cap.
    */
-  private async handleFindFreeSlots(
+  async handleFindFreeSlots(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -330,16 +384,217 @@ export class ToolDispatcherService {
   }
 
   /**
+   * Handles `check_availability`: point-checks EACH proposed slot in input order
+   * against existing events via the SAME conflict primitive the write-time hold
+   * uses (`TaskService.findOverlapping`) — one call per slot with that slot's
+   * exact bounds, never `findInRange` and never a single unioned window — so a
+   * "free" verdict here and a later `create_task` can never disagree. Each
+   * conflicting task is minted an `[eN]` handle (resolving to its row, since
+   * `findOverlapping` returns master rows) so the model can act on it. A slot that
+   * cannot be meaningfully point-checked (malformed / open-ended / a rule-shaped
+   * proposal) yields a recoverable per-slot note rather than a false "FREE". It is
+   * a schedule-fetch read (one batch call = one fetch), NEVER a write.
+   */
+  async handleCheckAvailability(
+    input: Record<string, unknown>,
+    context: ToolDispatchContext,
+  ): Promise<ToolDispatchOutcome> {
+    const parsed = checkAvailabilityInputSchema.parse(input);
+    const handleMap = this.handleMapOf(context);
+    const lines: string[] = [];
+
+    for (const [index, slot] of parsed.slots.entries()) {
+      const position = index + 1;
+      const startAt = new Date(slot.startAt);
+      const endAt = new Date(slot.endAt);
+
+      // A slot that cannot be point-checked (unparseable / open-ended / a
+      // rule-shaped proposal that collapses to a zero-or-negative window) is
+      // reported honestly rather than scanned and falsely called FREE.
+      if (!this.isCheckableWindow(startAt, endAt)) {
+        lines.push(
+          `Slot ${position}: SKIPPED — not a concrete future window; pass a valid startAt before endAt (a recurrence rule is not a slot).`,
+        );
+        continue;
+      }
+
+      const calendarId = await this.resolveCalendarId(
+        context.userId,
+        slot.calendarId,
+      );
+
+      if (!calendarId) {
+        lines.push(
+          `Slot ${position}: SKIPPED — no calendar available to check.`,
+        );
+        continue;
+      }
+
+      const conflicts = await this.taskService.findOverlapping(
+        context.userId,
+        calendarId,
+        startAt,
+        endAt,
+        slot.excludeTaskId,
+      );
+
+      lines.push(
+        this.formatSlotVerdict(
+          position,
+          startAt,
+          endAt,
+          conflicts,
+          handleMap,
+          context.user.timezone,
+        ),
+      );
+    }
+
+    return { content: lines.join('\n'), countsAsScheduleFetch: true };
+  }
+
+  /**
+   * True when a proposed slot is a concrete, point-checkable window: both bounds
+   * parse to real dates and `endAt` is strictly after `startAt`. A NaN bound (an
+   * unparseable / rule-shaped value) or a zero-length / inverted window is not
+   * checkable — the caller reports it as a per-slot note instead of probing it.
+   */
+  private isCheckableWindow(startAt: Date, endAt: Date): boolean {
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+      return false;
+    }
+
+    return endAt.getTime() > startAt.getTime();
+  }
+
+  /**
+   * Renders one slot's verdict: `FREE` when nothing overlaps, else `BUSY` with
+   * each conflicting task tagged by a freshly-minted `[eN]` handle (resolving to
+   * the task row — `findOverlapping` returns masters/one-offs, so `originalStart`
+   * is null) plus its title. The proposed window is shown in the user's timezone
+   * so the model and user can read which slot it is.
+   */
+  private formatSlotVerdict(
+    position: number,
+    startAt: Date,
+    endAt: Date,
+    conflicts: Task[],
+    handleMap: HandleMap,
+    timezone: string,
+  ): string {
+    const window = this.formatSlot(startAt, endAt, timezone);
+
+    if (conflicts.length === 0) {
+      return `Slot ${position} (${window}): FREE`;
+    }
+
+    const tagged = conflicts
+      .map((task) => {
+        const alias = handleMap.add({ taskId: task.id, originalStart: null });
+
+        return `[${alias}] '${task.title}'`;
+      })
+      .join(', ');
+
+    return `Slot ${position} (${window}): BUSY — ${tagged}`;
+  }
+
+  /**
    * Handles `create_task`: resolves the calendar / group / timezone and creates a
    * timed event, all-day event, or todo (optionally recurring). A non-recurring
    * timed task that overlaps an existing one is held for the user to confirm
    * (never executed on conflict). Recurring creates skip the overlap hold in v1.
+   * Delegates the per-item resolution + conflict logic to {@link attemptCreate},
+   * the same helper `create_tasks` fans out over, so the two never diverge.
    */
-  private async handleCreateTask(
+  async handleCreateTask(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
     const parsed = createTaskInputSchema.parse(input);
+    const attempt = await this.attemptCreate(parsed, context);
+
+    if (attempt.error) return attempt.error;
+
+    if (attempt.held) {
+      return {
+        content:
+          'The task overlaps an existing one and is held for the user to confirm.',
+        heldConflict: attempt.held,
+      };
+    }
+
+    return { content: `Created "${attempt.created?.title}".` };
+  }
+
+  /**
+   * Handles `create_tasks`: fans out over the validated batch IN INPUT ORDER,
+   * running the SAME per-item resolution + conflict logic as a single
+   * `create_task` ({@link attemptCreate}). Non-conflicting items are created
+   * immediately; a non-recurring timed item that overlaps an existing one is
+   * collected as a held write (the rest still commit — a single overlap never
+   * aborts the batch). Returns ONE outcome: a per-item summary as `content`,
+   * every held item under `heldConflicts` for the existing batch-hold path, and
+   * `committedCount` / `attemptedCount` so the orchestrator's write accounting is
+   * exact. An over-cap array is rejected upstream by Zod (`.max`) as a recoverable
+   * validation error, never reaching here.
+   */
+  async handleCreateTasks(
+    input: Record<string, unknown>,
+    context: ToolDispatchContext,
+  ): Promise<ToolDispatchOutcome> {
+    const parsed = createTasksInputSchema.parse(input);
+    const summaries: string[] = [];
+    const heldConflicts: CreateHeld[] = [];
+    let committedCount = 0;
+
+    for (const [index, task] of parsed.tasks.entries()) {
+      const position = index + 1;
+      const attempt = await this.attemptCreate(task, context);
+
+      if (attempt.error) {
+        summaries.push(`${position}: failed (${attempt.error.content})`);
+        continue;
+      }
+
+      if (attempt.held) {
+        heldConflicts.push(attempt.held);
+        summaries.push(`${position}: held (${attempt.held.promptText})`);
+        continue;
+      }
+
+      committedCount += 1;
+      summaries.push(`${position}: created "${attempt.created?.title}"`);
+    }
+
+    return {
+      content: summaries.join('; '),
+      // Every item is a write attempt (committed, held, or errored) so the guard
+      // and the saved-changes count stay accurate; only non-held, non-errored
+      // items count as committed.
+      attemptedCount: parsed.tasks.length,
+      committedCount,
+      ...(heldConflicts.length > 0 ? { heldConflicts } : {}),
+    };
+  }
+
+  /**
+   * Resolves the calendar / group / timezone for one create and either commits
+   * it or parks it as a held conflict — the single source of create logic shared
+   * by `create_task` and the `create_tasks` fan-out. A non-recurring timed task
+   * with a concrete window is conflict-checked and held on overlap (ADR 0006
+   * layer 4). A RECURRING timed create is conflict-checked across its whole
+   * proposed series (Story 9): the rule is expanded over a bounded horizon and
+   * the WHOLE series is held as ONE write if any occurrence overlaps an existing
+   * event — so a repeating task routes through the same hold a one-off does
+   * instead of committing silently. Non-conflicting recurring creates commit as
+   * before. Returns a {@link CreateAttempt} with exactly one of `error` / `held`
+   * / `created`.
+   */
+  private async attemptCreate(
+    parsed: CreateTaskInput,
+    context: ToolDispatchContext,
+  ): Promise<CreateAttempt> {
     const calendarId = await this.resolveCalendarId(
       context.userId,
       parsed.calendarId,
@@ -347,8 +602,10 @@ export class ToolDispatcherService {
 
     if (!calendarId) {
       return {
-        content: 'Error: no calendar is available to create the task in.',
-        isError: true,
+        error: {
+          content: 'Error: no calendar is available to create the task in.',
+          isError: true,
+        },
       };
     }
 
@@ -357,7 +614,7 @@ export class ToolDispatcherService {
     if (parsed.group) {
       const resolution = await this.resolveGroup(context.userId, parsed.group);
 
-      if (resolution.outcome) return resolution.outcome;
+      if (resolution.outcome) return { error: resolution.outcome };
 
       groupId = resolution.groupId;
     }
@@ -366,13 +623,37 @@ export class ToolDispatcherService {
     const startAt = parsed.startAt ? new Date(parsed.startAt) : null;
     const endAt = parsed.endAt ? new Date(parsed.endAt) : null;
 
-    // Recurring creates intentionally skip the overlap hold in v1 — an expanded
-    // series can clash on many dates and the held-action mechanism is one-write,
-    // so per-occurrence conflict UX is a deliberate deferral (see
-    // docs/specs/assistant-task-tools.md "Recurring edits" + the conflict-hold
-    // deferral note), NOT an oversight. Only a non-recurring timed task with a
-    // concrete window is conflict-checked and held (ADR 0006 layer 4 — unchanged
-    // held-action shape).
+    // A recurring, timed create is conflict-checked across the whole proposed
+    // series (Story 9): expand it bounded and hold on ANY occurrence overlap, so
+    // a repeating task can never silently book over existing events.
+    if (parsed.recurrence && startAt && endAt) {
+      const seriesConflicts =
+        await this.taskService.findRecurringSeriesConflicts(
+          context.userId,
+          calendarId,
+          {
+            title: parsed.title,
+            startAt,
+            endAt,
+            timezone,
+            recurrence: this.toRecurrenceDto(parsed.recurrence),
+          },
+        );
+
+      if (seriesConflicts.conflictDates.length > 0) {
+        return {
+          held: this.buildCreateRecurringHeld(
+            parsed,
+            calendarId,
+            timezone,
+            groupId ?? null,
+            seriesConflicts,
+            context,
+          ),
+        };
+      }
+    }
+
     if (!parsed.recurrence && startAt && endAt) {
       const conflicts = await this.taskService.findOverlapping(
         context.userId,
@@ -382,13 +663,15 @@ export class ToolDispatcherService {
       );
 
       if (conflicts.length > 0) {
-        return this.heldCreateOutcome(
-          parsed,
-          calendarId,
-          timezone,
-          conflicts,
-          context,
-        );
+        return {
+          held: this.buildCreateHeld(
+            parsed,
+            calendarId,
+            timezone,
+            conflicts,
+            context,
+          ),
+        };
       }
     }
 
@@ -407,44 +690,101 @@ export class ToolDispatcherService {
         : undefined,
     });
 
-    return { content: `Created "${created.title}".` };
+    return { created: { title: created.title } };
   }
 
   /**
-   * Builds the `heldConflict` outcome for a conflicting create, carrying the
+   * Builds the held-conflict record for a conflicting create, carrying the
    * fully-resolved write so the orchestrator can execute it verbatim on confirm.
    * The held-action `kind` and shape are unchanged from the event surface so the
-   * orchestrator's existing executor keeps working.
+   * orchestrator's existing executor keeps working, and the same record is used
+   * by the single-create `heldConflict` and the batch `heldConflicts` paths.
    */
-  private heldCreateOutcome(
-    parsed: ReturnType<typeof createTaskInputSchema.parse>,
+  private buildCreateHeld(
+    parsed: CreateTaskInput,
     calendarId: string,
     timezone: string,
     conflicts: Task[],
     context: ToolDispatchContext,
-  ): ToolDispatchOutcome {
+  ): CreateHeld {
     const conflictTitles = conflicts.map((task) => task.title).join(', ');
 
     return {
-      content:
-        'The task overlaps an existing one and is held for the user to confirm.',
-      heldConflict: {
-        promptText: `That overlaps with ${conflictTitles}. Shall I book it anyway?`,
-        write: {
-          userId: context.userId,
-          vendorChatId: '',
-          action: {
-            kind: 'create_event',
-            calendarId,
-            title: parsed.title,
-            startAt: parsed.startAt as string,
-            endAt: parsed.endAt ?? null,
-            timezone,
-            notes: parsed.notes ?? null,
-          },
+      promptText: `That overlaps with ${conflictTitles}. Shall I book it anyway?`,
+      write: {
+        userId: context.userId,
+        vendorChatId: '',
+        action: {
+          kind: 'create_event',
+          calendarId,
+          title: parsed.title,
+          startAt: parsed.startAt as string,
+          endAt: parsed.endAt ?? null,
+          timezone,
+          notes: parsed.notes ?? null,
         },
       },
     };
+  }
+
+  /**
+   * Builds the held-conflict record for a conflicting recurring CREATE (Story 9):
+   * the WHOLE proposed series is one held write whose `create_recurring_event`
+   * action carries the rule grammar + every resolved field, so the orchestrator
+   * recreates it verbatim on confirm (bypassing the check — the user chose "book
+   * the series anyway"). The prompt counts the distinct clashing dates so the user
+   * understands the scope.
+   */
+  private buildCreateRecurringHeld(
+    parsed: CreateTaskInput,
+    calendarId: string,
+    timezone: string,
+    groupId: string | null,
+    seriesConflicts: RecurringSeriesConflicts,
+    context: ToolDispatchContext,
+  ): CreateHeld {
+    return {
+      promptText: this.formatSeriesConflictPrompt(seriesConflicts),
+      write: {
+        userId: context.userId,
+        vendorChatId: '',
+        action: {
+          kind: 'create_recurring_event',
+          calendarId,
+          title: parsed.title,
+          startAt: parsed.startAt as string,
+          endAt: parsed.endAt as string,
+          timezone,
+          notes: parsed.notes ?? null,
+          groupId,
+          isAllDay: parsed.isAllDay ?? false,
+          requiresCompletion: parsed.requiresCompletion ?? true,
+          recurrence: this.toRecurrenceDto(
+            parsed.recurrence as RecurrenceInput,
+          ),
+        },
+      },
+    };
+  }
+
+  /**
+   * Builds the held-conflict prompt for a recurring series whose occurrences
+   * overlap existing events — shared by the recurring create and recurring edit
+   * holds. Reports the distinct clashing-date count and a few of the overlapping
+   * titles so the user can confirm or cancel the whole series.
+   */
+  private formatSeriesConflictPrompt(
+    seriesConflicts: RecurringSeriesConflicts,
+  ): string {
+    const dateCount = seriesConflicts.conflictDates.length;
+    const titles = seriesConflicts.conflictingTasks
+      .map((task) => task.title)
+      .join(', ');
+    const dateLabel = dateCount === 1 ? '1 date' : `${dateCount} dates`;
+
+    return `This repeating task overlaps existing events on ${dateLabel}${
+      titles ? ` (${titles})` : ''
+    }. Book the series anyway?`;
   }
 
   /**
@@ -452,9 +792,10 @@ export class ToolDispatcherService {
    * edit scope. A recurring target requires `editScope` (asks otherwise);
    * `this` → occurrence override, `this_and_following` → series split, `all` →
    * master update. A one-off ignores `editScope` and keeps the conflict hold for
-   * a timed move. Recurring-edit conflict UX is deferred (no hold here).
+   * a timed move. A `this_and_following` / `all` recurring edit that changes the
+   * time or rule is series-conflict-checked and held on overlap (Story 9).
    */
-  private async handleUpdateTask(
+  async handleUpdateTask(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -481,7 +822,15 @@ export class ToolDispatcherService {
    * Applies a recurring update at the chosen scope. Absent scope asks the model
    * to choose. `this` overrides the single occurrence; `this_and_following`
    * splits the series; `all` updates the master (resolving an optional group
-   * rename by name). Recurring-edit conflict UX is deferred — no hold here.
+   * rename by name).
+   *
+   * A `this_and_following` or `all` edit that changes the time or rule is
+   * conflict-checked across the effective post-edit series (Story 9): on any
+   * occurrence overlap it routes through the SAME ADR-0006 hold a one-off move
+   * does — held as ONE `update_recurring_event` write that replays the chosen
+   * scope verbatim on confirm — instead of silently booking over existing events.
+   * The `this` scope retargets a single occurrence and keeps its prior behaviour
+   * (it is a one-instance override, not a series write).
    */
   private async updateRecurring(
     context: ToolDispatchContext,
@@ -531,6 +880,17 @@ export class ToolDispatcherService {
         splitGroupId = resolution.groupId;
       }
 
+      const splitConflictHold = await this.recurringEditHold(
+        context,
+        target.taskId,
+        originalStart,
+        parsed,
+        recurrenceDto,
+        splitGroupId ?? null,
+      );
+
+      if (splitConflictHold) return splitConflictHold;
+
       // The group is passed INTO the split so it is validated against the new
       // master's calendar and applied in the same insert — a cross-calendar
       // group is rejected before any write (no split-then-lost-group partial),
@@ -565,6 +925,17 @@ export class ToolDispatcherService {
       groupId = resolution.groupId;
     }
 
+    const allConflictHold = await this.recurringEditHold(
+      context,
+      target.taskId,
+      originalStart,
+      parsed,
+      recurrenceDto,
+      groupId ?? null,
+    );
+
+    if (allConflictHold) return allConflictHold;
+
     const updated = await this.taskService.update(userId, target.taskId, {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
       ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
@@ -574,6 +945,75 @@ export class ToolDispatcherService {
     });
 
     return { content: `Updated all of "${updated.title}".` };
+  }
+
+  /**
+   * Runs the recurring-edit conflict check for a `this_and_following` / `all`
+   * edit and, on overlap, returns the held `update_recurring_event` outcome that
+   * replays the chosen scope verbatim on confirm; returns null when the effective
+   * series is clear (the caller then writes normally). Centralizes the check so
+   * both scopes route through the identical ADR-0006 hold (Story 9). `groupId` is
+   * the already-resolved group (or null) so the confirm-time replay needs no
+   * re-resolution.
+   */
+  private async recurringEditHold(
+    context: ToolDispatchContext,
+    taskId: string,
+    originalStart: Date,
+    parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+    recurrenceDto: CreateRecurrenceRuleDto | undefined,
+    groupId: string | null,
+  ): Promise<ToolDispatchOutcome | null> {
+    const scope = parsed.editScope;
+
+    // Only the two series-shaped scopes are held; `this` is a single-occurrence
+    // override handled by its own branch and never reaches here.
+    if (scope !== 'all' && scope !== 'this_and_following') return null;
+
+    // Explicitly clearing the end makes the series open-ended — a windowless
+    // series cannot overlap, so there is nothing to hold. (TaskService also
+    // short-circuits this, but bailing here avoids the needless anchor read.)
+    if (parsed.endAt === null) return null;
+
+    const seriesConflicts = await this.taskService.findRecurringEditConflicts(
+      context.userId,
+      taskId,
+      {
+        ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
+        ...(parsed.endAt !== undefined && parsed.endAt !== null
+          ? { endAt: parsed.endAt }
+          : {}),
+        ...(parsed.title !== undefined ? { title: parsed.title } : {}),
+        ...(recurrenceDto ? { recurrence: recurrenceDto } : {}),
+      },
+    );
+
+    if (seriesConflicts.conflictDates.length === 0) return null;
+
+    return {
+      content:
+        'The recurring edit overlaps existing events and is held for the user to confirm.',
+      heldConflict: {
+        promptText: this.formatSeriesConflictPrompt(seriesConflicts),
+        write: {
+          userId: context.userId,
+          vendorChatId: '',
+          action: {
+            kind: 'update_recurring_event',
+            taskId,
+            editScope: scope,
+            originalStart: originalStart.toISOString(),
+            title: parsed.title ?? null,
+            startAt: parsed.startAt ?? null,
+            endAt: parsed.endAt ?? null,
+            groupId,
+            recurrence: recurrenceDto
+              ? this.toRecurrenceDto(parsed.recurrence as RecurrenceInput)
+              : null,
+          },
+        },
+      },
+    };
   }
 
   /**
@@ -674,7 +1114,7 @@ export class ToolDispatcherService {
    * recurring instance (non-null `originalStart` on a recurring task) toggles
    * per-occurrence; everything else toggles the master / one-off row.
    */
-  private async handleCompleteTask(
+  async handleCompleteTask(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -710,7 +1150,7 @@ export class ToolDispatcherService {
    * whole series; a recurring task without a scope asks the model to choose; a
    * one-off (or `all`) is soft-deleted.
    */
-  private async handleDeleteTask(
+  async handleDeleteTask(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -757,7 +1197,7 @@ export class ToolDispatcherService {
    * Handles `list_groups`: lists the user's task groups by name. Groups are
    * referenced by name elsewhere, so this is the model's view of what exists.
    */
-  private async handleListGroups(
+  async handleListGroups(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -769,13 +1209,19 @@ export class ToolDispatcherService {
       return { content: 'No groups yet.' };
     }
 
-    return { content: groups.map((group) => group.name).join(', ') };
+    const overflow = groups.length - MAX_LIST_LINES;
+    const shown = overflow > 0 ? groups.slice(0, MAX_LIST_LINES) : groups;
+    const names = shown.map((group) => group.name).join(', ');
+
+    return {
+      content: overflow > 0 ? `${names} (+${overflow} more)` : names,
+    };
   }
 
   /**
    * Handles `create_group`: resolves the calendar and creates a task group.
    */
-  private async handleCreateGroup(
+  async handleCreateGroup(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
@@ -806,7 +1252,7 @@ export class ToolDispatcherService {
    * graceful tool result the assistant can relay rather than silently failing or
    * promising a reminder it can't set.
    */
-  private handleSetReminder(
+  handleSetReminder(
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): ToolDispatchOutcome {
@@ -822,40 +1268,47 @@ export class ToolDispatcherService {
   }
 
   /**
-   * Dispatches one tool call to its handler. Unknown tool names and input
-   * validation failures return an error outcome (fed back to the model as a
-   * tool result) rather than throwing — the model can recover or clarify.
+   * Handles `ask_user` (ADR 0010). Touches NO database and calls no feature
+   * service: it parses the validated question + optional options and returns the
+   * `askUser` SENTINEL. The orchestrator recognizes it, stops the loop, and
+   * suspends the turn (persists the durable `pending_question` row, mirrors to
+   * Redis, sends the question), resuming on the user's answer. `content` is a
+   * benign placeholder that is never fed back to the model — the suspended round
+   * deliberately omits this call's `tool_result` (the ADR-0010 wire invariant),
+   * which is synthesized from the user's answer on resume.
+   */
+  handleAskUser(
+    input: Record<string, unknown>,
+    _context: ToolDispatchContext,
+  ): ToolDispatchOutcome {
+    const parsed = askUserInputSchema.parse(input);
+
+    return {
+      content: 'Asked the user; the turn is suspended pending their answer.',
+      askUser: {
+        question: parsed.question,
+        options: (parsed.options ?? []).map((option) => ({
+          id: option.id,
+          label: option.label,
+        })),
+      },
+    };
+  }
+
+  /**
+   * Dispatches one tool call through the {@link ToolRegistry}, which validates
+   * the input (recoverable `isError` result on an unknown tool or a validation
+   * failure) and runs the matched tool against this dispatcher as the handler
+   * host. The try/catch still flattens any error thrown by a tool body into a
+   * short, recoverable `Error: …` outcome (never a raw stack), keeping the model
+   * able to recover or clarify — unchanged from the previous switch.
    */
   async dispatch(
     toolCall: ToolCall,
     context: ToolDispatchContext,
   ): Promise<ToolDispatchOutcome> {
     try {
-      switch (toolCall.name) {
-        case ToolName.LIST_TASKS:
-          return await this.handleListTasks(toolCall.input, context);
-        case ToolName.FIND_FREE_SLOTS:
-          return await this.handleFindFreeSlots(toolCall.input, context);
-        case ToolName.CREATE_TASK:
-          return await this.handleCreateTask(toolCall.input, context);
-        case ToolName.UPDATE_TASK:
-          return await this.handleUpdateTask(toolCall.input, context);
-        case ToolName.COMPLETE_TASK:
-          return await this.handleCompleteTask(toolCall.input, context);
-        case ToolName.DELETE_TASK:
-          return await this.handleDeleteTask(toolCall.input, context);
-        case ToolName.SET_REMINDER:
-          return this.handleSetReminder(toolCall.input, context);
-        case ToolName.LIST_GROUPS:
-          return await this.handleListGroups(toolCall.input, context);
-        case ToolName.CREATE_GROUP:
-          return await this.handleCreateGroup(toolCall.input, context);
-        default:
-          return {
-            content: `Error: unknown tool "${toolCall.name}".`,
-            isError: true,
-          };
-      }
+      return await this.registry.run(toolCall, context, this);
     } catch (error) {
       return this.toErrorOutcome(error, context.correlationId);
     }
