@@ -13,9 +13,11 @@ export interface TelegramChat {
   type?: string;
 }
 
-/** A Telegram user (only the id is used). */
+/** A Telegram user (id + the optional IETF language tag the client reports). */
 export interface TelegramUser {
   id: number;
+  /** IETF language tag of the user's client (e.g. `en`, `uk`, `ru-RU`), if set. */
+  language_code?: string;
 }
 
 /** A voice note attached to a message. */

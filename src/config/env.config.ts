@@ -97,6 +97,12 @@ export const environmentSchema = z
     // Redis pointer to the animated status surface (draft id / message id). Short —
     // it only needs to outlive one in-flight turn; cleared on finalize.
     ASSISTANT_STATUS_SESSION_TTL_SECONDS: z.coerce.number().int().positive(),
+    // Live-status animation cadence (Story 12, ADR 0012): the trailing-dot tick
+    // interval (ms, ~500) and the loading-word swap interval (ms, ~5000). Both
+    // routed through the central L9 draft throttle (~2–5/s) so the combined draft
+    // re-call rate stays under the conservative cap — keep the dot tick ≥ 250 ms.
+    ASSISTANT_STATUS_DOT_INTERVAL_MS: z.coerce.number().int().positive(),
+    ASSISTANT_STATUS_WORD_INTERVAL_MS: z.coerce.number().int().positive(),
     // Per-user serialization lock (StatusSession ADR 0012 sibling; Story 11). The
     // mutex's auto-expiry TTL (ms) — the deadlock backstop if a holder crashes
     // without releasing — and the watchdog renew interval (ms) that extends it

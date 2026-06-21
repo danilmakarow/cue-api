@@ -151,6 +151,12 @@ export interface NormalizedInboundMessage {
    * not surface chat kind.
    */
   chatType?: ChatType;
+  /**
+   * The sender's reported client language tag (e.g. `en`, `uk`, `ru-RU`), when
+   * the vendor surfaces it (Telegram `from.language_code`). Drives the localized
+   * live-status vocabulary (Story 12, Appendix A); absent ⇒ the default locale.
+   */
+  languageCode?: string;
 }
 
 /**

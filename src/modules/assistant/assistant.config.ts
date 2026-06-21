@@ -89,6 +89,28 @@ export class AssistantConfig {
   }
 
   /**
+   * Trailing-dot tick interval (ms) for the live status animation (Story 12, ADR
+   * 0012): how often the animated draft swaps `.` → `..` → `...`. Kept ≤ the
+   * draft-throttle window so every tick fits under the central ~2–5/s cap.
+   */
+  get statusDotIntervalMs(): number {
+    return this.configService.get('ASSISTANT_STATUS_DOT_INTERVAL_MS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Loading-word swap interval (ms) for the live status animation (Story 12, ADR
+   * 0012): how often the evocative word changes (Appendix A vocab, no immediate
+   * repeat). The 5 s default is far under the throttle cap.
+   */
+  get statusWordIntervalMs(): number {
+    return this.configService.get('ASSISTANT_STATUS_WORD_INTERVAL_MS', {
+      infer: true,
+    });
+  }
+
+  /**
    * Auto-expiry TTL (ms) for the per-user serialization lock (Story 11): the
    * deadlock backstop a crashed holder relies on so the mutex self-releases. A
    * live holder extends it via the watchdog ({@link userLockRenewMs}).

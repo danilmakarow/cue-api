@@ -18,7 +18,9 @@ import {
   ToolDispatchContext,
   ToolRoundAuditPayload,
   ToolStepRecord,
+  TurnStreamSink,
 } from '../assistant.types';
+import { RoundRecapService } from '../background/round-recap.service';
 import { ConflictResolverService } from '../conflict/conflict-resolver.service';
 import { ContextBuilderService } from '../context-builder.service';
 import { HandleMap } from '../tools/handle-map';
@@ -111,6 +113,15 @@ export interface ToolLoopState {
   currentMessageText: string;
   correlationId: string;
   resumeRounds?: ToolRound[];
+  /**
+   * Optional live-status sink (Story 13 / ADR 0041): the loop streams the final
+   * round's answer text into it (the throttled status draft) and renders a
+   * per-round progress recap between rounds. L9-blind — the loop only sees the
+   * {@link TurnStreamSink} port; the turn runner wraps the StatusAnimation. Absent
+   * ⇒ the loop runs exactly as before (no streaming, no recaps), so an
+   * `ask_user` resume or a non-status turn is unaffected.
+   */
+  streamSink?: TurnStreamSink;
 }
 
 /**
@@ -133,6 +144,7 @@ export class ToolLoopService {
     private readonly contextBuilder: ContextBuilderService,
     private readonly toolDispatcher: ToolDispatcherService,
     private readonly conflictResolver: ConflictResolverService,
+    private readonly roundRecap: RoundRecapService,
   ) {}
 
   /**
@@ -144,6 +156,7 @@ export class ToolLoopService {
   async run(state: ToolLoopState): Promise<ToolLoopResult> {
     const { user, conversationId, currentMessageText, correlationId } = state;
     const resumeRounds = state.resumeRounds;
+    const streamSink = state.streamSink;
     // One HandleMap per user turn: the context builder seeds it with an alias
     // per rendered agenda occurrence, and the SAME instance threads into every
     // tool-loop dispatch so those handles resolve when the model later mutates a
@@ -204,16 +217,31 @@ export class ToolLoopService {
 
         forcedToolChoice = undefined;
 
-        const result = await this.ai.complete({
-          modelRole: AiModelRole.MAIN,
-          system: prompt.system,
-          messages,
-          tools: prompt.tools,
-          toolRounds,
-          toolChoice: roundToolChoice,
-          features: { promptCaching: true, contextEditing: true },
-          traceId: correlationId,
-        });
+        // Stream the round via the connector's `completeStream` (Story 13 / ADR
+        // 0041): each text delta renders into the live status draft through the
+        // sink (which batches via the central draft throttle — never per-token to
+        // the vendor). On a terminal round the streamed text IS the final answer,
+        // already animating in the draft; the real `sendMessage` finalize (L9)
+        // still persists it. `completeStream` MUST return, never throw — a stream
+        // fault reconciles to a non-streamed result inside the connector — so the
+        // loop's outcomes and the `attempts:1` posture are unchanged. With no sink
+        // (e.g. an `ask_user` resume) the onText handler is a no-op and the round
+        // behaves exactly as `complete` did.
+        const result = await this.ai.completeStream(
+          {
+            modelRole: AiModelRole.MAIN,
+            system: prompt.system,
+            messages,
+            tools: prompt.tools,
+            toolRounds,
+            toolChoice: roundToolChoice,
+            features: { promptCaching: true, contextEditing: true },
+            traceId: correlationId,
+          },
+          (_delta, snapshot) => {
+            streamSink?.streamAnswer(snapshot);
+          },
+        );
 
         // Continue purely on whether the turn emitted tool calls — NOT on the
         // stop reason. A turn can carry `tool_use` blocks under a stop reason
@@ -482,6 +510,15 @@ export class ToolLoopService {
           assistantText: result.text,
         });
 
+        // Per-round progress recap (Story 13 / ADR 0041): a one-sentence BACKGROUND
+        // (Haiku) summary of what this round just did, rendered into the status
+        // draft so the user sees progress before the next round. Best-effort +
+        // degrade-never-throw — `recapRound` returns null on any fault and the sink
+        // swallows its own send fault. Skipped when there's no live status sink.
+        if (streamSink) {
+          await this.renderRoundRecap(streamSink, steps, correlationId);
+        }
+
         if (heldConflicts.length > 0) {
           return {
             outcome: {
@@ -549,6 +586,25 @@ export class ToolLoopService {
     return `${prefix}${overlap} — book ${
       held.length === 1 ? 'it' : 'them all'
     } anyway, or cancel?`;
+  }
+
+  /**
+   * Generates and renders a per-round progress recap into the live status sink
+   * (Story 13 / ADR 0041). Asks the BACKGROUND model for a one-sentence "what just
+   * happened" line and pushes it into the status draft. Entirely best-effort: the
+   * recap service returns null on any fault (rendered as a no-op) and the sink
+   * swallows its own send error, so this NEVER throws into the loop (`attempts:1`).
+   */
+  private async renderRoundRecap(
+    streamSink: TurnStreamSink,
+    steps: ToolStepRecord[],
+    correlationId: string,
+  ): Promise<void> {
+    const recap = await this.roundRecap.recapRound(steps, correlationId);
+
+    if (recap) {
+      streamSink.showRecap(recap);
+    }
   }
 
   /**

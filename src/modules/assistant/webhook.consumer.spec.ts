@@ -106,6 +106,20 @@ const buildConsumer = (
     translateVoiceToEnglish: false,
   } as unknown as AssistantConfig;
 
+  // Story 12 (L9 live status): a voice turn shows the localized "Listening…" line
+  // on an idempotent status surface BEFORE STT, then hands off to the turn-runner.
+  // We stub the animator with an inert handle so the routing assertions are
+  // unaffected; the surface behaviour is covered in status-animator.service.spec.ts.
+  const statusAnimation = {
+    open: jest.fn().mockResolvedValue(undefined),
+    showVoiceListening: jest.fn().mockResolvedValue(undefined),
+    startLoading: jest.fn().mockResolvedValue(undefined),
+    finalize: jest.fn().mockResolvedValue(undefined),
+  };
+  const statusAnimator = {
+    begin: jest.fn().mockResolvedValue(statusAnimation),
+  };
+
   const consumer = new WebhookConsumer(
     redis as never,
     stt,
@@ -116,6 +130,7 @@ const buildConsumer = (
     linkingService as unknown as LinkingService,
     assistantService as unknown as AssistantService,
     turnRunner,
+    statusAnimator as never,
     config,
   );
 
@@ -129,6 +144,8 @@ const buildConsumer = (
     pendingStore,
     turnRunner,
     telegramLinkDatabaseService,
+    statusAnimator,
+    statusAnimation,
   };
 };
 

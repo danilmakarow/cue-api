@@ -71,3 +71,11 @@ export const SUMMARY_SYSTEM_PROMPT = `You maintain a running summary of a schedu
  * Extracts durable, typed facts about the user from the recent turns.
  */
 export const MEMORY_EXTRACTION_SYSTEM_PROMPT = `You extract durable facts about a user from a scheduling conversation — working hours, no-go windows, recurring commitments, preferences, important people and places. Only extract facts that are stable and likely reusable, not one-off scheduling details. Return an empty list when nothing durable is present.`;
+
+/**
+ * Background prompt for the per-round progress recap (Story 13 / ADR 0041). Run
+ * on the cheap BACKGROUND model between tool rounds; renders one short
+ * present-tense line into the live status draft so the user sees progress. Kept
+ * terse and best-effort — never a final answer, never an apology.
+ */
+export const ROUND_RECAP_SYSTEM_PROMPT = `You narrate, in ONE short present-tense sentence (max ~8 words, no trailing period), what a scheduling assistant just did in this step — e.g. "Checking Thursday afternoon" or "Booking the dentist". Use the just-completed tool actions. No greetings, no apologies, no final summary, no first person. Return only the sentence.`;

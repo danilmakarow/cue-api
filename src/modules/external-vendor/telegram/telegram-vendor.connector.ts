@@ -243,6 +243,7 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       vendorUserId: message.from ? String(message.from.id) : '',
       dedupeId: String(update.update_id),
       chatType: this.toChatType(message.chat.type),
+      languageCode: message.from?.language_code,
     };
 
     if (message.voice) {
@@ -305,6 +306,7 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       chatType: callback.message
         ? this.toChatType(callback.message.chat.type)
         : undefined,
+      languageCode: callback.from.language_code,
     };
   }
 

@@ -8,6 +8,10 @@ import { AssistantService } from './assistant.service';
 import { WebhookQueueJob } from './assistant.types';
 import { classifyFlow } from './ingress/inbound-router';
 import { LinkingService } from './linking.service';
+import {
+  StatusAnimation,
+  StatusAnimatorService,
+} from './reply/status-animator.service';
 import { PENDING_INTERACTION_STORE } from './session/pending-interaction.store';
 import type { PendingInteractionStore } from './session/pending-interaction.store';
 import { TurnRunnerService } from './session/turn-runner.service';
@@ -65,6 +69,7 @@ export class WebhookConsumer extends WorkerHost {
     private readonly linkingService: LinkingService,
     private readonly assistantService: AssistantService,
     private readonly turnRunner: TurnRunnerService,
+    private readonly statusAnimator: StatusAnimatorService,
     private readonly config: AssistantConfig,
   ) {
     super();
@@ -88,6 +93,31 @@ export class WebhookConsumer extends WorkerHost {
     );
 
     return acquired === 'OK';
+  }
+
+  /**
+   * Opens the live-status surface for a voice turn and shows the localized
+   * "Listening to your beautiful voice" line BEFORE STT runs (Story 12 / ADR
+   * 0012). Keyed by `correlationId` (the per-turn id) so it is the SAME idempotent
+   * StatusSession the turn-runner re-opens after transcription — the voice notice
+   * then transitions into the cycling-word loading animation. Degrades
+   * never-throw; the returned handle is finalized by the caller only on the STT
+   * failure path (a successful turn hands finalize to the turn-runner).
+   */
+  private async beginVoiceStatus(
+    normalized: NormalizedInboundMessage,
+    correlationId: string,
+  ): Promise<StatusAnimation> {
+    const animation = await this.statusAnimator.begin({
+      vendorChatId: normalized.vendorChatId,
+      turnId: correlationId,
+      chatType: normalized.chatType,
+      languageCode: normalized.languageCode,
+    });
+
+    await animation.showVoiceListening();
+
+    return animation;
   }
 
   /**
@@ -148,9 +178,23 @@ export class WebhookConsumer extends WorkerHost {
     let transcript: string | undefined;
 
     if (normalized.kind === InboundKind.Voice) {
+      // Show the localized "Listening to your beautiful voice" line on the SAME
+      // (idempotent, keyed by correlationId) status surface the turn-runner will
+      // re-use, so the voice notice transitions seamlessly into the loading
+      // animation once STT returns. Begin/voice-state degrade never-throw.
+      const voiceStatus = await this.beginVoiceStatus(
+        normalized,
+        correlationId,
+      );
+
       const result = await this.transcribeVoice(connector, normalized);
 
       if (result === null) {
+        // STT failed (already replied). Finalize the voice surface so its Redis
+        // StatusSession is cleared (no turn will run to clear it). No interval was
+        // armed (voice-state shows a single frame), so there is nothing leaking.
+        await voiceStatus.finalize();
+
         return;
       }
 
@@ -205,6 +249,10 @@ export class WebhookConsumer extends WorkerHost {
       // A button answer carries the callback id to acknowledge on resume; a
       // free-text answer / simple message has none.
       callbackId: flow.kind === 'answer' ? flow.callbackId : null,
+      // Live-status surface inputs (Story 12 / ADR 0012): the chat kind gates the
+      // private-only draft, the language tag selects the localized vocabulary.
+      chatType: normalized.chatType,
+      languageCode: normalized.languageCode,
     });
   }
 

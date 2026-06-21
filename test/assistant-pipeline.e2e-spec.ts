@@ -1,7 +1,7 @@
 import { CapturedSend } from './e2e/capturing-vendor.connector';
 import { E2eHarness, SeededFixtures } from './e2e/harness';
 import { completion, toolCall } from './e2e/scripted-ai.connector';
-import { AiStopReason } from '@/modules/ai/ai.types';
+import { AiModelRole, AiStopReason } from '@/modules/ai/ai.types';
 import { TaskService } from '@/modules/task/task.service';
 
 /**
@@ -392,13 +392,17 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
     expect(replyTextOf(reply)).toMatch(/nothing scheduled/i);
 
     // Read-only narration is genuine: the loop must NOT have forced a re-drive,
-    // so exactly the two scripted rounds ran (no third forced round).
-    expect(harness.scriptedAi.capturedRequests).toHaveLength(2);
-    expect(
-      harness.scriptedAi.capturedRequests.every(
-        (request) => request.toolChoice !== 'any',
-      ),
-    ).toBe(true);
+    // so exactly the two scripted MAIN rounds ran (no third forced round). The
+    // BACKGROUND per-round recap (Story 13 / ADR 0041) is additive new traffic and
+    // is excluded from the loop-round count by filtering on the MAIN model role.
+    const mainRequests = harness.scriptedAi.capturedRequests.filter(
+      (request) => request.modelRole === AiModelRole.MAIN,
+    );
+
+    expect(mainRequests).toHaveLength(2);
+    expect(mainRequests.every((request) => request.toolChoice !== 'any')).toBe(
+      true,
+    );
 
     // No tasks were created.
     const tasks = await harness.countTasks(fixtures.calendar.id);

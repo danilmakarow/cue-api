@@ -56,7 +56,34 @@ const CHAT_ID = '12345';
  * observes the identical persistence + send + loop calls through the new layers.
  */
 const buildHarness = () => {
-  const ai = { complete: jest.fn(), completeStructured: jest.fn() };
+  // Story 13 (ADR 0041): the loop now drives the model via `completeStream`. The
+  // mock delegates to the SAME `complete` spy (so every existing
+  // `complete.mockResolvedValueOnce(...)` script + assertion still drives the
+  // loop unchanged) and replays the result's text through `onText` to exercise
+  // the streaming seam. `completeStream` returns the identical result `complete`
+  // would, preserving every core assertion additively.
+  const ai = {
+    complete: jest.fn(),
+    completeStructured: jest.fn(),
+    completeStream: jest.fn(
+      async (
+        request: unknown,
+        onText: (delta: string, snapshot: string) => void,
+      ) => {
+        const result = (await ai.complete(request)) as { text?: string };
+
+        if (result?.text) {
+          onText(result.text, result.text);
+        }
+
+        return result;
+      },
+    ),
+  };
+  // Story 13: the loop asks the BACKGROUND model for a per-round recap. The stub
+  // returns null (no recap rendered) so existing reply/persistence assertions are
+  // untouched; recap behaviour is covered in round-recap.service.spec.ts.
+  const roundRecap = { recapRound: jest.fn().mockResolvedValue(null) };
   const vendor = {
     sendMessage: jest.fn().mockResolvedValue({ vendorMessageId: 'm-1' }),
     sendActions: jest.fn().mockResolvedValue({ vendorMessageId: 'm-actions' }),
@@ -143,12 +170,33 @@ const buildHarness = () => {
     contextBuilder as never,
     toolDispatcher as never,
     conflictResolver,
+    roundRecap as never,
   );
 
   // Story 8 (L3 turn runner, ADR 0036): the turn lifecycle now OWNS handleText /
   // resumeAnswer / finishTurn + the held-hold + ask-suspend tail. The runner is
   // assembled around the same REAL layer instances + mocks above so every
   // assertion below observes the identical persistence / send / loop calls.
+  // Story 12 (L9 live status): the runner opens a status animation per turn and
+  // finalizes it in a `finally`. We stub the animator with an inert handle whose
+  // open/startLoading/finalize are no-ops so every existing assertion (which
+  // targets the reply/persistence seams, not the status surface) is unaffected;
+  // the status-surface behaviour is covered in status-animator.service.spec.ts.
+  const statusAnimation = {
+    open: jest.fn().mockResolvedValue(undefined),
+    showVoiceListening: jest.fn().mockResolvedValue(undefined),
+    startLoading: jest.fn().mockResolvedValue(undefined),
+    // Story 13 (ADR 0041): the runner wraps the animation as the loop's stream
+    // sink; these are inert no-ops here so existing reply assertions are
+    // unaffected (streaming is covered in status-animator.service.spec.ts).
+    streamAnswer: jest.fn().mockResolvedValue(undefined),
+    showRecap: jest.fn().mockResolvedValue(undefined),
+    finalize: jest.fn().mockResolvedValue(undefined),
+  };
+  const statusAnimator = {
+    begin: jest.fn().mockResolvedValue(statusAnimation),
+  };
+
   const service = new TurnRunnerService(
     alert as never,
     toolLoop as never,
@@ -159,6 +207,7 @@ const buildHarness = () => {
     pendingInteraction as never,
     replyPresenter as never,
     heldConflictStore as never,
+    statusAnimator as never,
   );
 
   return {
@@ -175,6 +224,9 @@ const buildHarness = () => {
     taskService,
     conversationMessageDatabaseService,
     pendingInteraction,
+    statusAnimator,
+    statusAnimation,
+    roundRecap,
   };
 };
 
@@ -232,6 +284,64 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       { vendorChatId: CHAT_ID },
       { text: 'You have one event.' },
     );
+  });
+
+  it('streams the final-round answer into the status draft through the sink, then finalizes with the real sendMessage (Story 13 / ADR 0041)', async () => {
+    const harness = buildHarness();
+    const call = toolCall('list_tasks', {
+      from: '2026-06-01T00:00:00Z',
+      to: '2026-06-02T00:00:00Z',
+    });
+
+    harness.ai.complete
+      .mockResolvedValueOnce(
+        completion({ stopReason: AiStopReason.TOOL_USE, toolCalls: [call] }),
+      )
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'You have one event today.',
+        }),
+      );
+    harness.toolDispatcher.dispatch.mockResolvedValue({
+      content: '09:00 Standup',
+      countsAsScheduleFetch: true,
+    });
+    // The background model produces a per-round recap for the tool round.
+    harness.roundRecap.recapRound.mockResolvedValue('Checking today');
+
+    await harness.service.handleText(USER, {
+      text: "what's on today?",
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: 'in-1',
+    });
+
+    // The loop drove the model via the STREAMING entry point on every round.
+    expect(harness.ai.completeStream).toHaveBeenCalledTimes(2);
+
+    // The final round's answer streamed into the status draft via the sink.
+    expect(harness.statusAnimation.streamAnswer).toHaveBeenCalledWith(
+      'You have one event today.',
+    );
+
+    // The per-round recap (BACKGROUND model) was rendered into the draft.
+    expect(harness.roundRecap.recapRound).toHaveBeenCalledTimes(1);
+    expect(harness.statusAnimation.showRecap).toHaveBeenCalledWith(
+      'Checking today',
+    );
+
+    // Finalize: the ephemeral draft is superseded by the real persisted reply.
+    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+      { vendorChatId: CHAT_ID },
+      { text: 'You have one event today.' },
+    );
+    expect(
+      assistantReplies(harness.conversationMessageDatabaseService),
+    ).toEqual(['You have one event today.']);
+
+    // The status animation was finalized in the `finally` (no interval leak).
+    expect(harness.statusAnimation.finalize).toHaveBeenCalledTimes(1);
   });
 
   it('creates one HandleMap per turn and threads the same instance into the dispatch context', async () => {

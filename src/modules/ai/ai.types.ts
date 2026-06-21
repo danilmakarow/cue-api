@@ -191,6 +191,18 @@ export interface CompletionResult {
 }
 
 /**
+ * Incremental-text callback for {@link AiConnector.completeStream}. The connector
+ * invokes it with each text delta AND the full text accumulated so far, as the
+ * model streams its answer. Callers typically render the snapshot into a live
+ * surface (Story 13: the throttled status draft); the connector batches/throttles
+ * downstream, so this fires per SDK delta and the caller must NOT assume a
+ * one-render-per-delta budget. The handler MUST NOT throw — a throwing handler is
+ * swallowed by the connector so streaming degrades to a non-streamed result
+ * rather than aborting the turn.
+ */
+export type StreamTextHandler = (delta: string, snapshot: string) => void;
+
+/**
  * What a connector implementation supports. Callers branch on these instead of
  * assuming one vendor's features (ADR 0007).
  */

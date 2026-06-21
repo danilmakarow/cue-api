@@ -5,6 +5,7 @@ import { AssistantWebhookController } from './assistant-webhook.controller';
 import { AssistantConfig } from './assistant.config';
 import { AssistantService } from './assistant.service';
 import { MemoryExtractorService } from './background/memory-extractor.service';
+import { RoundRecapService } from './background/round-recap.service';
 import { SummarizerService } from './background/summarizer.service';
 import { CommandHandlerService } from './commands/command-handler.service';
 import { ConflictResolverService } from './conflict/conflict-resolver.service';
@@ -13,6 +14,7 @@ import { ContextBuilderService } from './context-builder.service';
 import { LinkingService } from './linking.service';
 import { ToolLoopService } from './orchestration/tool-loop.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
+import { StatusAnimatorService } from './reply/status-animator.service';
 import { StatusSessionStore } from './reply/status-session.store';
 import { ScheduleReaderService } from './schedule-reader.service';
 import { ConversationStore } from './session/conversation.store';
@@ -70,6 +72,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     AssistantConfig,
     ReplyPresenter,
     StatusSessionStore,
+    StatusAnimatorService,
     ScheduleReaderService,
     ContextBuilderService,
     ToolDispatcherService,
@@ -78,6 +81,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     LinkingService,
     SummarizerService,
     MemoryExtractorService,
+    RoundRecapService,
     AssistantService,
     TurnRunnerService,
     ConversationStore,

@@ -9,6 +9,7 @@ import {
   HeldConflictBatch,
   HeldConflictWrite,
   ToolRoundAuditPayload,
+  TurnStreamSink,
 } from '../assistant.types';
 import { MemoryExtractorService } from '../background/memory-extractor.service';
 import { SummarizerService } from '../background/summarizer.service';
@@ -20,6 +21,10 @@ import {
   ToolLoopService,
 } from '../orchestration/tool-loop.service';
 import { ReplyPresenter } from '../reply/reply-presenter.service';
+import {
+  StatusAnimation,
+  StatusAnimatorService,
+} from '../reply/status-animator.service';
 import { ToolName } from '../tools/tool-schemas';
 import { ToolRound, ToolResultBlock } from '@/modules/ai/ai.types';
 import { AlertConnector } from '@/modules/alert/alert-connector.abstract';
@@ -32,7 +37,10 @@ import {
   PendingQuestion,
   User,
 } from '@/modules/database/entities';
-import { InboundKind } from '@/modules/external-vendor/external-vendor.types';
+import {
+  ChatType,
+  InboundKind,
+} from '@/modules/external-vendor/external-vendor.types';
 
 /** Reply sent when the AI fails after its bounded retries (spec error table). */
 const AI_FAILURE_REPLY =
@@ -73,6 +81,10 @@ export interface HandleTextParams {
   vendorMessageId: string | null;
   /** Correlation id threaded from the webhook; minted here if absent. */
   correlationId?: string;
+  /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
+  chatType?: ChatType;
+  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  languageCode?: string;
 }
 
 /**
@@ -93,6 +105,10 @@ export interface ResumeAnswerParams {
   callbackId: string | null;
   /** Correlation id threaded from the webhook; minted here if absent. */
   correlationId?: string;
+  /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
+  chatType?: ChatType;
+  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  languageCode?: string;
 }
 
 /**
@@ -129,6 +145,10 @@ export interface TurnState {
   origin: TurnOrigin;
   /** The callback id to acknowledge for a button answer; null otherwise. */
   callbackId: string | null;
+  /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
+  chatType?: ChatType;
+  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  languageCode?: string;
 }
 
 /**
@@ -173,6 +193,7 @@ export class TurnRunnerService {
     private readonly pendingInteraction: PendingInteractionService,
     private readonly replyPresenter: ReplyPresenter,
     private readonly heldConflictStore: HeldConflictStore,
+    private readonly statusAnimator: StatusAnimatorService,
   ) {}
 
   /**
@@ -314,36 +335,100 @@ export class TurnRunnerService {
   }
 
   /**
-   * Handles a text or voice-transcript turn end to end: persist the user turn,
-   * build context, run the tool loop, then reply / hold / report a graceful
-   * failure, and (on a completed reply) fire the background jobs.
+   * Opens the live-status animation for a turn and starts the cycling-word + dots
+   * loading loop (Story 12 / ADR 0012), keyed by the correlation id so it shares
+   * the surface with any voice notice already shown for this turn. Degrades
+   * never-throw — a status fault returns a no-op handle the caller still
+   * finalizes. The `correlationId` doubles as the per-turn `turnId` for the
+   * idempotent StatusSession.
+   */
+  private async beginStatus(
+    correlationId: string,
+    vendorChatId: string,
+    chatType: ChatType | undefined,
+    languageCode: string | undefined,
+  ): Promise<StatusAnimation> {
+    const animation = await this.statusAnimator.begin({
+      vendorChatId,
+      turnId: correlationId,
+      chatType,
+      languageCode,
+    });
+
+    await animation.startLoading();
+
+    return animation;
+  }
+
+  /**
+   * Wraps a {@link StatusAnimation} as the loop-facing {@link TurnStreamSink}
+   * (Story 13 / ADR 0041) so the L4 loop can stream the final answer + render
+   * per-round recaps into the live draft WITHOUT knowing about the draft / Redis /
+   * vendor (the loop stays L9-blind). Each method fires-and-forgets the
+   * animation's async push (which routes through the one draft throttle and
+   * swallows its own fault), so the sink's contract — synchronous, degrade-never
+   * -throw — holds. Used only on a fresh model-driven turn; an `ask_user` resume
+   * passes no sink (its answer is short and the resume re-enters the loop).
+   */
+  private streamSinkFor(status: StatusAnimation): TurnStreamSink {
+    return {
+      streamAnswer: (snapshot: string): void => {
+        void status.streamAnswer(snapshot);
+      },
+      showRecap: (recap: string): void => {
+        void status.showRecap(recap);
+      },
+    };
+  }
+
+  /**
+   * Handles a text or voice-transcript turn end to end: open the live-status
+   * animation, persist the user turn, build context, run the tool loop, then reply
+   * / hold / report a graceful failure, and (on a completed reply) fire the
+   * background jobs. The status animation is ALWAYS finalized in a `finally` (no
+   * interval leak — ADR 0012) once the real reply has superseded the draft.
    */
   async handleText(user: User, params: HandleTextParams): Promise<void> {
     const correlationId = params.correlationId ?? randomUUID();
-    const conversation = await this.getOrCreateConversation(user.id);
-
-    await this.persistMessage(
-      conversation,
-      ConversationMessageRole.USER,
-      params.contentType,
-      params.text,
-      params.vendorMessageId,
-    );
-
-    const result = await this.toolLoop.run({
-      user,
-      conversationId: conversation.id,
-      currentMessageText: params.text,
+    const status = await this.beginStatus(
       correlationId,
-    });
-
-    await this.finishTurn(
-      user,
-      conversation,
       params.vendorChatId,
-      result,
-      correlationId,
+      params.chatType,
+      params.languageCode,
     );
+
+    try {
+      const conversation = await this.getOrCreateConversation(user.id);
+
+      await this.persistMessage(
+        conversation,
+        ConversationMessageRole.USER,
+        params.contentType,
+        params.text,
+        params.vendorMessageId,
+      );
+
+      const result = await this.toolLoop.run({
+        user,
+        conversationId: conversation.id,
+        currentMessageText: params.text,
+        correlationId,
+        // Stream the final answer + per-round recaps into the live status draft
+        // (Story 13 / ADR 0041). The sink wraps this turn's StatusAnimation and is
+        // degrade-never-throw; the real reply below still persists the answer.
+        streamSink: this.streamSinkFor(status),
+      });
+
+      await this.finishTurn(
+        user,
+        conversation,
+        params.vendorChatId,
+        result,
+        correlationId,
+      );
+    } finally {
+      await status.finalize();
+    }
   }
 
   /**
@@ -510,37 +595,50 @@ export class TurnRunnerService {
       return;
     }
 
-    const conversation = await this.getOrCreateConversation(user.id);
-
-    // Persist the user's answer as their turn so the thread reads naturally (the
-    // chosen option's label, or the raw free text).
-    await this.persistMessage(
-      conversation,
-      ConversationMessageRole.USER,
-      params.contentType,
-      claim.answerLabel,
-      null,
-    );
-
-    const resumedRounds = this.appendSyntheticAnswer(
-      claim.pending,
-      claim.answerLabel,
-    );
-    const result = await this.toolLoop.run({
-      user,
-      conversationId: conversation.id,
-      currentMessageText: '',
+    // A claimed resume re-invokes the model and produces a reply, so it gets the
+    // same live-status animation as a fresh turn — finalized in the `finally`.
+    const status = await this.beginStatus(
       correlationId,
-      resumeRounds: resumedRounds,
-    });
-
-    await this.finishTurn(
-      user,
-      conversation,
       params.vendorChatId,
-      result,
-      correlationId,
+      params.chatType,
+      params.languageCode,
     );
+
+    try {
+      const conversation = await this.getOrCreateConversation(user.id);
+
+      // Persist the user's answer as their turn so the thread reads naturally (the
+      // chosen option's label, or the raw free text).
+      await this.persistMessage(
+        conversation,
+        ConversationMessageRole.USER,
+        params.contentType,
+        claim.answerLabel,
+        null,
+      );
+
+      const resumedRounds = this.appendSyntheticAnswer(
+        claim.pending,
+        claim.answerLabel,
+      );
+      const result = await this.toolLoop.run({
+        user,
+        conversationId: conversation.id,
+        currentMessageText: '',
+        correlationId,
+        resumeRounds: resumedRounds,
+      });
+
+      await this.finishTurn(
+        user,
+        conversation,
+        params.vendorChatId,
+        result,
+        correlationId,
+      );
+    } finally {
+      await status.finalize();
+    }
   }
 
   /**
@@ -675,6 +773,8 @@ export class TurnRunnerService {
     correlationId: string;
     origin: TurnOrigin;
     callbackId?: string | null;
+    chatType?: ChatType;
+    languageCode?: string;
   }): Promise<void> {
     const state: TurnState = {
       user: params.user,
@@ -685,6 +785,8 @@ export class TurnRunnerService {
       correlationId: params.correlationId,
       origin: params.origin,
       callbackId: params.callbackId ?? null,
+      chatType: params.chatType,
+      languageCode: params.languageCode,
     };
 
     await this.runTurn(state);
@@ -704,6 +806,8 @@ export class TurnRunnerService {
         vendorChatId: state.vendorChatId,
         vendorMessageId: state.vendorMessageId,
         correlationId: state.correlationId,
+        chatType: state.chatType,
+        languageCode: state.languageCode,
       });
 
       return;
@@ -716,6 +820,8 @@ export class TurnRunnerService {
       vendorChatId: state.vendorChatId,
       callbackId: state.callbackId,
       correlationId: state.correlationId,
+      chatType: state.chatType,
+      languageCode: state.languageCode,
     });
   }
 }

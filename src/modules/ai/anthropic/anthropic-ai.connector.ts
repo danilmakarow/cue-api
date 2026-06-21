@@ -15,6 +15,7 @@ import {
   CompletionResult,
   PromptBlock,
   PromptRole,
+  StreamTextHandler,
   ToolCall,
   ToolResultBlock,
   ToolRound,
@@ -666,6 +667,180 @@ export class AnthropicAiConnector extends AiConnector {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Opens the streaming round-trip for {@link completeStream}, routing through the
+   * beta endpoint with the context-management config when context editing is both
+   * requested and supported (mirroring {@link createMessage}), else the stable
+   * endpoint. Both return an SDK `MessageStream` exposing the same `on('text')` /
+   * `finalMessage()` surface the caller drives. NOTE: only the request building is
+   * shared with {@link complete}; the 529→fallback retry is handled by
+   * {@link completeStream} around this call, not here.
+   */
+  private openMessageStream(
+    params: Anthropic.Messages.MessageStreamParams,
+    contextEditingEnabled: boolean,
+  ): ReturnType<Anthropic.Messages['stream']> {
+    if (!contextEditingEnabled) {
+      return this.client.messages.stream(params);
+    }
+
+    // The beta stream takes the same body shape as the beta create (minus the
+    // SDK-managed `stream` flag), so the non-streaming beta param type is reused —
+    // mirroring how `createMessage` builds its beta params.
+    const betaParams: Anthropic.Beta.Messages.MessageCreateParamsNonStreaming =
+      {
+        ...(params as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming),
+        betas: [CONTEXT_MANAGEMENT_BETA],
+        context_management: {
+          edits: [{ type: CLEAR_TOOL_USES_EDIT_TYPE }],
+        },
+      };
+
+    return this.client.beta.messages.stream(
+      betaParams,
+    ) as unknown as ReturnType<Anthropic.Messages['stream']>;
+  }
+
+  /**
+   * Consumes one streaming round-trip end to end: subscribes `onText` to the
+   * SDK's `text` event (each delta + the running snapshot) and resolves with the
+   * normalized result from {@link finalMessage}. The `onText` handler is wrapped
+   * so a throwing caller callback never tears down the stream — the contract is
+   * that streaming degrades, never throws (the delta is simply not rendered).
+   * Rejects only if the underlying stream errors/aborts — {@link completeStream}
+   * owns that recovery.
+   */
+  private async consumeStream(
+    stream: ReturnType<Anthropic.Messages['stream']>,
+    onText: StreamTextHandler,
+  ): Promise<CompletionResult> {
+    stream.on('text', (delta: string, snapshot: string) => {
+      try {
+        onText(delta, snapshot);
+      } catch (handlerError) {
+        const message =
+          handlerError instanceof Error
+            ? handlerError.message
+            : String(handlerError);
+
+        this.logger.debug(
+          `completeStream onText handler threw (delta dropped): ${message}`,
+        );
+      }
+    });
+
+    const message = await stream.finalMessage();
+
+    return this.toCompletionResult(message);
+  }
+
+  /**
+   * Builds a best-effort {@link CompletionResult} from whatever text was streamed
+   * before a fault, used as the LAST-resort return when both the stream AND the
+   * non-streamed fallback fail. Carries the partial text (if any), an `OTHER` stop
+   * reason (the turn did not end cleanly), no tool calls, and zero usage (the
+   * counters never arrived). This is the floor that makes
+   * {@link completeStream}'s never-throw contract total: even a double failure
+   * returns a valid result rather than propagating.
+   */
+  private partialStreamResult(streamedText: string): CompletionResult {
+    return {
+      stopReason: AiStopReason.OTHER,
+      text: streamedText.length > 0 ? streamedText : undefined,
+      toolCalls: undefined,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    };
+  }
+
+  /**
+   * Streaming variant of {@link complete} (Story 13 / ADR 0041). Builds the SAME
+   * params as {@link complete} (model, cached system, tools, tool rounds,
+   * max_tokens) but streams via the SDK's `messages.stream()` (or the beta stream
+   * for a context-edited turn), forwarding each text delta to `onText`, and
+   * returns the SAME normalized {@link CompletionResult} once the stream settles.
+   *
+   * **Never throws (the loop is `attempts:1`).** A captured snapshot of the
+   * streamed text is kept so any fault can reconcile to it. On a stream
+   * error/abort/empty-stream — or a MAIN-model 529 — it falls back to a
+   * non-streamed {@link complete} (which itself owns the 529→fallback-model
+   * retry); if THAT also fails, it returns {@link partialStreamResult} built from
+   * whatever streamed. Either way the caller gets a valid result, never an
+   * exception.
+   */
+  async completeStream(
+    request: CompletionRequest,
+    onText: StreamTextHandler,
+  ): Promise<CompletionResult> {
+    const contextEditingEnabled =
+      this.capabilities.contextEditing &&
+      request.features?.contextEditing === true;
+
+    // `messages.stream()` takes the same body as `create()` minus the `stream`
+    // flag (the SDK sets `stream: true` internally), so the non-streaming params
+    // builder is reused verbatim — keeping request building identical to
+    // `complete` (model, cached system, tools, tool rounds, max_tokens).
+    const params: Anthropic.Messages.MessageStreamParams =
+      this.buildCreateParams(request);
+
+    // Track the latest full-text snapshot so a mid-stream fault can reconcile to
+    // it (and so the last-resort partial result carries the user-visible text).
+    let streamedText = '';
+    const captureText: StreamTextHandler = (delta, snapshot) => {
+      streamedText = snapshot;
+      onText(delta, snapshot);
+    };
+
+    try {
+      const stream = this.openMessageStream(params, contextEditingEnabled);
+      const result = await this.consumeStream(stream, captureText);
+
+      this.logCacheUsage('completeStream', request, result.usage);
+
+      return result;
+    } catch (error) {
+      this.logCompletionFailure('completeStream', request, error);
+
+      return this.recoverFromStreamFailure(request, streamedText);
+    }
+  }
+
+  /**
+   * Recovers a {@link completeStream} fault WITHOUT throwing: re-issues the same
+   * request as a non-streamed {@link complete} (which owns the MAIN-model 529→
+   * fallback retry and the SDK's transport retries), and on a second failure
+   * returns a {@link partialStreamResult} from the text that did stream. This is
+   * the heart of the never-throw contract — the loop only ever sees a result.
+   */
+  private async recoverFromStreamFailure(
+    request: CompletionRequest,
+    streamedText: string,
+  ): Promise<CompletionResult> {
+    try {
+      this.logger.warn(
+        `completeStream falling back to non-streamed complete: ` +
+          `traceId=${request.traceId ?? 'none'} ` +
+          `streamedChars=${streamedText.length}`,
+      );
+
+      return await this.complete(request);
+    } catch (fallbackError) {
+      this.logCompletionFailure(
+        'completeStream:fallback',
+        request,
+        fallbackError,
+      );
+
+      // Both the stream and the non-streamed fallback failed: return whatever
+      // streamed (or an empty partial) so the loop still answers. Never throws.
+      return this.partialStreamResult(streamedText);
     }
   }
 

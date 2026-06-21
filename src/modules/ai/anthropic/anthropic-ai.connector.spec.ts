@@ -45,8 +45,8 @@ jest.mock('@anthropic-ai/sdk', () => {
   }
 
   const ctor = jest.fn().mockImplementation(() => ({
-    messages: { create: jest.fn() },
-    beta: { messages: { create: jest.fn() } },
+    messages: { create: jest.fn(), stream: jest.fn() },
+    beta: { messages: { create: jest.fn(), stream: jest.fn() } },
   }));
 
   (ctor as unknown as { APIError: typeof APIError }).APIError = APIError;
@@ -73,8 +73,55 @@ const MockAnthropicApiError = (Anthropic as unknown as { APIError: unknown })
 /** The live `messages.create` spy for the most recently constructed client. */
 let messagesCreate: jest.Mock;
 
+/** The live `messages.stream` spy for the most recently constructed client. */
+let messagesStream: jest.Mock;
+
 /** The live `beta.messages.create` spy for the most recently constructed client. */
 let betaMessagesCreate: jest.Mock;
+
+/** The live `beta.messages.stream` spy for the most recently constructed client. */
+let betaMessagesStream: jest.Mock;
+
+/**
+ * A minimal fake of the SDK `MessageStream` (Story 13). `on('text', …)` is invoked
+ * synchronously with each scripted delta + the running snapshot; `finalMessage()`
+ * resolves to the supplied message (or rejects, to drive the never-throw fallback
+ * path). Only the surface the connector consumes is implemented.
+ */
+const fakeMessageStream = (options: {
+  deltas?: string[];
+  finalMessage?: Anthropic.Messages.Message;
+  finalError?: Error;
+}) => {
+  const textListeners: Array<(delta: string, snapshot: string) => void> = [];
+
+  return {
+    on(event: string, listener: (delta: string, snapshot: string) => void) {
+      if (event === 'text') {
+        textListeners.push(listener);
+      }
+
+      return this;
+    },
+    async finalMessage(): Promise<Anthropic.Messages.Message> {
+      let snapshot = '';
+
+      for (const delta of options.deltas ?? []) {
+        snapshot += delta;
+
+        for (const listener of textListeners) {
+          listener(delta, snapshot);
+        }
+      }
+
+      if (options.finalError) {
+        throw options.finalError;
+      }
+
+      return options.finalMessage as Anthropic.Messages.Message;
+    },
+  };
+};
 
 const MODEL_MAIN = 'claude-main-test';
 const MODEL_BACKGROUND = 'claude-bg-test';
@@ -162,6 +209,14 @@ describe('AnthropicAiConnector', () => {
 
     messagesCreate = client.messages.create;
     betaMessagesCreate = client.beta.messages.create;
+
+    const streamingClient = AnthropicMock.mock.results.at(-1)?.value as {
+      messages: { stream: jest.Mock };
+      beta: { messages: { stream: jest.Mock } };
+    };
+
+    messagesStream = streamingClient.messages.stream;
+    betaMessagesStream = streamingClient.beta.messages.stream;
   });
 
   it('declares the Anthropic provider and full capabilities', () => {
@@ -797,6 +852,211 @@ describe('AnthropicAiConnector', () => {
       expect(logged).not.toContain('SECRET_PROMPT_CONTENT');
 
       errorSpy.mockRestore();
+    });
+  });
+
+  describe('completeStream (Story 13 / ADR 0041)', () => {
+    it('streams text deltas via onText and returns the same normalized result complete() would', async () => {
+      messagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: ['He', 'llo'],
+          finalMessage: buildMessage({
+            stop_reason: 'end_turn',
+            content: [textBlock('Hello')],
+            usage: {
+              input_tokens: 30,
+              output_tokens: 4,
+              cache_read_input_tokens: 10,
+              cache_creation_input_tokens: 0,
+              cache_creation: null,
+              server_tool_use: null,
+              service_tier: null,
+            } as Anthropic.Messages.Usage,
+          }),
+        }),
+      );
+
+      const deltas: Array<{ delta: string; snapshot: string }> = [];
+      const result = await connector.completeStream(
+        {
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'hi' }],
+        },
+        (delta, snapshot) => deltas.push({ delta, snapshot }),
+      );
+
+      // onText saw each incremental delta + the running snapshot.
+      expect(deltas).toEqual([
+        { delta: 'He', snapshot: 'He' },
+        { delta: 'llo', snapshot: 'Hello' },
+      ]);
+      // Same normalized shape as complete(): stopReason / text / usage.
+      expect(result.stopReason).toBe(AiStopReason.END_TURN);
+      expect(result.text).toBe('Hello');
+      expect(result.usage).toEqual({
+        inputTokens: 30,
+        outputTokens: 4,
+        cacheReadTokens: 10,
+        cacheWriteTokens: 0,
+      });
+      // It streamed (no non-streamed create on the happy path).
+      expect(messagesStream).toHaveBeenCalledTimes(1);
+      expect(messagesCreate).not.toHaveBeenCalled();
+    });
+
+    it('RETURNS, NEVER THROWS on a stream error — reconciles to a non-streamed complete() fallback', async () => {
+      // The stream rejects mid-flight (after emitting a partial delta)…
+      messagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: ['parti'],
+          finalError: new Error('stream connection dropped'),
+        }),
+      );
+      // …and the non-streamed fallback succeeds with the full answer.
+      messagesCreate.mockResolvedValue(
+        buildMessage({
+          stop_reason: 'end_turn',
+          content: [textBlock('partial recovered in full')],
+        }),
+      );
+
+      const seen: string[] = [];
+      let result:
+        | Awaited<ReturnType<typeof connector.completeStream>>
+        | undefined;
+
+      // Must not throw — the loop is attempts:1.
+      await expect(
+        (async () => {
+          result = await connector.completeStream(
+            {
+              modelRole: AiModelRole.MAIN,
+              messages: [{ role: PromptRole.USER, content: 'go' }],
+            },
+            (_delta, snapshot) => seen.push(snapshot),
+          );
+        })(),
+      ).resolves.toBeUndefined();
+
+      // The partial delta still reached the caller before the fault…
+      expect(seen).toEqual(['parti']);
+      // …and the returned result is the non-streamed fallback's answer.
+      expect(result?.stopReason).toBe(AiStopReason.END_TURN);
+      expect(result?.text).toBe('partial recovered in full');
+      expect(messagesStream).toHaveBeenCalledTimes(1);
+      expect(messagesCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('on an empty stream, falls back to a non-streamed complete() and returns its result', async () => {
+      // The stream produces no deltas and a final message with no text.
+      messagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: [],
+          finalError: new Error('empty stream: no content produced'),
+        }),
+      );
+      messagesCreate.mockResolvedValue(
+        buildMessage({
+          stop_reason: 'end_turn',
+          content: [textBlock('answer from the fallback')],
+        }),
+      );
+
+      const result = await connector.completeStream(
+        {
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'q' }],
+        },
+        () => undefined,
+      );
+
+      expect(result.text).toBe('answer from the fallback');
+      expect(messagesCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns a best-effort partial (never throws) when BOTH the stream and the fallback fail', async () => {
+      messagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: ['half-written '],
+          finalError: new Error('stream died'),
+        }),
+      );
+      // The non-streamed fallback ALSO fails — the floor must still return.
+      messagesCreate.mockRejectedValue(new Error('fallback also down'));
+
+      const result = await connector.completeStream(
+        {
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'go' }],
+        },
+        () => undefined,
+      );
+
+      // A valid result built from whatever streamed — OTHER stop reason, partial text.
+      expect(result.stopReason).toBe(AiStopReason.OTHER);
+      expect(result.text).toBe('half-written ');
+      expect(result.usage).toEqual({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      });
+    });
+
+    it('swallows a throwing onText handler so streaming degrades instead of aborting the turn', async () => {
+      messagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: ['x', 'y'],
+          finalMessage: buildMessage({
+            stop_reason: 'end_turn',
+            content: [textBlock('xy')],
+          }),
+        }),
+      );
+
+      const result = await connector.completeStream(
+        {
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'hi' }],
+        },
+        () => {
+          throw new Error('render blew up');
+        },
+      );
+
+      // The throwing handler did not abort the stream — we still get the answer.
+      expect(result.text).toBe('xy');
+      expect(messagesCreate).not.toHaveBeenCalled();
+    });
+
+    it('routes a context-edited turn through the beta stream endpoint', async () => {
+      betaMessagesStream.mockReturnValue(
+        fakeMessageStream({
+          deltas: ['done'],
+          finalMessage: buildMessage({
+            stop_reason: 'end_turn',
+            content: [textBlock('done')],
+          }),
+        }),
+      );
+
+      const result = await connector.completeStream(
+        {
+          modelRole: AiModelRole.MAIN,
+          messages: [{ role: PromptRole.USER, content: 'edit' }],
+          features: { contextEditing: true },
+        },
+        () => undefined,
+      );
+
+      expect(result.text).toBe('done');
+      expect(betaMessagesStream).toHaveBeenCalledTimes(1);
+      expect(messagesStream).not.toHaveBeenCalled();
+
+      // The beta stream carried the context-management beta + clear-tool-uses edit.
+      const betaBody = betaMessagesStream.mock.calls[0][0];
+
+      expect(betaBody.betas).toContain('context-management-2025-06-27');
     });
   });
 

@@ -215,6 +215,36 @@ export interface ToolStepRecord {
 export type CorrectionReason = 'claim_without_writes' | 'writes_errored';
 
 /**
+ * The L4-facing port the tool loop (Story 13 / ADR 0041) uses to render progress
+ * into the live status surface, WITHOUT the loop knowing about drafts / Redis /
+ * the vendor (the loop stays L9-blind). The turn runner supplies a concrete
+ * implementation that wraps the per-turn {@link StatusAnimation} (each method
+ * routes through the one draft throttle); a turn with no live status passes a
+ * no-op sink.
+ *
+ * **Degrade-never-throw:** every method MUST swallow its own faults. The loop
+ * calls them best-effort and never wraps the calls in try/catch — a status fault
+ * must never disturb the turn's answer (the webhook queue is `attempts:1`).
+ */
+export interface TurnStreamSink {
+  /**
+   * Renders the latest full-text snapshot of the model's streaming answer into
+   * the status draft (final round only). Called with the accumulated snapshot per
+   * delta; the implementation batches through the draft throttle, so it must
+   * tolerate being called far faster than it can send (it coalesces). The draft
+   * is ephemeral — the real `sendMessage` finalize still persists the answer.
+   */
+  streamAnswer(snapshot: string): void;
+
+  /**
+   * Renders a one-sentence per-round recap ("what I'm doing now") into the status
+   * draft between tool rounds, so the user sees progress. Best-effort and cheap;
+   * a missing/empty recap simply leaves the current frame.
+   */
+  showRecap(recap: string): void;
+}
+
+/**
  * The structured `toolPayload` of one persisted `role = tool` message: a whole
  * tool-loop round — the model's stop reason, any text it produced alongside the
  * calls, and one {@link ToolStepRecord} per dispatched tool. Makes "what did the

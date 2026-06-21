@@ -3,10 +3,12 @@ import { ZodType } from 'zod';
 import { AiConnector } from '@/modules/ai/ai-connector.abstract';
 import {
   AiCapabilities,
+  AiModelRole,
   AiProvider,
   AiStopReason,
   CompletionRequest,
   CompletionResult,
+  StreamTextHandler,
   ToolCall,
 } from '@/modules/ai/ai.types';
 
@@ -93,9 +95,28 @@ export class ScriptedAiConnector extends AiConnector {
    * Returns the next scripted result, recording the request. Throws when the
    * script is exhausted so a mis-scripted scenario fails loudly (as a turn
    * error) rather than hanging the orchestrator's loop.
+   *
+   * A BACKGROUND-role `complete` is the Story-13 per-round recap (it shares this
+   * one connector in e2e, where everything routes here). It must NOT consume the
+   * MAIN loop's scripted queue, so it returns a canned tiny recap — mirroring how
+   * `completeStructured` is a separate canned path for the summarizer / memory
+   * jobs. Only MAIN round-trips draw from the script.
    */
   async complete(request: CompletionRequest): Promise<CompletionResult> {
     this.requests.push(request);
+
+    if (request.modelRole === AiModelRole.BACKGROUND) {
+      return {
+        stopReason: AiStopReason.END_TURN,
+        text: 'Working on it',
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      };
+    }
 
     const next = this.queue.shift();
 
@@ -107,6 +128,26 @@ export class ScriptedAiConnector extends AiConnector {
     }
 
     return next;
+  }
+
+  /**
+   * Streaming variant used on the loop's final/answer round (Story 13). Consumes
+   * the SAME scripted queue as {@link complete}, emits the result's text to
+   * `onText` as a single delta (so an e2e assertion on streamed traffic sees it),
+   * and returns the identical result — preserving the never-throw contract by
+   * delegating the exhausted-script throw to `complete`'s deterministic failure.
+   */
+  async completeStream(
+    request: CompletionRequest,
+    onText: StreamTextHandler,
+  ): Promise<CompletionResult> {
+    const result = await this.complete(request);
+
+    if (result.text && result.text.length > 0) {
+      onText(result.text, result.text);
+    }
+
+    return result;
   }
 
   /**
