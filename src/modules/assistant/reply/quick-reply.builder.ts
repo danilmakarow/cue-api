@@ -10,8 +10,14 @@
  */
 
 import { AskUserOption, ConflictCallbackAction } from '../assistant.types';
-import { ASK_CALLBACK_PREFIX } from '../ingress/inbound-router';
+import {
+  ASK_CALLBACK_PREFIX,
+  STOP_CALLBACK_PREFIX,
+} from '../ingress/inbound-router';
 import { OutboundActionButton } from '@/modules/external-vendor/external-vendor.types';
+
+/** Button label shown on the STOP control message (Story 14b / ADR 0043). */
+const STOP_BUTTON_LABEL = '⏹ Stop';
 
 /**
  * Builds the single confirm/cancel button row for a held-conflict keyboard (ADR
@@ -53,5 +59,23 @@ export const buildAskKeyboard = (
       label: option.label,
       callbackData: `${ASK_CALLBACK_PREFIX}${pendingQuestionId}:${option.id}`,
     })),
+  ];
+};
+
+/**
+ * Builds the single STOP button row for the in-turn STOP control (Story 14b / ADR
+ * 0043). Drafts carry no buttons, so STOP rides its OWN real message; the button's
+ * callback data is `stop:<turnId>` (the in-flight turn's correlationId), which the
+ * inbound router classifies and the deterministic STOP handler uses to arm the
+ * per-user/per-turn STOP flag. One button, one row.
+ */
+export const buildStopKeyboard = (turnId: string): OutboundActionButton[][] => {
+  return [
+    [
+      {
+        label: STOP_BUTTON_LABEL,
+        callbackData: `${STOP_CALLBACK_PREFIX}${turnId}`,
+      },
+    ],
   ];
 };

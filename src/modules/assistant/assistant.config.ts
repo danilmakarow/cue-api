@@ -132,6 +132,45 @@ export class AssistantConfig {
     });
   }
 
+  /**
+   * Per-user inbound debounce window (ms, Story 14a / ADR 0042): how long a
+   * freshly accepted simple message waits before its turn runs. Each new inbound
+   * within the window re-arms it (the delayed drain job slides to now + this), so
+   * rapid-fire bubbles collapse into ONE combined turn. ~2 s by default.
+   */
+  get debounceWindowMs(): number {
+    return this.configService.get('ASSISTANT_DEBOUNCE_WINDOW_MS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Queue-after re-arm delay (ms, Story 14a / ADR 0042): when a debounce drain
+   * finds the per-user lock already held (a turn in flight), the drained batch is
+   * re-buffered and the drain job re-scheduled this far out so it runs AFTER the
+   * in-flight turn. Kept well below {@link userLockTtlMs} so a queued-after batch
+   * re-polls promptly once the lock frees, and the lock's auto-expiry guarantees
+   * no deadlock if the holder crashes.
+   */
+  get debounceQueueAfterMs(): number {
+    return this.configService.get('ASSISTANT_DEBOUNCE_QUEUE_AFTER_MS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * TTL (seconds) for the cooperative STOP flag (Story 14b / ADR 0043): how long
+   * a user's STOP tap stays armed in Redis. The tool loop checks it between rounds
+   * and after each committed write; the turn clears its own per-turn key on exit,
+   * so this only needs to outlive one in-flight turn (a generous multiple of the
+   * user-lock TTL) before self-expiring.
+   */
+  get stopFlagTtlSeconds(): number {
+    return this.configService.get('ASSISTANT_STOP_FLAG_TTL_SECONDS', {
+      infer: true,
+    });
+  }
+
   /** TTL (seconds) for a single-use link nonce. */
   get linkNonceTtlSeconds(): number {
     return this.configService.get('ASSISTANT_LINK_NONCE_TTL_SECONDS', {

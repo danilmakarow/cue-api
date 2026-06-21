@@ -12,9 +12,9 @@ import {
   StatusAnimation,
   StatusAnimatorService,
 } from './reply/status-animator.service';
+import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
 import { PENDING_INTERACTION_STORE } from './session/pending-interaction.store';
 import type { PendingInteractionStore } from './session/pending-interaction.store';
-import { TurnRunnerService } from './session/turn-runner.service';
 import { dedupeKey, WEBHOOK_QUEUE_NAME } from '../redis/redis.constants';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import { User } from '@/modules/database/entities';
@@ -68,7 +68,7 @@ export class WebhookConsumer extends WorkerHost {
     private readonly userDatabaseService: UserDatabaseService,
     private readonly linkingService: LinkingService,
     private readonly assistantService: AssistantService,
-    private readonly turnRunner: TurnRunnerService,
+    private readonly debounceCoordinator: DebounceCoordinatorService,
     private readonly statusAnimator: StatusAnimatorService,
     private readonly config: AssistantConfig,
   ) {
@@ -176,16 +176,14 @@ export class WebhookConsumer extends WorkerHost {
     correlationId: string,
   ): Promise<void> {
     let transcript: string | undefined;
+    let voiceStatus: StatusAnimation | undefined;
 
     if (normalized.kind === InboundKind.Voice) {
       // Show the localized "Listening to your beautiful voice" line on the SAME
       // (idempotent, keyed by correlationId) status surface the turn-runner will
       // re-use, so the voice notice transitions seamlessly into the loading
       // animation once STT returns. Begin/voice-state degrade never-throw.
-      const voiceStatus = await this.beginVoiceStatus(
-        normalized,
-        correlationId,
-      );
+      voiceStatus = await this.beginVoiceStatus(normalized, correlationId);
 
       const result = await this.transcribeVoice(connector, normalized);
 
@@ -230,30 +228,76 @@ export class WebhookConsumer extends WorkerHost {
       return;
     }
 
-    // Both remaining flows (simple_message, answer) converge at the turn runner.
+    if (flow.kind === 'stop_control') {
+      // STOP-control tap (Story 14b / ADR 0043): deterministic, NO model — ack the
+      // tap and arm the per-user/per-turn STOP flag the in-flight turn's loop polls.
+      // It runs OUTSIDE the per-user lock (it must reach the lock-holding running
+      // turn, not queue behind it), so it never corrupts the debounce queue or the
+      // running turn — it only flips a Redis flag the turn cooperatively honours.
+      await this.assistantService.handleStopControl(user, {
+        callbackId: flow.callbackId,
+        turnId: flow.turnId,
+        correlationId,
+      });
+
+      return;
+    }
+
+    // Both remaining flows (simple_message, answer) reach the turn runner — but a
+    // simple message goes through the debounce buffer first (Story 14a / ADR 0042)
+    // while an answer to a pending `ask_user` question runs IMMEDIATELY (it must
+    // never be combined with other messages or its resume would be corrupted).
     // A text message with no body is dropped (preserves the old `normalized.text`
-    // guard); a voice transcript is always non-null here (STT-fail returned
-    // above), and an answer carries the user's text/option.
+    // guard); a voice transcript is always non-null here (STT-fail returned above).
     if (flow.contentType !== InboundKind.Voice && flow.text.length === 0) {
       return;
     }
 
-    await this.turnRunner.runFromMessage({
-      user,
+    if (flow.kind === 'answer') {
+      // The `ask_user` resume bypasses the debounce BUFFER (it must not coalesce
+      // with a following message, and it acknowledges a specific callback) — but it
+      // still runs under the SAME per-user lock as a simple-message turn (ADR 0042 /
+      // Story 11), so a simple-message turn and an answer turn never run
+      // concurrently for one user. If the lock is held the answer queues-after (a
+      // fresh delayed job re-carries it) instead of racing the in-flight turn; the
+      // resume's atomic claim still guards a double-resume.
+      await this.debounceCoordinator.runAnswerExclusive(user, {
+        text: flow.text,
+        kind: flow.contentType,
+        vendorChatId: normalized.vendorChatId,
+        correlationId,
+        origin: `answer_${flow.source}`,
+        callbackId: flow.callbackId,
+        chatType: normalized.chatType,
+        languageCode: normalized.languageCode,
+      });
+
+      return;
+    }
+
+    // A fresh simple message is buffered into the user's ~2 s debounce window
+    // (Story 14a / ADR 0042): rapid-fire bubbles combine into ONE turn, and the
+    // delayed drain runs the turn under the per-user lock (queue-after mid-turn).
+    // The buffer happens AFTER dedupe/linking/STT, so those stay intact + ordered.
+    const isSeed = await this.debounceCoordinator.buffer(user.id, {
       text: flow.text,
       kind: flow.contentType,
       vendorChatId: normalized.vendorChatId,
       correlationId,
-      origin:
-        flow.kind === 'answer' ? `answer_${flow.source}` : 'simple_message',
-      // A button answer carries the callback id to acknowledge on resume; a
-      // free-text answer / simple message has none.
-      callbackId: flow.kind === 'answer' ? flow.callbackId : null,
       // Live-status surface inputs (Story 12 / ADR 0012): the chat kind gates the
       // private-only draft, the language tag selects the localized vocabulary.
       chatType: normalized.chatType,
       languageCode: normalized.languageCode,
     });
+
+    // FIX 3 — a NON-first voice note opened its own 'Listening…' surface (keyed by
+    // its own correlationId), but the drained turn finalizes only the FIRST
+    // buffered entry's surface (the seed). So finalize this voice surface now when
+    // it did NOT become the seed, otherwise it lingers as a zombie draft until its
+    // StatusSession TTL. The seed's surface is left for the turn to finalize.
+    if (voiceStatus && !isSeed) {
+      await voiceStatus.finalize();
+    }
   }
 
   /**

@@ -4,8 +4,8 @@ import { AssistantConfig } from './assistant.config';
 import { AssistantService } from './assistant.service';
 import { WebhookQueueJob } from './assistant.types';
 import { LinkingService } from './linking.service';
+import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
 import { PendingInteractionStore } from './session/pending-interaction.store';
-import { TurnRunnerService } from './session/turn-runner.service';
 import { WebhookConsumer } from './webhook.consumer';
 import { User } from '@/modules/database/entities';
 import { ExternalVendorConnectorFactory } from '@/modules/external-vendor/external-vendor-connector.factory';
@@ -85,6 +85,9 @@ const buildConsumer = (
   const assistantService = {
     handleCommand: jest.fn().mockResolvedValue(undefined),
     handleCallback: jest.fn().mockResolvedValue(undefined),
+    // Story 14b (ADR 0043): the deterministic STOP-control handler the consumer
+    // dispatches a `stop:` callback to (it never buffers / never runs the loop).
+    handleStopControl: jest.fn().mockResolvedValue(undefined),
   };
   // The pending-interaction store gates the free-text answer flow. For this wave
   // it resolves false by default (no question is ever created), so a typed
@@ -94,16 +97,23 @@ const buildConsumer = (
       .fn()
       .mockResolvedValue(options.hasPendingQuestion ?? false),
   };
-  // Story 8 (ADR 0036): the turn lifecycle now lives ON TurnRunnerService, so the
-  // model-driven flows converge at `turnRunner.runFromMessage` (the convergence
-  // point) rather than `assistantService.handleText`. We mock the runner here so
-  // the routing assertions target the seam the consumer actually dispatches to.
-  const turnRunner = {
-    runFromMessage: jest.fn().mockResolvedValue(undefined),
-  } as unknown as jest.Mocked<TurnRunnerService>;
+  // Story 14a (ADR 0042): both model-driven flows now go through the debounce
+  // coordinator — a fresh simple message is BUFFERED into the per-user window
+  // (`buffer`), while an `ask_user` answer (never coalesced) runs under the SAME
+  // per-user lock via `runAnswerExclusive` (FIX 2: serialized with simple-message
+  // turns, queue-after on a held lock). `buffer` resolves to whether the entry was
+  // the window's FIRST (the seed) — the consumer finalizes a non-seed voice surface
+  // itself (FIX 3). We mock the coordinator so the routing assertions target the
+  // seam the consumer dispatches to.
+  const debounceCoordinator = {
+    buffer: jest.fn().mockResolvedValue(true),
+    runAnswerExclusive: jest.fn().mockResolvedValue(undefined),
+  } as unknown as jest.Mocked<DebounceCoordinatorService>;
   const config = {
     dedupeTtlSeconds: 3600,
     translateVoiceToEnglish: false,
+    debounceWindowMs: 2000,
+    debounceQueueAfterMs: 750,
   } as unknown as AssistantConfig;
 
   // Story 12 (L9 live status): a voice turn shows the localized "Listening…" line
@@ -129,7 +139,7 @@ const buildConsumer = (
     userDatabaseService as never,
     linkingService as unknown as LinkingService,
     assistantService as unknown as AssistantService,
-    turnRunner,
+    debounceCoordinator,
     statusAnimator as never,
     config,
   );
@@ -142,7 +152,7 @@ const buildConsumer = (
     linkingService,
     assistantService,
     pendingStore,
-    turnRunner,
+    debounceCoordinator,
     telegramLinkDatabaseService,
     statusAnimator,
     statusAnimation,
@@ -150,7 +160,7 @@ const buildConsumer = (
 };
 
 describe('WebhookConsumer', () => {
-  it('transcribes a voice note and routes the transcript to the orchestrator', async () => {
+  it('transcribes a voice note and buffers the transcript into the debounce window (Story 14a)', async () => {
     const normalized: NormalizedInboundMessage = {
       kind: InboundKind.Voice,
       vendorChatId: 'chat-1',
@@ -168,15 +178,22 @@ describe('WebhookConsumer', () => {
 
     await harness.consumer.process(buildJob('{"update_id":100}'));
 
+    // STT still runs BEFORE buffering (ADR 0042) so the voice note coalesces by
+    // its transcript exactly like a text message.
     expect(harness.connector.fetchMedia).toHaveBeenCalledWith(normalized.media);
     expect(harness.stt.transcribe).toHaveBeenCalledTimes(1);
-    expect(harness.turnRunner.runFromMessage).toHaveBeenCalledWith(
+    expect(harness.debounceCoordinator.buffer).toHaveBeenCalledWith(
+      'user-1',
       expect.objectContaining({
-        user: expect.objectContaining({ id: 'user-1' }),
         text: 'move my 3pm to 4',
+        kind: InboundKind.Voice,
         vendorChatId: 'chat-1',
       }),
     );
+    // A fresh simple message no longer runs the turn immediately — it is buffered.
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
   });
 
   it('replies "couldn\'t hear that" and persists no turn when STT is unavailable', async () => {
@@ -204,7 +221,9 @@ describe('WebhookConsumer', () => {
     const [, message] = harness.connector.sendMessage.mock.calls[0];
 
     expect(message.text).toMatch(/didn't come through|hear/i);
-    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
   });
 
   it('drops a duplicate update without processing', async () => {
@@ -222,7 +241,9 @@ describe('WebhookConsumer', () => {
     expect(
       harness.telegramLinkDatabaseService.findByTelegramChatId,
     ).not.toHaveBeenCalled();
-    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
   });
 
   it('sends the linking prompt for an unlinked chat and never calls the orchestrator', async () => {
@@ -242,10 +263,12 @@ describe('WebhookConsumer', () => {
       null,
     );
     expect(harness.connector.sendMessage).toHaveBeenCalledTimes(1);
-    expect(harness.turnRunner.runFromMessage).not.toHaveBeenCalled();
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
   });
 
-  it('routes a text message to the orchestrator for a linked user', async () => {
+  it('buffers a text message into the debounce window for a linked user (Story 14a)', async () => {
     const normalized: NormalizedInboundMessage = {
       kind: InboundKind.Text,
       vendorChatId: 'chat-1',
@@ -257,13 +280,44 @@ describe('WebhookConsumer', () => {
 
     await harness.consumer.process(buildJob('{"update_id":104}'));
 
-    expect(harness.turnRunner.runFromMessage).toHaveBeenCalledWith(
+    expect(harness.debounceCoordinator.buffer).toHaveBeenCalledWith(
+      'user-1',
       expect.objectContaining({
-        user: expect.objectContaining({ id: 'user-1' }),
         text: 'what is on tomorrow?',
+        kind: InboundKind.Text,
         correlationId: 'cid-1',
       }),
     );
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('routes a pending-question answer through the per-user lock via runAnswerExclusive (NOT buffered/coalesced, FIX 2)', async () => {
+    const normalized: NormalizedInboundMessage = {
+      kind: InboundKind.Text,
+      vendorChatId: 'chat-1',
+      vendorUserId: 'u-1',
+      dedupeId: '107',
+      text: 'Tuesday it is',
+    };
+    // A pending ask_user question is open → the free-text reply is an ANSWER flow.
+    // It must NOT be buffered/coalesced, but it MUST run under the same per-user
+    // lock as a simple-message turn (FIX 2), so it dispatches to the coordinator's
+    // runAnswerExclusive (which holds the lock + queues-after when busy), never the
+    // turn runner directly (which would run lock-free, racing a simple-message turn).
+    const harness = buildConsumer(normalized, { hasPendingQuestion: true });
+
+    await harness.consumer.process(buildJob('{"update_id":107}'));
+
+    expect(harness.debounceCoordinator.runAnswerExclusive).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'user-1' }),
+      expect.objectContaining({
+        text: 'Tuesday it is',
+        origin: 'answer_text',
+      }),
+    );
+    expect(harness.debounceCoordinator.buffer).not.toHaveBeenCalled();
   });
 
   it('routes a command to the orchestrator command handler', async () => {
@@ -285,6 +339,36 @@ describe('WebhookConsumer', () => {
     );
   });
 
+  it('routes a stop: callback to the deterministic STOP handler — never buffers or runs the loop (Story 14b)', async () => {
+    const normalized: NormalizedInboundMessage = {
+      kind: InboundKind.Callback,
+      vendorChatId: 'chat-1',
+      vendorUserId: 'u-1',
+      dedupeId: '108',
+      callbackId: 'cb-stop',
+      callbackData: 'stop:turn-xyz',
+    };
+    const harness = buildConsumer(normalized);
+
+    await harness.consumer.process(buildJob('{"update_id":108}'));
+
+    // The STOP tap is handled deterministically with the parsed turn id…
+    expect(harness.assistantService.handleStopControl).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'user-1' }),
+      expect.objectContaining({
+        callbackId: 'cb-stop',
+        turnId: 'turn-xyz',
+        correlationId: 'cid-1',
+      }),
+    );
+    // …and it NEVER touches the debounce queue or the turn runner (so a STOP during
+    // a queued/debounced batch cannot corrupt the queue or start a turn).
+    expect(harness.debounceCoordinator.buffer).not.toHaveBeenCalled();
+    expect(
+      harness.debounceCoordinator.runAnswerExclusive,
+    ).not.toHaveBeenCalled();
+  });
+
   it('releases the dedupe guard and rethrows when processing fails (so the job retries)', async () => {
     const normalized: NormalizedInboundMessage = {
       kind: InboundKind.Text,
@@ -295,7 +379,10 @@ describe('WebhookConsumer', () => {
     };
     const harness = buildConsumer(normalized);
 
-    harness.turnRunner.runFromMessage.mockRejectedValue(new Error('db down'));
+    // A simple message now flows through the debounce coordinator's buffer; a
+    // buffering fault must still release the dedupe guard and rethrow (the
+    // consumer is attempts:1 — failing loud beats a silent drop).
+    harness.debounceCoordinator.buffer.mockRejectedValue(new Error('db down'));
 
     await expect(
       harness.consumer.process(buildJob('{"update_id":106}')),

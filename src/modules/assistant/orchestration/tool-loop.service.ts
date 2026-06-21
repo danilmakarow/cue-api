@@ -5,6 +5,7 @@ import {
   buildNarrationAuditRound,
   isCorrectionBudgetExhausted,
 } from './correction-driver';
+import { buildStopSummary } from './stop-summary';
 import {
   ROUNDTRIP_CEILING_REPLY,
   classifyTerminalTurn,
@@ -15,6 +16,7 @@ import { AssistantConfig } from '../assistant.config';
 import {
   AskUserOption,
   HeldConflictWrite,
+  StopController,
   ToolDispatchContext,
   ToolRoundAuditPayload,
   ToolStepRecord,
@@ -79,6 +81,19 @@ export type LoopOutcome =
       kind: 'unresolved';
       corrections: number;
     }
+  | {
+      /**
+       * The user tapped STOP (Story 14b / ADR 0043): the loop hit a cooperative
+       * checkpoint (between rounds or after a committed write) with the STOP flag
+       * set and stopped GRACEFULLY. Committed writes are KEPT (no rollback — they
+       * already happened and are not idempotent under `attempts:1`); `text` is a
+       * PROGRAMMATIC summary built from the round/step ledger (NO AI call) naming
+       * what was done before stopping. The orchestrator sends + persists it like a
+       * normal reply. Never produced by an `ask_user` resume (no STOP control there).
+       */
+      kind: 'stopped';
+      text: string;
+    }
   | { kind: 'error' };
 
 /**
@@ -122,6 +137,17 @@ export interface ToolLoopState {
    * `ask_user` resume or a non-status turn is unaffected.
    */
   streamSink?: TurnStreamSink;
+  /**
+   * Optional cooperative STOP controller (Story 14b / ADR 0043): the loop polls it
+   * between rounds AND after each committed write and, when it reports a STOP
+   * request, stops GRACEFULLY — keeping committed writes and returning a
+   * programmatic `stopped` outcome (NO AI call). L3/Redis-blind — the loop only
+   * sees the {@link StopController} port; the turn runner binds it to this turn's
+   * user + correlationId over the StopFlagStore. Absent ⇒ the loop never checks
+   * (e.g. an `ask_user` resume, which carries no STOP control), so it runs exactly
+   * as before.
+   */
+  stopController?: StopController;
 }
 
 /**
@@ -157,6 +183,7 @@ export class ToolLoopService {
     const { user, conversationId, currentMessageText, correlationId } = state;
     const resumeRounds = state.resumeRounds;
     const streamSink = state.streamSink;
+    const stopController = state.stopController;
     // One HandleMap per user turn: the context builder seeds it with an alias
     // per rendered agenda occurrence, and the SAME instance threads into every
     // tool-loop dispatch so those handles resolve when the model later mutates a
@@ -211,6 +238,16 @@ export class ToolLoopService {
         roundtrip < this.config.maxToolRoundtrips;
         roundtrip += 1
       ) {
+        // Cooperative STOP checkpoint #1 — BETWEEN rounds (Story 14b / ADR 0043).
+        // Before spending another model round-trip, honour a STOP the user tapped
+        // since the last round: stop gracefully, KEEP every committed write (no
+        // rollback — they already happened and are not idempotent), and return a
+        // PROGRAMMATIC ledger summary (NO AI call). On round 0 this is a no-op
+        // unless the user somehow stopped before the first model call.
+        if (await this.isStopRequested(stopController, correlationId)) {
+          return this.stoppedResult(rounds, committedWrites, attemptedWrites);
+        }
+
         // The forced tool choice (set by a corrective nudge) applies to THIS
         // round only; clear it immediately so the next round reverts to 'auto'.
         const roundToolChoice = forcedToolChoice;
@@ -353,6 +390,11 @@ export class ToolLoopService {
         const roundResults: ToolRound['toolResults'] = [];
         const steps: ToolStepRecord[] = [];
         const heldConflicts: CollectedHeldConflict[] = [];
+        // Set when the cooperative STOP checkpoint fires AFTER a committed write
+        // mid-round (Story 14b / ADR 0043). We finish recording THIS call's result
+        // and the round's audit (so the just-committed write is in the ledger), then
+        // stop before the next round — never mid-write, never with an unpaired round.
+        let stoppedAfterWrite = false;
 
         for (const toolCall of roundToolCalls) {
           if (SCHEDULE_FETCH_TOOLS.has(toolCall.name)) {
@@ -494,6 +536,22 @@ export class ToolLoopService {
 
             attemptedWrites += delta.attempted;
             committedWrites += delta.committed;
+
+            // Cooperative STOP checkpoint #2 — AFTER a committed write (Story 14b /
+            // ADR 0043). If this call actually committed a write and the user has
+            // since tapped STOP, stop after finishing the round's audit below: the
+            // committed write is KEPT (no rollback) and the remaining tool calls in
+            // this round are skipped so we don't pile on more writes the user asked
+            // to stop. We break (not return) so the round's audit is recorded first
+            // and the just-committed write lands in the summary ledger.
+            if (
+              delta.committed > 0 &&
+              (await this.isStopRequested(stopController, correlationId))
+            ) {
+              stoppedAfterWrite = true;
+
+              break;
+            }
           }
         }
 
@@ -530,6 +588,14 @@ export class ToolLoopService {
             committedWrites,
             attemptedWrites,
           };
+        }
+
+        // STOP fired after a committed write this round (checkpoint #2): the round
+        // audit is now recorded, so stop gracefully with the programmatic ledger
+        // summary. Held precedence above is preserved — a held conflict in the same
+        // round resolves deterministically first; only a clean committed round stops.
+        if (stoppedAfterWrite) {
+          return this.stoppedResult(rounds, committedWrites, attemptedWrites);
         }
       }
 
@@ -586,6 +652,58 @@ export class ToolLoopService {
     return `${prefix}${overlap} — book ${
       held.length === 1 ? 'it' : 'them all'
     } anyway, or cancel?`;
+  }
+
+  /**
+   * Polls the cooperative STOP controller (Story 14b / ADR 0043) at a checkpoint.
+   * Returns false when there is no controller (e.g. an `ask_user` resume) so the
+   * loop runs unchanged. NEVER throws — the controller swallows its own fault and
+   * resolves false, but this also guards belt-and-braces so a STOP-flag read can
+   * never abort the `attempts:1` turn path; a read fault is logged and treated as
+   * "no STOP requested" (the turn simply runs to completion).
+   */
+  private async isStopRequested(
+    stopController: StopController | undefined,
+    correlationId: string,
+  ): Promise<boolean> {
+    if (!stopController) {
+      return false;
+    }
+
+    try {
+      return await stopController.isStopRequested();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.debug(
+        `[cid=${correlationId}] STOP checkpoint read failed; treating as no-stop: ${message}`,
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * Builds the `stopped` {@link ToolLoopResult} (Story 14b / ADR 0043): a graceful
+   * halt that KEEPS every committed write (no rollback) and replies with a
+   * PROGRAMMATIC summary built from the round/step ledger — NO AI call. The audit
+   * trail (`rounds`) and the committed/attempted counters are carried through
+   * unchanged so the orchestrator persists exactly what happened before the stop.
+   */
+  private stoppedResult(
+    rounds: ToolRoundAuditPayload[],
+    committedWrites: number,
+    attemptedWrites: number,
+  ): ToolLoopResult {
+    return {
+      outcome: {
+        kind: 'stopped',
+        text: buildStopSummary(rounds, committedWrites),
+      },
+      rounds,
+      committedWrites,
+      attemptedWrites,
+    };
   }
 
   /**

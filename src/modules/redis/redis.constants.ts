@@ -9,6 +9,16 @@ export const WEBHOOK_QUEUE_NAME = 'assistant-webhook';
 /** Background queue name for post-turn summary + memory-extraction jobs. */
 export const BACKGROUND_QUEUE_NAME = 'assistant-background';
 
+/**
+ * BullMQ queue name for the per-user debounce-drain job (Story 14a / ADR 0042).
+ * A single delayed job per user (stable `jobId`, see {@link debounceJobId}) fires
+ * ~2 s after the LAST inbound in a window and drains that user's buffer into one
+ * combined turn. Re-arming a window removes+re-adds this job so the timer slides
+ * to the latest message; the window's messages live in the Redis buffer (see
+ * {@link debounceBufferKey}), never on the job, so a replaced job never drops one.
+ */
+export const DEBOUNCE_QUEUE_NAME = 'assistant-debounce';
+
 /** Prefix for the at-least-once dedupe guard, keyed by `${vendor}:${dedupeId}`. */
 export const DEDUPE_KEY_PREFIX = 'assistant:dedupe';
 
@@ -100,3 +110,73 @@ export const USER_LOCK_KEY_PREFIX = 'assistant:lock';
  */
 export const userLockKey = (userId: string): string =>
   `${USER_LOCK_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the per-user debounce buffer (Story 14a / ADR 0042), keyed by the
+ * Cue user id. A Redis LIST of JSON-serialized inbound entries in ARRIVAL ORDER
+ * (RPUSH appends): every accepted simple-message inbound (text or already-
+ * transcribed voice) is buffered here while its ~2 s window is open. When the
+ * delayed drain job fires it atomically reads + clears this list (LRANGE+DEL Lua)
+ * and runs ONE combined turn. The buffer — never the BullMQ job — is the source
+ * of truth for the window's messages, so re-arming (replacing the delayed job)
+ * can never drop a buffered message. Disjoint keyspace from the lock / status /
+ * ask keys so the debounce buffer never collides with any other assistant state.
+ */
+export const DEBOUNCE_BUFFER_KEY_PREFIX = 'assistant:debounce:buf';
+
+/**
+ * Builds the per-user debounce-buffer LIST key for a Cue user id. One list per
+ * user accumulates that user's in-window messages in arrival order.
+ */
+export const debounceBufferKey = (userId: string): string =>
+  `${DEBOUNCE_BUFFER_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the per-user/per-turn cooperative STOP flag (Story 14b / ADR 0043),
+ * keyed by the Cue user id AND the in-flight turn's id (the correlationId). When
+ * the user taps the STOP control's inline button (`stop:` callback) the handler
+ * SETs this key (short TTL); the tool loop checks it between rounds and after each
+ * committed write and, when set, stops GRACEFULLY — keeping committed writes and
+ * replying with a programmatic ledger summary (NO AI call). Keying by turn id is
+ * what makes the flag turn-scoped: a stale flag from a previous turn can never
+ * abort a fresh turn (a fresh turn has a new correlationId), and the turn clears
+ * its own key on exit. Disjoint keyspace from the lock / status / ask / debounce
+ * keys so the STOP flag never collides with any other assistant state.
+ */
+export const STOP_FLAG_KEY_PREFIX = 'assistant:stop';
+
+/**
+ * Builds the per-user/per-turn STOP-flag key (Story 14b / ADR 0043). Scoped by
+ * BOTH the user id and the turn id (correlationId) so the flag aborts only the
+ * exact in-flight turn the STOP control belongs to — never a later, fresh turn.
+ */
+export const stopFlagKey = (userId: string, turnId: string): string =>
+  `${STOP_FLAG_KEY_PREFIX}:${userId}:${turnId}`;
+
+/**
+ * Builds the STABLE per-user BullMQ jobId for the debounce-drain job (Story 14a /
+ * ADR 0042). Because the jobId is keyed only by user, re-arming a window targets
+ * the SAME job: the coordinator removes the still-delayed job and re-adds it with
+ * a fresh delay, sliding the window to the latest inbound. One in-flight drain
+ * job per user at a time; different users never share a drain job.
+ *
+ * NOTE: BullMQ forbids `:` in a custom job id (it reserves the colon for its own
+ * internal key composition and throws `Custom Id cannot contain :`), so the
+ * separator here is a hyphen — NOT the colon used by the Redis key builders above.
+ */
+export const debounceJobId = (userId: string): string => `debounce-${userId}`;
+
+/**
+ * Builds a UNIQUE per-arm BullMQ jobId for a queue-after re-poll (Story 14a / ADR
+ * 0042). Unlike {@link debounceJobId} (the stable window job re-armed by the
+ * inbound path), the queue-after re-arm fires from INSIDE the still-active drain
+ * job — and under real BullMQ `remove()` on an active job is a no-op and `add()`
+ * with an existing jobId is IGNORED, so re-using the stable id would silently fail
+ * to schedule the re-poll and stall the queued-after batch until another inbound.
+ * A fresh unique id (with the per-arm `nonce`) is one BullMQ WILL create, so the
+ * re-poll always actually runs after the in-flight turn frees the lock — with no
+ * extra inbound. Hyphen-separated for the same reason as {@link debounceJobId}
+ * (BullMQ forbids `:` in a custom job id).
+ */
+export const debounceAfterJobId = (userId: string, nonce: string): string =>
+  `debounce-after-${userId}-${nonce}`;

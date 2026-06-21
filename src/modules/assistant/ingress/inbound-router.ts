@@ -40,6 +40,18 @@ export const CANCEL_CALLBACK_PREFIX = `${ConflictCallbackAction.CANCEL}:`;
 export const ASK_CALLBACK_PREFIX = 'ask:';
 
 /**
+ * Callback-data prefix (with trailing colon) that marks a STOP-control tap (Story
+ * 14b / ADR 0043). The user taps the separate STOP message's inline button while a
+ * turn runs; the callback data is `stop:<turnId>` (the in-flight turn's
+ * correlationId). Disjoint from the conflict (`confirm:`/`cancel:`) and `ask:`
+ * prefixes at the wire level, so STOP never collides with the deterministic
+ * conflict path or the `ask_user` resume. Resolved by a deterministic no-LLM
+ * handler that acknowledges the tap and arms the per-user/per-turn STOP flag — the
+ * running turn's loop polls the flag at its cooperative checkpoints.
+ */
+export const STOP_CALLBACK_PREFIX = 'stop:';
+
+/**
  * A slash command → the deterministic command handler (no LLM). Carries the
  * normalized command name + args verbatim.
  */
@@ -79,6 +91,19 @@ export interface AnswerFlow {
 }
 
 /**
+ * A STOP-control button tap (Story 14b / ADR 0043) → resolved deterministically,
+ * the model is NEVER re-invoked. The handler acknowledges the tap and arms the
+ * per-user/per-turn STOP flag the running turn's loop polls. `turnId` is the
+ * in-flight turn's correlationId parsed from the `stop:<turnId>` callback data, so
+ * the flag is scoped to exactly the turn the STOP control belonged to.
+ */
+export interface StopControlFlow {
+  kind: 'stop_control';
+  callbackId: string;
+  turnId: string;
+}
+
+/**
  * Any other text or voice message with no pending question → a fresh turn
  * (converges at the turn runner). Carries the text (a voice transcript is
  * supplied by the consumer after STT) and the originating kind.
@@ -90,13 +115,14 @@ export interface SimpleMessageFlow {
 }
 
 /**
- * The four mutually-exclusive inbound flows. A discriminated union on `kind` so
+ * The five mutually-exclusive inbound flows. A discriminated union on `kind` so
  * the consumer's dispatch is exhaustive and the divergence gate is a single
  * `switch`.
  */
 export type InboundFlow =
   | CommandFlow
   | ConflictConfirmFlow
+  | StopControlFlow
   | AnswerFlow
   | SimpleMessageFlow;
 
@@ -106,9 +132,11 @@ export type InboundFlow =
  *  1. Command (slash) → CommandFlow (no LLM).
  *  2. Callback whose data starts with `confirm:`/`cancel:` → ConflictConfirmFlow
  *     (ADR 0006, deterministic, NO model).
- *  3. Callback whose data starts with `ask:` → AnswerFlow (button answer).
- *  4. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
- *  5. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
+ *  3. Callback whose data starts with `stop:` → StopControlFlow (Story 14b,
+ *     deterministic, NO model — arms the per-turn STOP flag).
+ *  4. Callback whose data starts with `ask:` → AnswerFlow (button answer).
+ *  5. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
+ *  6. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
  *
  * Voice updates are routed by their transcript: the consumer transcribes first
  * and passes the resulting text, so a voice note is classified exactly like a
@@ -145,6 +173,14 @@ export const classifyFlow = async (
         kind: 'conflict_confirm',
         callbackId: normalized.callbackId,
         callbackData,
+      };
+    }
+
+    if (callbackData.startsWith(STOP_CALLBACK_PREFIX)) {
+      return {
+        kind: 'stop_control',
+        callbackId: normalized.callbackId,
+        turnId: callbackData.slice(STOP_CALLBACK_PREFIX.length),
       };
     }
 

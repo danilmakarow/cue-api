@@ -7,7 +7,11 @@
 
 import { HandleMap } from './tools/handle-map';
 import { User } from '@/modules/database/entities';
-import { ExternalVendor } from '@/modules/external-vendor/external-vendor.types';
+import {
+  ChatType,
+  ExternalVendor,
+  InboundKind,
+} from '@/modules/external-vendor/external-vendor.types';
 
 /**
  * The scope a recurring edit (update / delete) resolves to — the three
@@ -57,6 +61,42 @@ export interface WebhookQueueJob {
    * update shares a single greppable id.
    */
   correlationId: string;
+}
+
+/**
+ * The full params an `ask_user` answer/resume turn needs to run under the per-user
+ * lock (Story 14a / ADR 0042 — answer-path serialization). UNLIKE a simple
+ * message, an answer is NEVER combined with anything, so it rides on the
+ * queue-after BullMQ job itself (one answer per job) rather than in the Redis
+ * buffer; the queue-after re-poll re-carries this verbatim. `origin` is the
+ * `answer_callback` / `answer_text` resume origin; `callbackId` is present only
+ * for a button answer (so the resume can acknowledge it).
+ */
+export interface DebounceAnswerPayload {
+  text: string;
+  kind: InboundKind;
+  vendorChatId: string;
+  correlationId: string;
+  origin: 'answer_callback' | 'answer_text';
+  callbackId: string | null;
+  chatType?: ChatType;
+  languageCode?: string;
+}
+
+/**
+ * The delayed BullMQ job that fires when a user's debounce window closes (Story
+ * 14a / ADR 0042). For a SIMPLE-message drain it carries ONLY the user id — the
+ * window's messages live in the Redis buffer ({@link MessageBufferStore}), never
+ * on the job, so replacing the (stable-id) window job to re-arm can never drop a
+ * buffered message. For an `ask_user` ANSWER that queued-after a busy lock it also
+ * carries the {@link DebounceAnswerPayload} (an answer is never combined, so it
+ * rides the job directly); such a job uses a UNIQUE id so it actually schedules
+ * under real BullMQ even when armed from inside the still-active turn.
+ */
+export interface DebounceQueueJob {
+  userId: string;
+  /** Present only for a queued-after `ask_user` answer re-poll. */
+  answer?: DebounceAnswerPayload;
 }
 
 /**
@@ -242,6 +282,29 @@ export interface TurnStreamSink {
    * a missing/empty recap simply leaves the current frame.
    */
   showRecap(recap: string): void;
+}
+
+/**
+ * The L4-facing port the tool loop (Story 14b / ADR 0043) polls at its cooperative
+ * STOP checkpoints — between rounds AND after each committed write — WITHOUT the
+ * loop knowing about Redis or the user/turn keying (the loop stays L3/Redis-blind,
+ * mirroring {@link TurnStreamSink}). The turn runner supplies a concrete
+ * implementation bound to this turn's user + correlationId over the
+ * {@link StopFlagStore}; a turn with no STOP control (e.g. an `ask_user` resume)
+ * passes a controller that always answers false (or none at all).
+ *
+ * **Degrade-never-throw:** the implementation MUST swallow its own faults and
+ * resolve to `false` on any error, because the inbound turn is `attempts:1` — a
+ * STOP-flag read fault must never abort a turn the user did not ask to stop, and
+ * never throw into the loop.
+ */
+export interface StopController {
+  /**
+   * Resolves true when the user has requested STOP for THIS turn. Polled at each
+   * cooperative checkpoint; on true the loop stops gracefully, keeping committed
+   * writes and replying with a programmatic ledger summary (NO AI call).
+   */
+  isStopRequested(): Promise<boolean>;
 }
 
 /**

@@ -62,11 +62,19 @@ const buildHarness = () => {
   // The thin command-surface facade (ADR 0036). `handleCallback` loads the
   // conversation and delegates to the conflict resolver — the consumer's entry
   // point. The commandHandler is unused on this path.
+  // Story 14b (ADR 0043): the STOP-flag store. Unused on the conflict-confirm path,
+  // but the facade's STOP-control handler arms it — exposed so that test can assert.
+  const stopFlags = {
+    arm: jest.fn().mockResolvedValue(undefined),
+    isStopRequested: jest.fn().mockResolvedValue(false),
+    clear: jest.fn().mockResolvedValue(undefined),
+  };
   const service = new AssistantService(
     { handle: jest.fn() } as never,
     conversationStore as never,
     replyPresenter as never,
     conflictResolver as never,
+    stopFlags as never,
   );
 
   return {
@@ -77,6 +85,7 @@ const buildHarness = () => {
     config,
     taskService,
     conversationMessageDatabaseService,
+    stopFlags,
   };
 };
 
@@ -307,5 +316,38 @@ describe('ConflictResolverService (ADR 0006 deterministic callback)', () => {
     // Honest partial result: what succeeded AND what to retry.
     expect(reply.text).toMatch(/booked "Lesson A"/);
     expect(reply.text).toMatch(/couldn't apply "Lesson B"/i);
+  });
+
+  describe('handleStopControl (Story 14b / ADR 0043)', () => {
+    it('acknowledges the tap and arms the per-user/per-turn STOP flag (no model, no reply)', async () => {
+      const harness = buildHarness();
+
+      await harness.service.handleStopControl(USER, {
+        callbackId: 'cb-stop',
+        turnId: 'turn-xyz',
+      });
+
+      // The button spinner is stopped and the STOP flag is armed for THIS turn.
+      expect(harness.vendor.acknowledgeCallback).toHaveBeenCalledWith(
+        'cb-stop',
+      );
+      expect(harness.stopFlags.arm).toHaveBeenCalledWith(USER.id, 'turn-xyz');
+      // Deterministic, no-LLM: no model call, no text reply is sent by the handler.
+      expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('still acknowledges but arms nothing when the turn id is empty (garbled callback)', async () => {
+      const harness = buildHarness();
+
+      await harness.service.handleStopControl(USER, {
+        callbackId: 'cb-stop',
+        turnId: '',
+      });
+
+      expect(harness.vendor.acknowledgeCallback).toHaveBeenCalledWith(
+        'cb-stop',
+      );
+      expect(harness.stopFlags.arm).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,6 +1,10 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { buildAskKeyboard, buildHeldKeyboard } from './quick-reply.builder';
+import {
+  buildAskKeyboard,
+  buildHeldKeyboard,
+  buildStopKeyboard,
+} from './quick-reply.builder';
 import { AskUserOption } from '../assistant.types';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
@@ -106,6 +110,68 @@ export class ReplyPresenter {
         buttons: buildHeldKeyboard(heldCount, token),
       },
     );
+  }
+
+  /**
+   * Sends the in-turn STOP control (Story 14b / ADR 0043): a SEPARATE real message
+   * (drafts carry no buttons) carrying a single STOP button whose callback data is
+   * `stop:<turnId>`. Shown while the turn runs; the returned vendor message id lets
+   * the turn runner delete it when the turn ends ({@link removeStopControl}).
+   * Swallows a send failure with a log (mirroring {@link sendText}) and returns null
+   * — a missing STOP control simply means the turn cannot be cooperatively stopped,
+   * never a broken turn.
+   */
+  async sendStopControl(
+    vendorChatId: string,
+    turnId: string,
+    correlationId?: string,
+  ): Promise<string | null> {
+    try {
+      const ref = await this.vendor.sendActions(
+        { vendorChatId },
+        {
+          text: 'Working on it…',
+          buttons: buildStopKeyboard(turnId),
+        },
+      );
+
+      return ref.vendorMessageId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] Failed to send STOP control to ${vendorChatId}: ${message}`,
+      );
+
+      return null;
+    }
+  }
+
+  /**
+   * Removes the in-turn STOP control message once the turn ends (Story 14b / ADR
+   * 0043), so a finished turn leaves no dangling STOP button. A no-op when no
+   * control was sent (null id). Swallows a delete failure with a log — a stale STOP
+   * button is harmless (its callback arms a flag for an already-finished, turn-
+   * scoped key that nothing polls).
+   */
+  async removeStopControl(
+    vendorChatId: string,
+    vendorMessageId: string | null,
+    correlationId?: string,
+  ): Promise<void> {
+    if (!vendorMessageId) {
+      return;
+    }
+
+    try {
+      await this.vendor.deleteMessage({ vendorChatId }, vendorMessageId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.debug(
+        `[cid=${correlationId ?? 'none'}] Failed to remove STOP control ${vendorMessageId} in ${vendorChatId}: ${message}`,
+      );
+    }
   }
 
   /**

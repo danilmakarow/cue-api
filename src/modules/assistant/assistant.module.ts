@@ -11,6 +11,7 @@ import { CommandHandlerService } from './commands/command-handler.service';
 import { ConflictResolverService } from './conflict/conflict-resolver.service';
 import { HeldConflictStore } from './conflict/held-conflict.store';
 import { ContextBuilderService } from './context-builder.service';
+import { DebounceConsumer } from './debounce.consumer';
 import { LinkingService } from './linking.service';
 import { ToolLoopService } from './orchestration/tool-loop.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
@@ -18,18 +19,24 @@ import { StatusAnimatorService } from './reply/status-animator.service';
 import { StatusSessionStore } from './reply/status-session.store';
 import { ScheduleReaderService } from './schedule-reader.service';
 import { ConversationStore } from './session/conversation.store';
+import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
+import { MessageBufferStore } from './session/message-buffer.store';
 import {
   PENDING_INTERACTION_STORE,
   PendingInteractionService,
 } from './session/pending-interaction.store';
 import { PendingQuestionCleanupService } from './session/pending-question-cleanup.service';
+import { StopFlagStore } from './session/stop-flag.store';
 import { TurnAuditStore } from './session/turn-audit.store';
 import { TurnRunnerService } from './session/turn-runner.service';
 import { UserLockStore } from './session/user-lock.store';
 import { ToolDispatcherService } from './tools/tool-dispatcher.service';
 import { WebhookRegistrarService } from './webhook-registrar.service';
 import { WebhookConsumer } from './webhook.consumer';
-import { WEBHOOK_QUEUE_NAME } from '../redis/redis.constants';
+import {
+  DEBOUNCE_QUEUE_NAME,
+  WEBHOOK_QUEUE_NAME,
+} from '../redis/redis.constants';
 import { AiModule } from '@/modules/ai/ai.module';
 import { AlertModule } from '@/modules/alert/alert.module';
 import { CalendarModule } from '@/modules/calendar/calendar.module';
@@ -66,6 +73,16 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
       // (false) / removeOnComplete (true) intentionally inherit the global.
       defaultJobOptions: { attempts: 1 },
     }),
+    BullModule.registerQueue({
+      // The per-user debounce-drain queue (Story 14a / ADR 0042). attempts:1 for
+      // the same reason as the webhook queue — a drained turn commits
+      // non-idempotent calendar writes, so a replay would double-book (ADR-0026).
+      // The coordinator degrades never-throw and re-buffers on fault, so a single
+      // attempt never loses the batch. A stable per-user jobId means a re-armed
+      // window replaces the pending delayed job rather than stacking duplicates.
+      name: DEBOUNCE_QUEUE_NAME,
+      defaultJobOptions: { attempts: 1 },
+    }),
   ],
   controllers: [AssistantWebhookController],
   providers: [
@@ -91,6 +108,9 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     PendingInteractionService,
     PendingQuestionCleanupService,
     UserLockStore,
+    StopFlagStore,
+    MessageBufferStore,
+    DebounceCoordinatorService,
     {
       // The router's read port and the orchestrator's write side are the SAME
       // instance — the token aliases the concrete service so `hasPendingQuestion`
@@ -99,6 +119,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
       useExisting: PendingInteractionService,
     },
     WebhookConsumer,
+    DebounceConsumer,
     WebhookRegistrarService,
   ],
 })

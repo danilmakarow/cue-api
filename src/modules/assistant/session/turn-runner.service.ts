@@ -4,6 +4,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ConversationStore } from './conversation.store';
 import { PendingInteractionService } from './pending-interaction.store';
+import { StopFlagStore } from './stop-flag.store';
 import { TurnAuditStore } from './turn-audit.store';
 import {
   HeldConflictBatch,
@@ -194,6 +195,7 @@ export class TurnRunnerService {
     private readonly replyPresenter: ReplyPresenter,
     private readonly heldConflictStore: HeldConflictStore,
     private readonly statusAnimator: StatusAnimatorService,
+    private readonly stopFlags: StopFlagStore,
   ) {}
 
   /**
@@ -382,6 +384,25 @@ export class TurnRunnerService {
   }
 
   /**
+   * Builds the loop-facing {@link StopController} (Story 14b / ADR 0043) bound to
+   * THIS turn's user + correlationId over the {@link StopFlagStore}, so the L4 loop
+   * polls the per-user/per-turn STOP flag at its cooperative checkpoints WITHOUT
+   * knowing about Redis or the keying (the loop stays L3/Redis-blind). The store
+   * already degrades never-throw (a Redis fault reads as "no STOP"), so the loop's
+   * `attempts:1` posture is preserved. Used only on a fresh model-driven turn; an
+   * `ask_user` resume passes no controller (it carries no STOP control).
+   */
+  private stopControllerFor(
+    userId: string,
+    correlationId: string,
+  ): { isStopRequested: () => Promise<boolean> } {
+    return {
+      isStopRequested: (): Promise<boolean> =>
+        this.stopFlags.isStopRequested(userId, correlationId),
+    };
+  }
+
+  /**
    * Handles a text or voice-transcript turn end to end: open the live-status
    * animation, persist the user turn, build context, run the tool loop, then reply
    * / hold / report a graceful failure, and (on a completed reply) fire the
@@ -395,6 +416,16 @@ export class TurnRunnerService {
       params.vendorChatId,
       params.chatType,
       params.languageCode,
+    );
+    // The in-turn STOP control (Story 14b / ADR 0043): a SEPARATE real message
+    // (drafts carry no buttons) carrying a STOP button keyed `stop:<correlationId>`,
+    // shown while the turn runs. Its tap arms the per-user/per-turn STOP flag the
+    // loop polls at its cooperative checkpoints. Sent best-effort (a null id just
+    // means no control was shown); removed + the flag cleared in the `finally`.
+    const stopControlMessageId = await this.replyPresenter.sendStopControl(
+      params.vendorChatId,
+      correlationId,
+      correlationId,
     );
 
     try {
@@ -417,6 +448,10 @@ export class TurnRunnerService {
         // (Story 13 / ADR 0041). The sink wraps this turn's StatusAnimation and is
         // degrade-never-throw; the real reply below still persists the answer.
         streamSink: this.streamSinkFor(status),
+        // Cooperative STOP (Story 14b / ADR 0043): the loop polls this turn's STOP
+        // flag at each checkpoint (between rounds + after each committed write) and
+        // halts gracefully — keeping committed writes — when the user tapped STOP.
+        stopController: this.stopControllerFor(user.id, correlationId),
       });
 
       await this.finishTurn(
@@ -427,6 +462,16 @@ export class TurnRunnerService {
         correlationId,
       );
     } finally {
+      // Tear down the STOP surface on EVERY exit path: clear the turn-scoped STOP
+      // flag (so a STOP tapped after the loop finished never lingers — the key is
+      // also turn-scoped, so this is belt-and-braces) and remove the control
+      // message. Both degrade never-throw; ordered before the status finalize.
+      await this.stopFlags.clear(user.id, correlationId);
+      await this.replyPresenter.removeStopControl(
+        params.vendorChatId,
+        stopControlMessageId,
+        correlationId,
+      );
       await status.finalize();
     }
   }
@@ -519,6 +564,32 @@ export class TurnRunnerService {
         CORRECTION_EXHAUSTED_REPLY,
         vendorMessageId,
       );
+
+      return;
+    }
+
+    // STOP cooperative cancellation (Story 14b / ADR 0043): the user tapped STOP
+    // and the loop halted gracefully, KEEPING committed writes. The text is the
+    // loop's PROGRAMMATIC ledger summary (no AI call), so it is sent + persisted
+    // verbatim — NOT run through the false-success guard (it is a deterministic
+    // record of what was done, never a model success claim). Background jobs run
+    // like any reply so the summary/memory reflect what committed before the stop.
+    if (outcome.kind === 'stopped') {
+      const vendorMessageId = await this.replyPresenter.sendText(
+        vendorChatId,
+        outcome.text,
+        correlationId,
+      );
+
+      await this.persistMessage(
+        conversation,
+        ConversationMessageRole.ASSISTANT,
+        ConversationMessageContentType.TEXT,
+        outcome.text,
+        vendorMessageId,
+      );
+
+      this.triggerBackgroundJobs(conversation.id, user.id);
 
       return;
     }

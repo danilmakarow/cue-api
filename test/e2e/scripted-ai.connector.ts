@@ -72,6 +72,19 @@ export class ScriptedAiConnector extends AiConnector {
   private readonly requests: CompletionRequest[] = [];
 
   /**
+   * Optional gate a test installs to HOLD the next MAIN model round until it
+   * releases (so a turn can be kept in-flight — holding the per-user lock — while
+   * a second message's drain fires). When set, the first MAIN `complete`/`stream`
+   * resolves `entered` (signalling the turn is now in-flight) and then awaits
+   * `release` before returning its scripted result; subsequent rounds run normally.
+   */
+  private gate: {
+    release: Promise<void>;
+    enteredResolve: () => void;
+    consumed: boolean;
+  } | null = null;
+
+  /**
    * Queues the scripted results for the NEXT turn (call once per scenario before
    * POSTing the webhook). Replaces any leftover script so turns never bleed.
    */
@@ -85,10 +98,49 @@ export class ScriptedAiConnector extends AiConnector {
     return this.requests;
   }
 
-  /** Clears the script and captured requests between tests. */
+  /** Clears the script, captured requests, and any in-flight gate between tests. */
   reset(): void {
     this.queue = [];
     this.requests.length = 0;
+    this.gate = null;
+  }
+
+  /**
+   * Installs a hold on the NEXT main model round and returns `{ entered, release
+   * }`: `entered` resolves once the gated round is reached (the turn is now
+   * in-flight and holding the per-user lock), and calling `release()` lets that
+   * round return its scripted result so the turn finishes. Lets a test keep one
+   * turn in-flight while a second message's drain fires, to exercise queue-after.
+   */
+  installGate(): { entered: Promise<void>; release: () => void } {
+    let releaseFn: () => void = () => undefined;
+    const release = new Promise<void>((resolve) => {
+      releaseFn = resolve;
+    });
+    let enteredResolve: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      enteredResolve = resolve;
+    });
+
+    this.gate = { release, enteredResolve, consumed: false };
+
+    return { entered, release: releaseFn };
+  }
+
+  /**
+   * Awaits the installed gate on the first MAIN round only (marks it consumed so
+   * later rounds run normally). Signals `entered` so the test knows the turn is
+   * in-flight, then blocks on `release`. A no-op when no gate is installed.
+   */
+  private async passGate(): Promise<void> {
+    if (!this.gate || this.gate.consumed) {
+      return;
+    }
+
+    this.gate.consumed = true;
+    this.gate.enteredResolve();
+
+    await this.gate.release;
   }
 
   /**
@@ -117,6 +169,10 @@ export class ScriptedAiConnector extends AiConnector {
         },
       };
     }
+
+    // Hold the first MAIN round if a test installed a gate, so the turn stays
+    // in-flight (holding the per-user lock) until the test releases it.
+    await this.passGate();
 
     const next = this.queue.shift();
 

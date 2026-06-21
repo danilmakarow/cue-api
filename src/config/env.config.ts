@@ -111,6 +111,25 @@ export const environmentSchema = z
     // below enforces this at boot.
     ASSISTANT_USER_LOCK_TTL_MS: z.coerce.number().int().positive(),
     ASSISTANT_USER_LOCK_RENEW_MS: z.coerce.number().int().positive(),
+    // Inbound debounce window (Story 14a, ADR 0042). The per-user buffer window
+    // (ms, ~2000) a freshly accepted simple message waits before its turn runs;
+    // each new inbound RE-ARMS it (the delayed drain job slides later) and appends
+    // to the buffer, so a single thought split across bubbles becomes ONE turn by
+    // concatenation in arrival order. QUEUE_AFTER_MS is the short re-arm delay used
+    // when the drain finds the per-user lock already held (a turn in flight): the
+    // drained batch is re-buffered and re-scheduled this far out so it runs AFTER
+    // the in-flight turn instead of racing or dropping it. Both must be positive;
+    // QUEUE_AFTER_MS should stay well under the user-lock TTL so a queued-after
+    // batch re-polls promptly once the lock frees.
+    ASSISTANT_DEBOUNCE_WINDOW_MS: z.coerce.number().int().positive(),
+    ASSISTANT_DEBOUNCE_QUEUE_AFTER_MS: z.coerce.number().int().positive(),
+    // Cooperative STOP flag (Story 14b, ADR 0043) TTL (seconds): how long a STOP
+    // request set by the user's tap stays armed in Redis. It only needs to outlive
+    // one in-flight turn (the loop checks it between rounds + after each write and
+    // the turn clears its own key on exit), so keep it short — a generous multiple
+    // of the user-lock TTL is plenty so a STOP tapped just before a checkpoint is
+    // never missed, while a forgotten flag still self-expires.
+    ASSISTANT_STOP_FLAG_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_LINK_NONCE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_DEDUPE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_RECENT_WINDOW_SIZE: z.coerce.number().int().positive(),
