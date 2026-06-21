@@ -52,5 +52,5 @@ Rejected — destructive and irreversible; a replace must be gated behind an exp
 
 - The decision this supersedes (layer 4 only): [ADR 0006](0006-assistant-schedule-context-and-conflicts.md)
 - The escalation path it relies on: [ADR 0010](0010-assistant-ask-user-stateful-resume.md) · the terminal-turn classifier: [ADR 0009](0009-assistant-narration-redrive.md)
-- Design + acceptance criteria: [ai-workflow-tasks Story 15](../specs/ai-workflow-tasks.md) · research: [ai-workflow-v2-research §D](../specs/ai-workflow-v2-research.md)
+- Plan + Story 15 acceptance criteria (Corrected Assumption 2 — safety-critical): [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 </content>

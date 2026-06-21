@@ -1,6 +1,6 @@
 # Assistant tool-loop re-drive — "Target" (validate → feedback → retry ≤5 → escalate)
 
-> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · backlog → [ai-workflow-tasks](ai-workflow-tasks.md) (this is **Story 1**, + **Story 2** batch `create_tasks`). This file remains the **deep design** behind those stories; decision recorded in [ADR 0009](../adr/0009-assistant-narration-redrive.md).
+> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · v2 forward plan → [ai-workflow-v2-plan](ai-workflow-v2-plan.md). This file remains the **deep design** behind Story 1 (narration re-drive) + Story 2 (batch `create_tasks`), both **shipped**; decision recorded in [ADR 0009](../adr/0009-assistant-narration-redrive.md).
 
 - **Status**: Draft (design approved in principle; two product decisions locked — see [Decisions](#decisions-locked))
 - **Last updated**: 2026-06-18

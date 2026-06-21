@@ -54,7 +54,7 @@ Rejected — the dispatcher needs runtime parsing and recoverable errors, which 
 
 ## References
 
-- The story (acceptance criteria, out-of-scope, technical notes): [ai-workflow-tasks — Story 4](../specs/ai-workflow-tasks.md#story-4--buildtool-contract--single-source-zod-schemas)
+- Story 4 (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)
 - Deep design — *Does the tool set change?* (single source of truth) + the file layout: [assistant-layered-architecture](../specs/assistant-layered-architecture.md#does-the-tool-set-sent-to-the-model-change)
 - Cache breakpoint #1 the stable order preserves: [ADR 0004](0004-assistant-prompt-composition-and-caching.md)
 - Every-field-`.describe()` requirement: [ADR 0016](0016-assistant-ai-comms-audit-hardening.md)

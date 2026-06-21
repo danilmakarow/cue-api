@@ -8,7 +8,7 @@ The code is the source of truth for **behavior**.
 - **`architecture.md`** — one-page system overview. The 10,000-ft view a new contributor reads on day one. Updated rarely.
 - **`adr/`** — Architecture Decision Records. One file per decision. Immutable once accepted; supersede with a new ADR rather than editing in place.
 - **`specs/`** — Design docs. One file per significant feature or system. Written *before* a non-trivial implementation, updated as the design evolves, archived when superseded.
-- **`tasks/`** — Implementation work items (stories) broken out of a spec when it's ready to build. See [`tasks/README.md`](tasks/README.md).
+- **`tasks/`** — Implementation work items (stories) broken out of a spec when it's ready to build. See [`tasks/`](tasks/).
 - **`api/openapi.yaml`** — Machine-readable HTTP contract. The bridge to [cue-ios](../../cue-ios/). Source of truth for endpoints, request/response shapes, and status codes.
 
 ## When to write what
@@ -17,7 +17,7 @@ The code is the source of truth for **behavior**.
 |---|---|
 | Architectural decision (DB choice, transport, schema convention) | New [`adr/NNNN-*.md`](adr/) |
 | Designing a new feature or non-trivial subsystem | New [`specs/<feature>.md`](specs/) **before** coding |
-| Breaking a ready spec into buildable stories | New [`tasks/<feature>-N-*.md`](tasks/) |
+| Breaking a ready spec into buildable stories | New `tasks/<feature>-N-*.md` (see [`tasks/`](tasks/)) |
 | Adding/changing an HTTP endpoint | Update [`api/openapi.yaml`](api/openapi.yaml) in the same PR |
 | Onboarding context that's neither a decision nor a feature | Update [`architecture.md`](architecture.md) |
 | One-off note for *one* PR | The PR description — not a doc |

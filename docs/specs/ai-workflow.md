@@ -4,16 +4,16 @@
 - **Last updated**: 2026-06-20
 - **Owner**: @danil
 - **Related ADRs**: [0003 — LLM provider](../adr/0003-assistant-llm-provider-anthropic.md) · [0004 — prompt composition & caching](../adr/0004-assistant-prompt-composition-and-caching.md) · [0005 — conversation memory model](../adr/0005-assistant-conversation-memory-model.md) · [0006 — schedule context & conflicts](../adr/0006-assistant-schedule-context-and-conflicts.md) · [0007 — provider connector abstraction](../adr/0007-provider-connector-abstraction.md) · [0010 — stateful `ask_user` resume](../adr/0010-assistant-ask-user-stateful-resume.md) · [0021 — real-request e2e harness](../adr/0021-assistant-e2e-real-request-harness.md)
-- **The backlog that evolves this**: **[ai-workflow-tasks](ai-workflow-tasks.md)** — every planned enhancement (re-drive, `ask_user`, batch tools, layered refactor) as a ready-to-pick story.
+- **The forward plan that evolves this**: **[ai-workflow-v2-plan](ai-workflow-v2-plan.md)** — the v2 (Stories 10–18) execution plan. The v1 enhancements (re-drive, `ask_user`, batch tools, layered refactor) are all **shipped** and described as-built below.
 - **Supersedes**: `assistant-ai-communication-flow.md` (folded in here) and the *shipped* half of `assistant-task-tools.md`.
 
 ## Purpose
 
 This is the single, current **map of how a Telegram message becomes calendar mutations and a reply** — every technique, cap, retry, tool, and guard the assistant uses **today**. It is descriptive. The original [telegram-ai-assistant](telegram-ai-assistant.md) spec is the *design intent*; this is the *as-built behaviour*, which has since diverged in places (notably the tool names — the original spec says `create_event`, the code ships `create_task`).
 
-> **Known gap, tracked, not yet fixed:** §13 documents a confirmed production failure — the model narrates *"Создаю все семь…"* and saves nothing. The fix (narration re-drive) is **Story 1** in [ai-workflow-tasks](ai-workflow-tasks.md).
+> **§13 documents the historical failure mode** — the model narrated *"Создаю все семь…"* and saved nothing. The fix (narration re-drive, Story 1) **shipped** ([ADR 0009](../adr/0009-assistant-narration-redrive.md)); §13 is retained as the rationale for the re-drive loop.
 
-Primary code: `src/modules/assistant/` (orchestrator `assistant.service.ts`), `src/modules/ai/` (connector), `src/modules/stt/` (voice). Provider-neutral types in `src/modules/ai/ai.types.ts`.
+Primary code: `src/modules/assistant/` — orchestration now lives in the Story 8 layer files (commit ebd5ae3): `ingress/inbound-router.ts`, `session/turn-runner.service.ts`, `orchestration/tool-loop.service.ts` (+ `terminal-classifier.ts`, `correction-driver.ts`, `write-ledger.ts`), `reply/reply-presenter.service.ts`, `conflict/conflict-resolver.service.ts`. `assistant.service.ts` is now a **134-line thin facade** — only `handleCommand` + `handleCallback`, delegating into those layers. Also `src/modules/ai/` (connector), `src/modules/stt/` (voice); provider-neutral types in `src/modules/ai/ai.types.ts`.
 
 ---
 
@@ -58,7 +58,7 @@ The pipeline is **two-phase on purpose**: the HTTP request only authenticates an
 | **Dedupe** | `webhook.consumer.ts` | `jobId` collapses duplicate deliveries at the queue; a Redis SET-NX semantic guard (`ASSISTANT_DEDUPE_TTL_SECONDS`) is acquired per update and **released on throw** so a genuine retry re-acquires. |
 | **Resolve** | `webhook.consumer.ts` | `telegramChatId → TelegramLink → User`. Unlinked → linking flow, stop (no LLM). |
 | **Normalise** | `webhook.consumer.ts` | text → as-is · voice → download OGG/Opus → STT → `voice_transcript` · slash command → deterministic handler (no LLM). |
-| **Orchestrate** | `assistant.service.ts` `handleText` | persist the USER turn → `runToolLoop` → reply / hold / error → persist ASSISTANT turn → fire background jobs. |
+| **Orchestrate** | `session/turn-runner.service.ts` `handleText` (→ `orchestration/tool-loop.service.ts` `run`) | persist the USER turn → tool loop → reply / hold / error → persist ASSISTANT turn → fire background jobs. |
 
 `correlationId` is threaded controller → queue → consumer → loop → connector `traceId` (logged, never sent to the provider).
 
@@ -116,7 +116,7 @@ One `HandleMap` is created per turn and threaded through the context builder (wh
 The loop, bounded by `ASSISTANT_MAX_TOOL_ROUNDTRIPS`:
 
 1. `ai.complete({ system, messages, tools, toolRounds, features, traceId })` — **one stateless round-trip** (ADR 0007). Text and tool calls can coexist in the result.
-2. **Continue / terminal split** (`assistant.service.ts:350-363`) — **accepted hardening (ai-comms audit A1, [ADR 0016](../adr/0016-assistant-ai-comms-audit-hardening.md)):**
+2. **Continue / terminal split** (`orchestration/tool-loop.service.ts` `run`, with the terminal decision in `orchestration/terminal-classifier.ts` and the re-drive in `orchestration/correction-driver.ts`) — **accepted hardening (ai-comms audit A1, [ADR 0016](../adr/0016-assistant-ai-comms-audit-hardening.md)):**
    - **Continue signal = content scan.** The loop continues **iff the turn emitted tool calls** (`toolCalls.length > 0`), **not** gated on `stopReason`. The old `stopReason !== TOOL_USE` gate is dropped, so a turn carrying `tool_use` blocks under another stop reason (e.g. `MAX_TOKENS`, when the model is cut off mid tool-call burst) is **still dispatched** rather than dropped on the floor with a truncated reply.
    - **Honest terminal branch (no tool calls).** On a true terminal, branch on `stopReason` **before** the generic return (splitting today's overloaded `result.text ?? ROUNDTRIP_CEILING_REPLY`): `MAX_TOKENS` → an honest **"had to cut that short"** constant (NOT the truncated fragment, NOT the "too many steps" ceiling text); `REFUSAL` → an honest **decline** constant; **else** (`END_TURN`/`STOP_SEQUENCE`/`OTHER`) → **classify the terminal turn** (below) rather than returning unconditionally.
    - **Terminal classifier — re-drives narration-without-write ([ADR 0009](../adr/0009-assistant-narration-redrive.md), Phase-B trio [ADR 0018](../adr/0018-assistant-ai-comms-phase-b-scope-refinement.md)).** On an `END_TURN` terminal, `classifyTerminalTurn(text, committedWrites, attemptedWrites)` decides: `committedWrites > 0` **or** a clarifying-question / honest-failure (`CLAIM_VETO_PATTERN`) → **genuine**, return the text. Otherwise (zero commits, not a question) → **narration-without-write**: the loop appends a corrective **USER** message ("you described a change but issued no tool calls; call them now, or ask one clarifying question"), sets a neutral **`toolChoice: 'any'` for the next round only** (§12, [ADR 0019](../adr/0019-assistant-neutral-ai-tool-choice.md)), and **re-drives** the model. The trigger is **structural** (zero tools + zero commits + not-a-question); the `MUTATION_CLAIM_PATTERN` regex is only a logging hint. Re-drives are bounded by **`ASSISTANT_MAX_CORRECTIONS`** (default 5, strictly `< ASSISTANT_MAX_TOOL_ROUNDTRIPS`); on exhaustion the turn returns `kind:'unresolved'` → structured `assistant.correction_exhausted` log + alert sink + an honest reply (it **does not throw** — the queue is `attempts:1`). `ASSISTANT_MAX_CORRECTIONS = 0` is the kill-switch (reverts to the §10 detect-and-mask guard). `ROUNDTRIP_CEILING_REPLY` is reserved for the genuine ceiling return (§6 step 6 / `:475`). *(An optional bounded `max_tokens` bump-retry is a deferred Phase-B refinement — see Story 3b / the audit A1 note.)*
@@ -209,13 +209,13 @@ When the model calls `ask_user` (§7.1), the dispatcher returns `LoopOutcome.ask
 
 **Expiry job.** A `@nestjs/schedule` cleanup job marks stale `AWAITING` rows `EXPIRED` (driven by the `(status, expiresAt)` index) — **hygiene and metrics only**; correctness is already held by the compare-and-set claim, so a missed run never causes a double-resume. Retention beyond `ASSISTANT_ASK_USER_RETENTION_HOURS` is pruned by the same job.
 
-The durable store is a **new DB subsystem** following the strict 3-layer pattern: `pending_question` entity → `PendingQuestionRepository` → `PendingQuestionDatabaseService` → migration (partial-unique + `(status, expiresAt)` index). Full design + alternatives (stateless re-ask, Redis-only, reuse-the-conflict-path — all rejected): [ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md). Story + acceptance criteria: [ai-workflow-tasks §Story 5](ai-workflow-tasks.md#story-5--ask_user-with-durable-stateful-suspendresume).
+The durable store is a **new DB subsystem** following the strict 3-layer pattern: `pending_question` entity → `PendingQuestionRepository` → `PendingQuestionDatabaseService` → migration (partial-unique + `(status, expiresAt)` index). Full design + alternatives (stateless re-ask, Redis-only, reuse-the-conflict-path — all rejected): [ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md). Decision + acceptance criteria (Story 5, shipped): [ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md).
 
 ---
 
 ## 10. Success-integrity guard (the "trick" that catches lies)
 
-`isFalseSuccessReply` (`assistant.service.ts:541-559`, applied at `:748`) refuses to confirm an action that never happened, by precedence:
+`isFalseSuccessReply` (`orchestration/write-ledger.ts`, delegated via `orchestration/tool-loop.service.ts` `isFalseSuccessReply` and applied from `session/turn-runner.service.ts`) refuses to confirm an action that never happened, by precedence:
 
 1. `committedWrites > 0` → genuine, send as-is.
 2. `CLAIM_VETO_PATTERN` matches (a question, negation, "couldn't", "хочешь?", trailing `?`) → honest/asking, send as-is.
@@ -264,7 +264,7 @@ Why it happens and why it persists:
 - The loop **cannot distinguish** this from a legitimate clarifying question — both are `end_turn` + text + no tools — so it terminates immediately.
 - The §10 guard now catches the *claim* (and would reply "didn't save, try again") but **never re-drives** the model, so the tasks still aren't created; the user must re-ask manually.
 
-→ The fix is **Story 1 (narration re-drive)** in [ai-workflow-tasks](ai-workflow-tasks.md), recorded as [ADR 0009](../adr/0009-assistant-narration-redrive.md).
+→ The fix — **Story 1 (narration re-drive)**, recorded as [ADR 0009](../adr/0009-assistant-narration-redrive.md) — has **shipped**.
 
 ---
 
@@ -286,7 +286,7 @@ Each tool round persists a `ConversationMessage` with `role = tool`, `contentTyp
 
 ## 16. Where this is going (the backlog)
 
-The full set of planned enhancements — narration re-drive, batch `create_tasks`, `withRetry` + `AiToolChoice`, the `buildTool` single-source contract, `ask_user` with durable suspend/resume, the inbound 4-flow router, `check_availability`, the layered decomposition, and the write-side conflict fix — lives in **[ai-workflow-tasks](ai-workflow-tasks.md)** as ready-to-pick stories, each with acceptance criteria and a link to its deep design. The deep designs remain in [assistant-layered-architecture](assistant-layered-architecture.md), [assistant-tool-loop-redrive](assistant-tool-loop-redrive.md), and ADRs [0009](../adr/0009-assistant-narration-redrive.md) / [0010](../adr/0010-assistant-ask-user-stateful-resume.md).
+The v1 enhancements — narration re-drive, batch `create_tasks`, `withRetry` + `AiToolChoice`, the `buildTool` single-source contract, `ask_user` with durable suspend/resume, the inbound 4-flow router, `check_availability`, the layered decomposition, and the write-side conflict fix — have all **shipped** (recorded across ADRs 0009–0036). The v2 forward plan (Stories 10–18) lives in **[ai-workflow-v2-plan](ai-workflow-v2-plan.md)**. The deep designs remain in [assistant-layered-architecture](assistant-layered-architecture.md), [assistant-tool-loop-redrive](assistant-tool-loop-redrive.md), and ADRs [0009](../adr/0009-assistant-narration-redrive.md) / [0010](../adr/0010-assistant-ask-user-stateful-resume.md).
 
 The loop-correctness trio (Stories 3a / 1 / 2) **shipped** in the autonomous Phase-B wave ([ADR 0018](../adr/0018-assistant-ai-comms-phase-b-scope-refinement.md)). The remaining stories (3b, 4, 5, 6, 7, 8, 9) are now **authorized for implementation under human review in six dependency-ordered waves** ([ADR 0022](../adr/0022-deferred-ai-comms-stories-execution-plan.md), which supersedes ADR 0018's deferral): **Wave 1** = 3b ([ADR 0023](../adr/0023-assistant-529-fallback-model.md)) + 9 ([ADR 0024](../adr/0024-assistant-recurring-conflict-hold.md)) in parallel; then 4 → 7, 6 → 5, and Story 8 last.
 
@@ -331,12 +331,12 @@ dispatch → held/re-drive terminal → outbound) runs end-to-end **only** in a 
 
 ## References
 
-- The backlog: **[ai-workflow-tasks](ai-workflow-tasks.md)**
+- The v2 forward plan: **[ai-workflow-v2-plan](ai-workflow-v2-plan.md)**
 - E2E harness: [ADR 0021](../adr/0021-assistant-e2e-real-request-harness.md) — `pnpm test:e2e`, `test/jest-e2e.json`, `docker-compose.dev.yml`
 - Deep designs: [assistant-layered-architecture](assistant-layered-architecture.md) · [assistant-tool-loop-redrive](assistant-tool-loop-redrive.md) · [recurrence-expansion](recurrence-expansion.md)
 - Original design: [telegram-ai-assistant](telegram-ai-assistant.md)
 - ADRs: [0003](../adr/0003-assistant-llm-provider-anthropic.md) · [0004](../adr/0004-assistant-prompt-composition-and-caching.md) · [0005](../adr/0005-assistant-conversation-memory-model.md) · [0006](../adr/0006-assistant-schedule-context-and-conflicts.md) · [0007](../adr/0007-provider-connector-abstraction.md) · [0009](../adr/0009-assistant-narration-redrive.md) · [0010](../adr/0010-assistant-ask-user-stateful-resume.md) · [0021](../adr/0021-assistant-e2e-real-request-harness.md)
-- Code: `src/modules/assistant/assistant.service.ts` · `context-builder.service.ts` · `tools/tool-schemas.ts` · `tools/tool-dispatcher.service.ts` · `src/modules/ai/anthropic/anthropic-ai.connector.ts`
+- Code (Story 8 layers, commit ebd5ae3): `src/modules/assistant/assistant.service.ts` (134-line facade) · `ingress/inbound-router.ts` · `session/turn-runner.service.ts` · `orchestration/tool-loop.service.ts` (+ `terminal-classifier.ts`, `correction-driver.ts`, `write-ledger.ts`) · `reply/reply-presenter.service.ts` · `conflict/conflict-resolver.service.ts` · `context-builder.service.ts` · `tools/tool-registry.ts` + `tools/tool.contract.ts` + `tools/definitions/*` (with `tools/tool-schemas.ts` still coexisting) · `tools/tool-dispatcher.service.ts` · `src/modules/ai/anthropic/anthropic-ai.connector.ts`
 - Pattern source for the enhancements: `/Users/danil/personal-projects/claude-code-src/AI_COMMS_TOOLSET_RESEARCH.md`
 </content>
 </invoke>

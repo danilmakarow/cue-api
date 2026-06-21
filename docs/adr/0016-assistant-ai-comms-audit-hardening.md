@@ -62,6 +62,6 @@ Rejected — a CLI lifecycle hook with no analogue in the queue worker; the turn
 
 - The accepted reconciled audit: [ai-comms-cc-audit.md](../specs/ai-comms-cc-audit.md) — §A (CODE-NOW A1–A5, these decisions), §B (PLAN-HARDENING), §"Deliberately NOT recommended"
 - Scope & sequencing of all the audit work: [ADR 0017](0017-assistant-ai-comms-implementation-scope.md)
-- The stories these hardenings touch: [ai-workflow-tasks Story 1, Story 3, Story 4, Story 13, Story 18](../specs/ai-workflow-tasks.md)
+- The stories these hardenings touch: Stories 1/3/4 (shipped) as-built in [ai-workflow](../specs/ai-workflow.md); Stories 13/18 (v2) in [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 - Current behaviour: [specs/ai-workflow.md](../specs/ai-workflow.md) §3 (caching), §6 (loop / terminal handling), §11 (resilience / failure net)
 - Pattern source: `/Users/danil/personal-projects/claude-code-src/AI_COMMS_TOOLSET_RESEARCH.md`

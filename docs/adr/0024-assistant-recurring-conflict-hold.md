@@ -57,5 +57,5 @@ Rejected — the held-conflict path is deterministic and never re-invokes the mo
 - The execution plan that authorizes this as Wave 1: [ADR 0022](0022-deferred-ai-comms-stories-execution-plan.md)
 - The deferral this closes: [ADR 0018](0018-assistant-ai-comms-phase-b-scope-refinement.md) ("Include Story 9 … Rejected for the autonomous wave")
 - The hold mechanism this extends: [ADR 0006](0006-assistant-schedule-context-and-conflicts.md) · [ai-workflow §9](../specs/ai-workflow.md#9-held-conflict-confirmation-adr-0006-layer-4)
-- Story 9 acceptance criteria + the `MAX_GENERATION_STEPS` bound: [ai-workflow-tasks Story 9](../specs/ai-workflow-tasks.md) · [recurrence-expansion §conflict-checking](../specs/recurrence-expansion.md#conflict-checking-with-recurrence)
-- Complementary read-side mitigation: [ai-workflow-tasks Story 7](../specs/ai-workflow-tasks.md) (`check_availability`)
+- Story 9 (shipped) as-built + the `MAX_GENERATION_STEPS` bound: [ai-workflow](../specs/ai-workflow.md) · [recurrence-expansion §conflict-checking](../specs/recurrence-expansion.md#conflict-checking-with-recurrence)
+- Complementary read-side mitigation (Story 7 `check_availability`, shipped): [ai-workflow](../specs/ai-workflow.md)

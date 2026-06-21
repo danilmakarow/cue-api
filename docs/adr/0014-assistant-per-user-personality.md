@@ -42,5 +42,5 @@ Rejected **for the preset** — a seeded "Jarvis" row lets users browse and pick
 ## References
 
 - The caching design this must respect: [ADR 0004](0004-assistant-prompt-composition-and-caching.md)
-- Research: [ai-workflow-v2-research §G](../specs/ai-workflow-v2-research.md) · design: [ai-workflow-tasks Story 18](../specs/ai-workflow-tasks.md)
+- Plan + Story 18 (note: the cache-bug AC is DROPPED — see Corrected Assumption 1): [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 </content>

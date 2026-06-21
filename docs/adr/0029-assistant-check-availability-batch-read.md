@@ -69,7 +69,7 @@ Treating a proposed *rule* as a single `[startAt, endAt]`. Rejected — a single
 
 ## References
 
-- The story (acceptance criteria, out-of-scope, technical notes): [ai-workflow-tasks — Story 7](../specs/ai-workflow-tasks.md#story-7--check_availability-batch-read-tool-recurrence-aware)
+- Story 7 (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)
 - Deep design — *Lookups & proactive availability* (correctness contract, recurrence verification): [assistant-layered-architecture §lookups](../specs/assistant-layered-architecture.md#lookups--proactive-availability--check_availability-recurrence-aware)
 - The `buildTool` registry that classifies it read/schedule-fetch (dependency, Wave 2): [ADR 0025](0025-assistant-buildtool-single-source-registry.md)
 - The deterministic hold whose primitive (`findOverlapping`) this read-pre-flights — and which stays the authoritative floor: [ADR 0006](0006-assistant-schedule-context-and-conflicts.md)

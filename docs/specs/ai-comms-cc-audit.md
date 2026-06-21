@@ -119,6 +119,6 @@ The plan is in good shape and genuinely CC-literate. The reconciliation found **
 ## References
 
 - Accepted decisions: [ADR 0016 — ai-comms audit hardening](../adr/0016-assistant-ai-comms-audit-hardening.md) · [ADR 0017 — ai-comms implementation scope](../adr/0017-assistant-ai-comms-implementation-scope.md)
-- Stories touched: [ai-workflow-tasks.md](ai-workflow-tasks.md) — Stories 1, 3, 4, 13, 18
+- Stories touched: Stories 1/3/4 (shipped) in [ai-workflow](ai-workflow.md); Stories 13/18 (v2) in [ai-workflow-v2-plan](ai-workflow-v2-plan.md)
 - Current behaviour: [ai-workflow.md](ai-workflow.md) §3 (caching), §6 (loop / terminal handling), §11 (resilience / failure net)
 - Pattern source: `/Users/danil/personal-projects/claude-code-src/AI_COMMS_TOOLSET_RESEARCH.md`

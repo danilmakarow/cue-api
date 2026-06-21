@@ -49,6 +49,6 @@ Excluded by the brief.
 
 ## References
 
-- Research: [ai-workflow-v2-research §F](../specs/ai-workflow-v2-research.md) · design: [ai-workflow-tasks Story 17](../specs/ai-workflow-tasks.md)
+- Plan + Story 17 (note: BLOCKED on the delivery worker — see Corrected Assumption 3): [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 - The outbox + delivery model: `ScheduledNotification` (see CLAUDE.md "No notification delivery") · memory/cost model: [ADR 0005](0005-assistant-conversation-memory-model.md)
 </content>

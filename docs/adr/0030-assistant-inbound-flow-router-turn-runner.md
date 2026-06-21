@@ -55,7 +55,7 @@ Use the cheap background model to judge whether a typed message that arrives whi
 
 ## References
 
-- The story (acceptance criteria, out-of-scope, technical notes): [ai-workflow-tasks — Story 6](../specs/ai-workflow-tasks.md#story-6--inbound-4-flow-router--turn-runner-convergence)
+- Story 6 (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)
 - Deep design — the 4-flow taxonomy, Flow A/B convergence, the divergence-is-one-line guarantee: [assistant-layered-architecture §taxonomy / §Flow A / §Flow B](../specs/assistant-layered-architecture.md#the-inbound-flow-taxonomy-4-flows-one-gate)
 - The durable answer store this router routes to (Wave 5, depends on this): [ADR 0010](0010-assistant-ask-user-stateful-resume.md)
 - The deterministic conflict-confirm path the `confirm:` prefix keeps disjoint: [ADR 0006](0006-assistant-schedule-context-and-conflicts.md)

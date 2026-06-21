@@ -1,9 +1,9 @@
 # Assistant layered architecture — target (ask_user + full Claude Code pattern adoption)
 
-> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · backlog → [ai-workflow-tasks](ai-workflow-tasks.md) (Stories 3–8 draw on this). This file remains the **deep design** for the layer model, suspend/resume, and the migration plan; decisions in [ADR 0009](../adr/0009-assistant-narration-redrive.md) / [ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md).
+> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · v2 forward plan → [ai-workflow-v2-plan](ai-workflow-v2-plan.md) (the v2 stories build on this L0–L11 model). This file remains the **deep design** for the layer model, suspend/resume, and the migration plan (Stories 3–8 shipped); decisions in [ADR 0009](../adr/0009-assistant-narration-redrive.md) / [ADR 0010](../adr/0010-assistant-ask-user-stateful-resume.md).
 
-- **Status**: Draft (design approved in principle; two decisions locked — full CC pattern adoption + stateful suspend/resume)
-- **Last updated**: 2026-06-18
+- **Status**: Implemented (Story 8, commit ebd5ae3). See **As-built caveats** below for the two residual deviations from this target.
+- **Last updated**: 2026-06-20
 - **Owner**: @danil
 - **Related ADRs**: [0006 — schedule context & conflicts](../adr/0006-assistant-schedule-context-and-conflicts.md) · [0007 — provider connector abstraction](../adr/0007-provider-connector-abstraction.md) · [0009 — narration re-drive](../adr/0009-assistant-narration-redrive.md) · [0010 — stateful ask_user resume](../adr/0010-assistant-ask-user-stateful-resume.md)
 - **Related specs**: [ai-workflow](ai-workflow.md) (today) · [assistant-tool-loop-redrive](assistant-tool-loop-redrive.md) (the bug fix this hosts) · [telegram-ai-assistant](telegram-ai-assistant.md)
@@ -17,6 +17,13 @@ This spec defines the **target layered architecture** for the assistant: the lay
 **Locked decisions** (see [telegram-ai-assistant](telegram-ai-assistant.md) lineage for why):
 - **Scope = full Claude Code pattern adoption**: `needsFollowUp` content-scan continue-signal (distrust `stop_reason`); the `buildTool` Tool contract (fail-closed defaults, model-facing `prompt()` vs UI `description()`, Zod input schema); a `withRetry` transport layer (529/overload fallback, `Retry-After`, jitter); structured-output discipline; and the **`ask_user`** tool (a question with **optional** quick-reply options — omit them for a plain text-only question; a typed reply is always accepted).
 - **Resume = stateful, durable**: `ask_user` **suspends** the turn; the in-flight session (accumulated `toolRounds` + the pending `ask_user` tool_use id + option→label map) is persisted **durably to Postgres** (the system of record) and mirrored to **Redis with a 30-minute TTL** (the hot index). The user's answer (button tap **or** typed text) is fed back as the `ask_user` `tool_result` and we **re-enter the same loop**, re-invoking the model. **A reply after the 30-minute Redis TTL still resumes — from Postgres.**
+
+## As-built caveats (Story 8, commit ebd5ae3)
+
+The layer model below shipped as designed, with two residual deviations from the target — both intentional, neither blocking:
+
+1. **Three files still sit at the module root**, not yet physically moved into their layer folders: `assistant.service.ts` (now a 134-line thin facade — only `handleCommand` + `handleCallback`), `context-builder.service.ts`, and `webhook.consumer.ts`. The layering is logical/complete; the file moves are cosmetic and deferred to avoid churn.
+2. **`tool-schemas.ts` still coexists with `tool-registry.ts` / `tool.contract.ts`.** The Story 4 one-tool-per-file migration is substantially done (per-tool files live under `tools/definitions/`) but **not necessarily 100% complete** — `tool-schemas.ts` lingers. Verify with a grep before claiming full decomposition.
 
 ## Goals
 

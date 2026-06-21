@@ -63,7 +63,7 @@ Rejected as either-or — the batch tool **reduces** narration but the model can
 
 ## References
 
-- The bug this completes the fix for + deep batch design: [assistant-tool-loop-redrive](../specs/assistant-tool-loop-redrive.md) · backlog **Story 2**: [ai-workflow-tasks](../specs/ai-workflow-tasks.md#story-2--batch-create_tasks-tool)
+- The bug this completes the fix for + deep batch design: [assistant-tool-loop-redrive](../specs/assistant-tool-loop-redrive.md) · Story 2 (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)
 - Held-conflict mechanism reused (no new one): [ADR 0006](0006-assistant-schedule-context-and-conflicts.md)
 - Narration re-drive this pairs with (write accounting / `genuine` branch): [ADR 0009](0009-assistant-narration-redrive.md)
 - Cache-prefix / tool-order constraint (append last): [ADR 0004](0004-assistant-prompt-composition-and-caching.md)

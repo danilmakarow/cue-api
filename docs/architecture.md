@@ -14,8 +14,8 @@ The HTTP backend for [Cue](../../cue-ios/), an iOS calendar/TODO app. Owns the c
 | Framework | NestJS 11 |
 | Database | PostgreSQL 15 + TypeORM 0.3 (migrations only — never `synchronize: true`) |
 | Transactions | `typeorm-transactional` (request-scoped) |
-| Cache/queue | Redis 7 (provisioned; not yet consumed) |
-| Scheduling | `@nestjs/schedule` (provisioned; not yet used) |
+| Cache/queue | Redis 7 (consumed — BullMQ webhook queue, dedupe, held-conflict + pending-question hot-mirror, link nonces) |
+| Scheduling | `@nestjs/schedule` (consumed — pending-question cleanup `@Cron`) |
 | Date/time | `luxon` (DST-correct for recurring tasks) |
 | Validation | `class-validator` + `class-transformer` for DTOs; Zod for env schema |
 | Auth | Apple Sign-In → JWT (see [specs/auth-apple-signin.md](specs/auth-apple-signin.md)) |
@@ -57,18 +57,18 @@ Calendar is the org unit. Users own multiple Calendars; tasks/groups/strategies 
 
 ```
 src/modules/
-  ai                       ← provider-agnostic LLM connector — base + factory; Anthropic impl (planned)
-  assistant                ← Telegram AI assistant: webhook, orchestrator, context builder, tools (planned)
+  ai                       ← provider-agnostic LLM connector — base + factory; Anthropic impl
+  assistant                ← Telegram AI assistant: webhook, orchestrator, context builder, tools (L0–L11 layer model — see specs/assistant-layered-architecture.md)
   auth                     ← Apple Sign-In token exchange + JWT issuance
   calendar                 ← Calendar CRUD (org unit)
   database                 ← single aggregator — entities, repositories, services
   device                   ← APNs device tokens (per User)
-  external-vendor          ← provider-agnostic messaging connector — base + factory; Telegram webhooks impl (planned)
+  external-vendor          ← provider-agnostic messaging connector — base + factory; Telegram webhooks impl
   notification-rule        ← one reminder: offsetMinutes + channel
   notification-strategy    ← named set of NotificationRules (per Calendar)
   recurrence-rule          ← RRULE (frequency, interval, by-*, endType)
   scheduled-notification   ← outbox table — status, fireAt, channel, attemptCount
-  stt                      ← provider-agnostic speech-to-text — base + factory; OpenAI impl (planned)
+  stt                      ← provider-agnostic speech-to-text — base + factory; OpenAI impl
   task                     ← unified event+task — startAt/endAt/isAllDay, completedAt
   task-group               ← collection of Tasks in a Calendar
   task-occurrence-exception← per-instance override for a recurring Task

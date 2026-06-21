@@ -54,6 +54,6 @@ Rejected — the SDK can drop the numeric status mid-stream, so a status-only ch
 
 - The execution plan that authorizes this as Wave 1: [ADR 0022](0022-deferred-ai-comms-stories-execution-plan.md)
 - The deferral + revisit trigger this closes: [ADR 0018](0018-assistant-ai-comms-phase-b-scope-refinement.md) ("On 529 → fallback (Story 3b) being marginal")
-- Story 3b acceptance criteria: [ai-workflow-tasks Story 3](../specs/ai-workflow-tasks.md)
+- Story 3b (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)
 - The retry layers this sits above: [ai-workflow §11](../specs/ai-workflow.md#11-retries--resilience--every-layer) · model roles: [ai-workflow §12](../specs/ai-workflow.md#12-model-roles--connector-abstraction-adr-0003--0007)
 - Connector abstraction: [ADR 0007](0007-provider-connector-abstraction.md) · model roles: [ADR 0003](0003-assistant-llm-provider-anthropic.md)

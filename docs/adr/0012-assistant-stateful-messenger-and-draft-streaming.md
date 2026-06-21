@@ -49,7 +49,7 @@ Rejected — it changes the final-reply UX and needs prompt surgery; a Haiku `co
 
 ## References
 
-- Research: [ai-workflow-v2-research §A / §C](../specs/ai-workflow-v2-research.md) · design: [ai-workflow-tasks Stories 10/12/13](../specs/ai-workflow-tasks.md)
+- Plan + verified Telegram facts + Stories 10/12/13: [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 - Recaps stay in the volatile tail, never the cached prefix: [ADR 0004](0004-assistant-prompt-composition-and-caching.md)
 - The STOP control that rides a separate message: [ADR 0013](0013-assistant-message-debounce-and-cancellation.md)
 </content>

@@ -50,7 +50,7 @@ Rejected — it adds latency to a *cancel*; the write ledger already holds every
 
 ## References
 
-- Research: [ai-workflow-v2-research §B](../specs/ai-workflow-v2-research.md) · design: [ai-workflow-tasks Stories 11/14](../specs/ai-workflow-tasks.md)
+- Plan + verified Telegram facts + Stories 11/14: [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 - The `attempts: 1` posture this depends on: [ADR 0009](0009-assistant-narration-redrive.md) · the shared per-user race: [ADR 0010](0010-assistant-ask-user-stateful-resume.md)
 - The draft surface that can't carry the STOP button: [ADR 0012](0012-assistant-stateful-messenger-and-draft-streaming.md)
 </content>

@@ -50,4 +50,4 @@ Rejected — the connector capability is reused beyond re-drive (e.g. a future `
 - The phase scope placing 3a in the autonomous wave and deferring 3b: [ADR 0018](0018-assistant-ai-comms-phase-b-scope-refinement.md)
 - Connector neutrality constraint: [ADR 0007](0007-provider-connector-abstraction.md)
 - Current state: [ai-workflow §12](../specs/ai-workflow.md#12-model-roles--connector-abstraction-adr-0003--0007)
-- Backlog Story 3: [ai-workflow-tasks](../specs/ai-workflow-tasks.md)
+- Story 3 (shipped) as-built: [ai-workflow](../specs/ai-workflow.md)

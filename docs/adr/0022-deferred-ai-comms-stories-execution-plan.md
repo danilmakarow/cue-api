@@ -10,7 +10,7 @@
 
 The user has now **authorized implementing the deferred stories** under human review. This is the missing piece ADR 0018 explicitly required — "picking it back up needs a human to re-confirm ADR 0017's order still holds." This ADR records that authorization, the build order, and the dependency + risk rationale for that order, so the remaining work is sequenced rather than picked at random.
 
-The deferred set is not a flat list — it has real dependencies (the [ai-workflow-tasks](../specs/ai-workflow-tasks.md) "Depends on" column) and a spread of risk (a marginal connector tweak at one end, a god-service refactor and safety-relevant conflict logic at the other). Ordering must respect both.
+The deferred set is not a flat list — it has real dependencies (the backlog "Depends on" column; v1 now shipped, as-built in [ai-workflow](../specs/ai-workflow.md)) and a spread of risk (a marginal connector tweak at one end, a god-service refactor and safety-relevant conflict logic at the other). Ordering must respect both.
 
 ## Decision
 
@@ -65,5 +65,5 @@ Rejected — the layered move is the largest, riskiest change, and doing it firs
 - The phase plan and per-story-ADR discipline this upholds: [ADR 0017](0017-assistant-ai-comms-implementation-scope.md)
 - Wave 1 decisions: [ADR 0023](0023-assistant-529-fallback-model.md) (Story 3b) · [ADR 0024](0024-assistant-recurring-conflict-hold.md) (Story 9)
 - Story 5 decision (Wave 5): [ADR 0010](0010-assistant-ask-user-stateful-resume.md)
-- The backlog with per-story acceptance criteria + dependencies: [ai-workflow-tasks](../specs/ai-workflow-tasks.md)
+- The v1 stories this sequenced (all shipped), as-built: [ai-workflow](../specs/ai-workflow.md)
 - Current state: [ai-workflow](../specs/ai-workflow.md)

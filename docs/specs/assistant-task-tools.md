@@ -1,6 +1,6 @@
 # Assistant task-domain tools & per-turn handles
 
-> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · backlog → [ai-workflow-tasks](ai-workflow-tasks.md). This file remains the **deep design** for the tool surface, the per-turn handle scheme, and the addressing-rationale (Alternatives considered). The shipped surface is summarised in [ai-workflow §7](ai-workflow.md#7-tools-handles--recurrence); forthcoming tools are Stories 2/5/7 in the backlog.
+> **Canonical docs:** current state → [ai-workflow](ai-workflow.md) · v2 forward plan → [ai-workflow-v2-plan](ai-workflow-v2-plan.md). This file remains the **deep design** for the tool surface, the per-turn handle scheme, and the addressing-rationale (Alternatives considered). The shipped surface is summarised in [ai-workflow §7](ai-workflow.md#7-tools-handles--recurrence) (Stories 2/5/7 have shipped).
 
 - **Status**: Implemented (deep design reference)
 - **Last updated**: 2026-06-03

@@ -73,5 +73,5 @@ Rejected for the autonomous wave — it is correctness-relevant but **safety-rel
 - The phase plan this refines: [ADR 0017](0017-assistant-ai-comms-implementation-scope.md)
 - The §13 bug the trio fixes: [ai-workflow §13](../specs/ai-workflow.md#13-known-failure-mode-today--narration-without-writing)
 - Trio decisions: [ADR 0009](0009-assistant-narration-redrive.md) (Story 1) · [ADR 0019](0019-assistant-neutral-ai-tool-choice.md) (Story 3a `AiToolChoice`)
-- The backlog: [ai-workflow-tasks](../specs/ai-workflow-tasks.md) (Stories 1, 2, 3; deferred 3b/4/5/6/7/8/9)
+- The v1 stories (1–9, all now shipped) as-built: [ai-workflow](../specs/ai-workflow.md) · the v2 forward plan: [ai-workflow-v2-plan](../specs/ai-workflow-v2-plan.md)
 - The `attempts:1` invariant: [ai-workflow §11](../specs/ai-workflow.md#11-retries--resilience--every-layer) · [ADR 0009](0009-assistant-narration-redrive.md) Consequences
