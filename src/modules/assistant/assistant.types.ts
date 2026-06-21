@@ -84,6 +84,12 @@ export interface DebounceAnswerPayload {
   callbackId: string | null;
   chatType?: ChatType;
   languageCode?: string;
+  /**
+   * STT-reported spoken language for a voice answer (v2 Task 4 / ADR 0051) — the
+   * highest-priority signal for the post-STT loading-word locale. Undefined for a
+   * typed answer or when the STT model does not report a language.
+   */
+  sttLanguage?: string;
 }
 
 /**
@@ -175,29 +181,6 @@ export interface TurnStreamSink {
    * a missing/empty recap simply leaves the current frame.
    */
   showRecap(recap: string): void;
-}
-
-/**
- * The L4-facing port the tool loop (Story 14b / ADR 0043) polls at its cooperative
- * STOP checkpoints — between rounds AND after each committed write — WITHOUT the
- * loop knowing about Redis or the user/turn keying (the loop stays L3/Redis-blind,
- * mirroring {@link TurnStreamSink}). The turn runner supplies a concrete
- * implementation bound to this turn's user + correlationId over the
- * {@link StopFlagStore}; a turn with no STOP control (e.g. an `ask_user` resume)
- * passes a controller that always answers false (or none at all).
- *
- * **Degrade-never-throw:** the implementation MUST swallow its own faults and
- * resolve to `false` on any error, because the inbound turn is `attempts:1` — a
- * STOP-flag read fault must never abort a turn the user did not ask to stop, and
- * never throw into the loop.
- */
-export interface StopController {
-  /**
-   * Resolves true when the user has requested STOP for THIS turn. Polled at each
-   * cooperative checkpoint; on true the loop stops gracefully, keeping committed
-   * writes and replying with a programmatic ledger summary (NO AI call).
-   */
-  isStopRequested(): Promise<boolean>;
 }
 
 /**

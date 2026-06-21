@@ -352,6 +352,23 @@ describe('TelegramVendorConnector', () => {
       expect(body.parse_mode).toBe('MarkdownV2');
     });
 
+    it('sendMessage maps Html format to the HTML parse_mode (ADR 0049)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 1 }));
+
+      await connector.sendMessage(
+        { vendorChatId: '12345' },
+        { text: '<b>bold</b>', format: OutboundFormat.Html },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      expect(body.parse_mode).toBe('HTML');
+    });
+
     it('sendActions posts an inline_keyboard reply_markup and returns the message ref', async () => {
       const connector = createConnector();
       const fetchMock = mockFetch();

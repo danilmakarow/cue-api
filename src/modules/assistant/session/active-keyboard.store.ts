@@ -37,8 +37,8 @@ export const ACTIVE_KEYBOARD_STORE = Symbol('ACTIVE_KEYBOARD_STORE');
  * the id of the keyboard currently docked for that user. It is BOTH the write side
  * (set when a keyboard is docked, cleared when removed) and the read port the
  * inbound router gates on to disambiguate a keyboard tap from a user who literally
- * types a button label. Redis-only (no DB entity), matching the stop-flag /
- * user-lock / status-session precedent.
+ * types a button label. Redis-only (no DB entity), matching the user-lock /
+ * status-session precedent.
  *
  * Every method degrades never-throw: a Redis fault is swallowed (logged at debug)
  * and the read treated as "no active surface", because the inbound turn path is

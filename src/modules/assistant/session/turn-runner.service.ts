@@ -4,7 +4,6 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ConversationStore } from './conversation.store';
 import { PendingInteractionService } from './pending-interaction.store';
-import { StopFlagStore } from './stop-flag.store';
 import { TurnAuditStore } from './turn-audit.store';
 import { ToolRoundAuditPayload, TurnStreamSink } from '../assistant.types';
 import { MemoryExtractorService } from '../background/memory-extractor.service';
@@ -78,8 +77,14 @@ export interface HandleTextParams {
   correlationId?: string;
   /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
   chatType?: ChatType;
-  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  /** Sender's client language tag, the FALLBACK status-vocabulary signal (Story 12). */
   languageCode?: string;
+  /**
+   * STT-reported spoken language for a voice turn (v2 Task 4 / ADR 0051) — the
+   * highest-priority signal for the post-STT loading-word locale, above message-text
+   * detection and `language_code`. Undefined for a typed turn.
+   */
+  sttLanguage?: string;
 }
 
 /**
@@ -102,8 +107,14 @@ export interface ResumeAnswerParams {
   correlationId?: string;
   /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
   chatType?: ChatType;
-  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  /** Sender's client language tag, the FALLBACK status-vocabulary signal (Story 12). */
   languageCode?: string;
+  /**
+   * STT-reported spoken language for a voice answer (v2 Task 4 / ADR 0051) — the
+   * highest-priority signal for the post-STT loading-word locale. Undefined for a
+   * typed answer.
+   */
+  sttLanguage?: string;
 }
 
 /**
@@ -142,8 +153,14 @@ export interface TurnState {
   callbackId: string | null;
   /** Chat kind, for the live-status draft private-chat gate (Story 12 / ADR 0012). */
   chatType?: ChatType;
-  /** Sender's client language tag, for the localized status vocabulary (Story 12). */
+  /** Sender's client language tag, the FALLBACK status-vocabulary signal (Story 12). */
   languageCode?: string;
+  /**
+   * STT-reported spoken language for a voice turn (v2 Task 4 / ADR 0051) — the
+   * highest-priority signal for the post-STT loading-word locale. Undefined for a
+   * typed turn.
+   */
+  sttLanguage?: string;
 }
 
 /**
@@ -189,7 +206,6 @@ export class TurnRunnerService {
     private readonly pendingInteraction: PendingInteractionService,
     private readonly replyPresenter: ReplyPresenter,
     private readonly statusAnimator: StatusAnimatorService,
-    private readonly stopFlags: StopFlagStore,
   ) {}
 
   /**
@@ -307,12 +323,21 @@ export class TurnRunnerService {
     vendorChatId: string,
     chatType: ChatType | undefined,
     languageCode: string | undefined,
+    messageText: string | undefined,
+    sttLanguage: string | undefined,
   ): Promise<StatusAnimation> {
     const animation = await this.statusAnimator.begin({
       vendorChatId,
       turnId: correlationId,
       chatType,
       languageCode,
+      // The loading-word locale follows the MESSAGE first (v2 Task 4 / ADR 0051):
+      // the STT-reported spoken language wins for a voice turn, else the message's
+      // own detected language (a Russian message shows Russian words even under an
+      // English `language_code`), with `language_code` as the fallback. A voice
+      // transcript flows through `messageText` too (plain text by turn time).
+      messageText,
+      sttLanguage,
     });
 
     await animation.startLoading();
@@ -342,25 +367,6 @@ export class TurnRunnerService {
   }
 
   /**
-   * Builds the loop-facing {@link StopController} (Story 14b / ADR 0043) bound to
-   * THIS turn's user + correlationId over the {@link StopFlagStore}, so the L4 loop
-   * polls the per-user/per-turn STOP flag at its cooperative checkpoints WITHOUT
-   * knowing about Redis or the keying (the loop stays L3/Redis-blind). The store
-   * already degrades never-throw (a Redis fault reads as "no STOP"), so the loop's
-   * `attempts:1` posture is preserved. Used only on a fresh model-driven turn; an
-   * `ask_user` resume passes no controller (it carries no STOP control).
-   */
-  private stopControllerFor(
-    userId: string,
-    correlationId: string,
-  ): { isStopRequested: () => Promise<boolean> } {
-    return {
-      isStopRequested: (): Promise<boolean> =>
-        this.stopFlags.isStopRequested(userId, correlationId),
-    };
-  }
-
-  /**
    * Handles a text or voice-transcript turn end to end: open the live-status
    * animation, persist the user turn, build context, run the tool loop, then reply
    * / hold / report a graceful failure, and (on a completed reply) fire the
@@ -374,16 +380,8 @@ export class TurnRunnerService {
       params.vendorChatId,
       params.chatType,
       params.languageCode,
-    );
-    // The in-turn STOP control (Story 14b / ADR 0043): a SEPARATE real message
-    // (drafts carry no buttons) carrying a STOP button keyed `stop:<correlationId>`,
-    // shown while the turn runs. Its tap arms the per-user/per-turn STOP flag the
-    // loop polls at its cooperative checkpoints. Sent best-effort (a null id just
-    // means no control was shown); removed + the flag cleared in the `finally`.
-    const stopControlMessageId = await this.replyPresenter.sendStopControl(
-      params.vendorChatId,
-      correlationId,
-      correlationId,
+      params.text,
+      params.sttLanguage,
     );
 
     try {
@@ -406,10 +404,6 @@ export class TurnRunnerService {
         // (Story 13 / ADR 0041). The sink wraps this turn's StatusAnimation and is
         // degrade-never-throw; the real reply below still persists the answer.
         streamSink: this.streamSinkFor(status),
-        // Cooperative STOP (Story 14b / ADR 0043): the loop polls this turn's STOP
-        // flag at each checkpoint (between rounds + after each committed write) and
-        // halts gracefully — keeping committed writes — when the user tapped STOP.
-        stopController: this.stopControllerFor(user.id, correlationId),
       });
 
       await this.finishTurn(
@@ -420,16 +414,6 @@ export class TurnRunnerService {
         correlationId,
       );
     } finally {
-      // Tear down the STOP surface on EVERY exit path: clear the turn-scoped STOP
-      // flag (so a STOP tapped after the loop finished never lingers — the key is
-      // also turn-scoped, so this is belt-and-braces) and remove the control
-      // message. Both degrade never-throw; ordered before the status finalize.
-      await this.stopFlags.clear(user.id, correlationId);
-      await this.replyPresenter.removeStopControl(
-        params.vendorChatId,
-        stopControlMessageId,
-        correlationId,
-      );
       await status.finalize();
     }
   }
@@ -438,9 +422,9 @@ export class TurnRunnerService {
    * The shared post-loop tail (ADR 0009/0010/0011): persists the audit trail, then
    * branches on the {@link LoopOutcome} — `ask` suspends the turn (ADR 0010),
    * `error` sends the AI-failure line, `unresolved` escalates honestly (alert +
-   * reply), `stopped` sends the programmatic STOP summary, and a plain reply runs
-   * the false-success guard before sending + persisting and firing the background
-   * jobs. A conflicting write never reaches here as a distinct outcome — it is a
+   * reply), and a plain reply runs the false-success guard before sending +
+   * persisting and firing the background jobs. A conflicting write never reaches
+   * here as a distinct outcome — it is a
    * recoverable tool result the loop already handled (ADR 0011 default-deny).
    * Single-sourced so a fresh turn ({@link handleText}) and an `ask_user` resume
    * ({@link resumeAnswer}) end identically — including the ability to suspend AGAIN
@@ -513,32 +497,6 @@ export class TurnRunnerService {
         CORRECTION_EXHAUSTED_REPLY,
         vendorMessageId,
       );
-
-      return;
-    }
-
-    // STOP cooperative cancellation (Story 14b / ADR 0043): the user tapped STOP
-    // and the loop halted gracefully, KEEPING committed writes. The text is the
-    // loop's PROGRAMMATIC ledger summary (no AI call), so it is sent + persisted
-    // verbatim — NOT run through the false-success guard (it is a deterministic
-    // record of what was done, never a model success claim). Background jobs run
-    // like any reply so the summary/memory reflect what committed before the stop.
-    if (outcome.kind === 'stopped') {
-      const vendorMessageId = await this.replyPresenter.sendText(
-        vendorChatId,
-        outcome.text,
-        correlationId,
-      );
-
-      await this.persistMessage(
-        conversation,
-        ConversationMessageRole.ASSISTANT,
-        ConversationMessageContentType.TEXT,
-        outcome.text,
-        vendorMessageId,
-      );
-
-      this.triggerBackgroundJobs(conversation.id, user.id);
 
       return;
     }
@@ -616,12 +574,16 @@ export class TurnRunnerService {
     }
 
     // A claimed resume re-invokes the model and produces a reply, so it gets the
-    // same live-status animation as a fresh turn — finalized in the `finally`.
+    // same live-status animation as a fresh turn — finalized in the `finally`. The
+    // user's answer text drives the loading-word locale (v2 Task 4 / ADR 0051),
+    // with `language_code` as the fallback.
     const status = await this.beginStatus(
       correlationId,
       params.vendorChatId,
       params.chatType,
       params.languageCode,
+      params.text,
+      params.sttLanguage,
     );
 
     try {
@@ -795,6 +757,7 @@ export class TurnRunnerService {
     callbackId?: string | null;
     chatType?: ChatType;
     languageCode?: string;
+    sttLanguage?: string;
   }): Promise<void> {
     const state: TurnState = {
       user: params.user,
@@ -807,6 +770,7 @@ export class TurnRunnerService {
       callbackId: params.callbackId ?? null,
       chatType: params.chatType,
       languageCode: params.languageCode,
+      sttLanguage: params.sttLanguage,
     };
 
     await this.runTurn(state);
@@ -828,6 +792,7 @@ export class TurnRunnerService {
         correlationId: state.correlationId,
         chatType: state.chatType,
         languageCode: state.languageCode,
+        sttLanguage: state.sttLanguage,
       });
 
       return;
@@ -842,6 +807,7 @@ export class TurnRunnerService {
       correlationId: state.correlationId,
       chatType: state.chatType,
       languageCode: state.languageCode,
+      sttLanguage: state.sttLanguage,
     });
   }
 }

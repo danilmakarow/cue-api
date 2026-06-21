@@ -216,6 +216,9 @@ export class DebounceCoordinatorService {
           callbackId: null,
           chatType: first.chatType,
           languageCode: first.languageCode,
+          // The seed entry's STT language drives the post-STT loading-word locale
+          // when the window opened on a voice note (v2 Task 4 / ADR 0051).
+          sttLanguage: first.sttLanguage,
         });
 
         return true;
@@ -251,6 +254,9 @@ export class DebounceCoordinatorService {
           callbackId: answer.callbackId,
           chatType: answer.chatType,
           languageCode: answer.languageCode,
+          // A voice answer's STT language drives its post-STT loading-word locale
+          // (v2 Task 4 / ADR 0051); undefined for a typed answer.
+          sttLanguage: answer.sttLanguage,
         });
 
         return true;

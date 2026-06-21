@@ -14,6 +14,7 @@ import {
   ConversationMessageContentType,
   User,
 } from '@/modules/database/entities';
+import { OutboundFormat } from '@/modules/external-vendor/external-vendor.types';
 
 /**
  * Builds a bare CompletionResult with zeroed usage, overlaid with the given
@@ -141,20 +142,6 @@ const buildHarness = () => {
   // around the same vendor mock so every existing vendor.* assertion observes the
   // identical send calls (text, keyboards, callback acks) through the new layer.
   const replyPresenter = new ReplyPresenter(vendor as never);
-  // Story 14b (ADR 0043): every fresh turn now also sends a separate STOP-control
-  // message (an inline button) and removes it on exit. That would otherwise add a
-  // vendor.sendActions call to every turn and perturb the held/ask keyboard
-  // assertions below. We stub the two STOP-control presenter methods to no-ops so
-  // those core assertions still observe ONLY the held/ask keyboards; the STOP
-  // control's own send/remove behaviour is covered in reply-presenter tests and the
-  // dedicated STOP suite drives the loop directly. `sendStopControl` returns a
-  // message id so the `finally` remove path is exercised.
-  const sendStopControl = jest
-    .spyOn(replyPresenter, 'sendStopControl')
-    .mockResolvedValue('stop-msg-1');
-  const removeStopControl = jest
-    .spyOn(replyPresenter, 'removeStopControl')
-    .mockResolvedValue(undefined);
   // Story 8 (L4 tool-loop, the keystone): the agent loop now lives in a dedicated
   // ToolLoopService. We wrap a REAL instance around the same ai / config /
   // contextBuilder / toolDispatcher mocks so every existing ai.complete,
@@ -193,14 +180,6 @@ const buildHarness = () => {
   const statusAnimator = {
     begin: jest.fn().mockResolvedValue(statusAnimation),
   };
-  // Story 14b (ADR 0043): the cooperative STOP-flag store. Default `isStopRequested`
-  // resolves false so the existing suites run to completion exactly as before; the
-  // dedicated STOP suite programs it to fire at a checkpoint. `arm`/`clear` are inert.
-  const stopFlags = {
-    arm: jest.fn().mockResolvedValue(undefined),
-    isStopRequested: jest.fn().mockResolvedValue(false),
-    clear: jest.fn().mockResolvedValue(undefined),
-  };
 
   const service = new TurnRunnerService(
     alert as never,
@@ -212,7 +191,6 @@ const buildHarness = () => {
     pendingInteraction as never,
     replyPresenter as never,
     statusAnimator as never,
-    stopFlags as never,
   );
 
   return {
@@ -232,9 +210,6 @@ const buildHarness = () => {
     statusAnimator,
     statusAnimation,
     roundRecap,
-    stopFlags,
-    sendStopControl,
-    removeStopControl,
   };
 };
 
@@ -290,7 +265,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     });
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'You have one event.' },
+      { text: 'You have one event.', format: OutboundFormat.Html },
     );
   });
 
@@ -342,7 +317,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     // Finalize: the ephemeral draft is superseded by the real persisted reply.
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'You have one event today.' },
+      { text: 'You have one event today.', format: OutboundFormat.Html },
     );
     expect(
       assistantReplies(harness.conversationMessageDatabaseService),
@@ -483,7 +458,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(harness.toolDispatcher.dispatch).not.toHaveBeenCalled();
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'When, and how long?' },
+      { text: 'When, and how long?', format: OutboundFormat.Html },
     );
   });
 
@@ -1150,7 +1125,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     // No options ⇒ plain text question sent (no keyboard), and persisted.
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'When works for you?' },
+      { text: 'When works for you?', format: OutboundFormat.Html },
     );
     expect(harness.vendor.sendActions).not.toHaveBeenCalled();
     expect(
@@ -1265,7 +1240,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     // The continued reply is sent.
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Booked Friday.' },
+      { text: 'Booked Friday.', format: OutboundFormat.Html },
     );
   });
 
@@ -1314,7 +1289,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     ]);
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Got it — 3pm.' },
+      { text: 'Got it — 3pm.', format: OutboundFormat.Html },
     );
   });
 
@@ -1386,329 +1361,7 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     ).toHaveBeenCalledTimes(1);
     expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Morning or evening?' },
+      { text: 'Morning or evening?', format: OutboundFormat.Html },
     );
-  });
-
-  describe('STOP cooperative cancellation (Story 14b / ADR 0043)', () => {
-    it('sends a per-turn STOP control at the start of the turn and removes it on exit', async () => {
-      const harness = buildHarness();
-
-      harness.ai.complete.mockResolvedValueOnce(
-        completion({ stopReason: AiStopReason.END_TURN, text: 'Sure.' }),
-      );
-
-      await harness.service.handleText(USER, {
-        text: 'hi',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-        correlationId: 'turn-cid',
-      });
-
-      // The STOP control is sent keyed by the turn id (correlationId) and removed
-      // in the `finally` once the turn finishes.
-      expect(harness.sendStopControl).toHaveBeenCalledWith(
-        CHAT_ID,
-        'turn-cid',
-        'turn-cid',
-      );
-      expect(harness.removeStopControl).toHaveBeenCalledWith(
-        CHAT_ID,
-        'stop-msg-1',
-        'turn-cid',
-      );
-      // The turn-scoped STOP flag is cleared on exit so it can't leak to a later turn.
-      expect(harness.stopFlags.clear).toHaveBeenCalledWith(USER.id, 'turn-cid');
-    });
-
-    it('STOP between rounds halts the loop, KEEPS committed writes, and replies with the programmatic summary (no further model call)', async () => {
-      const harness = buildHarness();
-
-      // Round 0 commits a write (create_task). The model would continue to a round
-      // 1, but the user taps STOP first: the between-rounds checkpoint at the top of
-      // round 1 fires and the loop stops gracefully.
-      harness.ai.complete
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.TOOL_USE,
-            toolCalls: [toolCall('create_task', { title: 'Dentist' })],
-          }),
-        )
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.END_TURN,
-            text: 'And the second thing…',
-          }),
-        );
-      harness.toolDispatcher.dispatch.mockResolvedValue({
-        content: 'Created "Dentist".',
-      });
-      // No STOP entering round 0; STOP requested entering round 1 (between rounds).
-      harness.stopFlags.isStopRequested
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true);
-
-      await harness.service.handleText(USER, {
-        text: 'book the dentist, and also…',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-      });
-
-      // The model was called exactly ONCE — the loop stopped before round 1's call,
-      // so there is NO AI call after STOP (the summary is programmatic).
-      expect(harness.ai.complete).toHaveBeenCalledTimes(1);
-      // The committed write was KEPT (the dispatch ran once and was not rolled back).
-      expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(1);
-      expect(harness.taskService.create).not.toHaveBeenCalled(); // (dispatch is mocked)
-
-      // The reply is the programmatic STOP summary listing what was done — built
-      // from the ledger, NOT a model response.
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      expect(reply.text).toMatch(/^Stopped\./);
-      expect(reply.text).toMatch(/created "Dentist"/i);
-      // And the summary is what gets persisted as the assistant turn.
-      expect(
-        assistantReplies(harness.conversationMessageDatabaseService),
-      ).toEqual([expect.stringMatching(/^Stopped\./)]);
-    });
-
-    it('STOP after a committed write stops before the next round and skips the rest of the round', async () => {
-      const harness = buildHarness();
-
-      // ONE round emitting two writes. The FIRST commits; STOP is then requested, so
-      // the second write is NOT dispatched and the loop stops after the round audit.
-      harness.ai.complete.mockResolvedValueOnce(
-        completion({
-          stopReason: AiStopReason.TOOL_USE,
-          toolCalls: [
-            toolCall('create_task', { title: 'Lesson 1' }),
-            toolCall('create_task', { title: 'Lesson 2' }),
-          ],
-        }),
-      );
-      harness.toolDispatcher.dispatch.mockResolvedValue({
-        content: 'Created.',
-      });
-      // No STOP entering round 0; after the FIRST committed write, STOP is set.
-      harness.stopFlags.isStopRequested
-        .mockResolvedValueOnce(false) // between-rounds, entering round 0
-        .mockResolvedValueOnce(true); // after the first committed write
-
-      await harness.service.handleText(USER, {
-        text: 'create two lessons',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-      });
-
-      // Only the FIRST write was dispatched — the second was skipped after STOP.
-      expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(1);
-      // No further model round-trip after the stop.
-      expect(harness.ai.complete).toHaveBeenCalledTimes(1);
-
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      expect(reply.text).toMatch(/^Stopped\./);
-      expect(reply.text).toMatch(/created "Lesson 1"/i);
-    });
-
-    it('the programmatic STOP summary lists every committed write in arrival order', async () => {
-      const harness = buildHarness();
-
-      // Round 0 commits two distinct writes; STOP fires entering round 1.
-      harness.ai.complete
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.TOOL_USE,
-            toolCalls: [
-              toolCall('create_task', { title: 'Dentist' }),
-              toolCall('delete_task', { handle: 'e1', title: 'Standup' }),
-            ],
-          }),
-        )
-        .mockResolvedValueOnce(
-          completion({ stopReason: AiStopReason.END_TURN, text: 'more' }),
-        );
-      harness.toolDispatcher.dispatch
-        .mockResolvedValueOnce({ content: 'Created "Dentist".' })
-        .mockResolvedValueOnce({ content: 'Deleted "Standup".' });
-      harness.stopFlags.isStopRequested
-        .mockResolvedValueOnce(false) // entering round 0
-        .mockResolvedValueOnce(false) // after first committed write (continue round)
-        .mockResolvedValueOnce(true); // between rounds, entering round 1
-
-      await harness.service.handleText(USER, {
-        text: 'book dentist and delete standup, then…',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-      });
-
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      // Both committed writes are named, in arrival order, in the programmatic line.
-      expect(reply.text).toMatch(/created "Dentist"/i);
-      expect(reply.text).toMatch(/deleted "Standup"/i);
-      expect(reply.text.indexOf('Dentist')).toBeLessThan(
-        reply.text.indexOf('Standup'),
-      );
-    });
-
-    it('STOP with nothing committed yet replies honestly that nothing changed', async () => {
-      const harness = buildHarness();
-
-      // Round 0 is a READ (no committed write); STOP fires entering round 1.
-      harness.ai.complete
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.TOOL_USE,
-            toolCalls: [toolCall('list_tasks', { from: 'a', to: 'b' })],
-          }),
-        )
-        .mockResolvedValueOnce(
-          completion({ stopReason: AiStopReason.END_TURN, text: 'next' }),
-        );
-      harness.toolDispatcher.dispatch.mockResolvedValue({
-        content: '09:00 Standup',
-        countsAsScheduleFetch: true,
-      });
-      harness.stopFlags.isStopRequested
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true);
-
-      await harness.service.handleText(USER, {
-        text: "what's on, then…",
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-      });
-
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      expect(reply.text).toMatch(/Stopped — nothing was changed\./);
-    });
-
-    it('a STOP flag scoped to a DIFFERENT (stale) turn is ignored — a fresh turn runs to completion', async () => {
-      const harness = buildHarness();
-
-      // The flag store is keyed per turn; a fresh turn's controller polls its OWN
-      // correlationId, for which no flag is set, so the default false stands.
-      harness.ai.complete
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.TOOL_USE,
-            toolCalls: [toolCall('create_task', { title: 'Lesson' })],
-          }),
-        )
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.END_TURN,
-            text: 'Created your lesson.',
-          }),
-        );
-      harness.toolDispatcher.dispatch.mockResolvedValue({
-        content: 'Created "Lesson".',
-      });
-
-      await harness.service.handleText(USER, {
-        text: 'create a lesson',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        vendorMessageId: null,
-        correlationId: 'fresh-turn',
-      });
-
-      // The controller polled the FRESH turn id (never the stale one), so the turn
-      // ran to its genuine reply — not stopped.
-      const isStopCalls = harness.stopFlags.isStopRequested.mock.calls;
-
-      expect(isStopCalls.length).toBeGreaterThan(0);
-
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      expect(reply.text).toBe('Created your lesson.');
-    });
-
-    it('a STOP-flag read fault never throws and the turn completes normally (attempts:1)', async () => {
-      const harness = buildHarness();
-
-      harness.ai.complete
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.TOOL_USE,
-            toolCalls: [toolCall('create_task', { title: 'Lesson' })],
-          }),
-        )
-        .mockResolvedValueOnce(
-          completion({
-            stopReason: AiStopReason.END_TURN,
-            text: 'Created your lesson.',
-          }),
-        );
-      harness.toolDispatcher.dispatch.mockResolvedValue({
-        content: 'Created "Lesson".',
-      });
-      // The STOP controller rejects (Redis blip). The loop's guard swallows it as
-      // "no STOP" and the turn must complete normally without throwing.
-      harness.stopFlags.isStopRequested.mockRejectedValue(
-        new Error('redis down'),
-      );
-
-      await expect(
-        harness.service.handleText(USER, {
-          text: 'create a lesson',
-          contentType: ConversationMessageContentType.TEXT,
-          vendorChatId: CHAT_ID,
-          vendorMessageId: null,
-        }),
-      ).resolves.toBeUndefined();
-
-      const [, reply] = harness.vendor.sendMessage.mock.calls[0];
-
-      expect(reply.text).toBe('Created your lesson.');
-    });
-
-    it('does NOT poll a STOP controller on an ask_user resume (no STOP control there)', async () => {
-      const harness = buildHarness();
-
-      harness.pendingInteraction.claimById.mockResolvedValueOnce({
-        id: 'pq-1',
-        askToolUseId: 'ask-tuid',
-        payload: {
-          question: 'Which day?',
-          optionLabels: [{ id: 'fri', label: 'Friday' }],
-          toolRounds: [
-            {
-              toolCalls: [{ id: 'ask-tuid', name: 'ask_user', input: {} }],
-              toolResults: [],
-            },
-          ],
-          correlationId: 'cid-1',
-          vendorChatId: CHAT_ID,
-        },
-      });
-      harness.ai.complete.mockResolvedValueOnce(
-        completion({
-          stopReason: AiStopReason.END_TURN,
-          text: 'Booked Friday.',
-        }),
-      );
-
-      await harness.service.resumeAnswer(USER, {
-        source: 'callback',
-        text: 'ask:pq-1:fri',
-        contentType: ConversationMessageContentType.TEXT,
-        vendorChatId: CHAT_ID,
-        callbackId: 'cb-1',
-      });
-
-      // The resume passes no STOP control, so the flag store is never polled and no
-      // STOP control message is sent for the resume.
-      expect(harness.stopFlags.isStopRequested).not.toHaveBeenCalled();
-      expect(harness.sendStopControl).not.toHaveBeenCalled();
-    });
   });
 });

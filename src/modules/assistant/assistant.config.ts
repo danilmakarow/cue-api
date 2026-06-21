@@ -152,19 +152,6 @@ export class AssistantConfig {
   }
 
   /**
-   * TTL (seconds) for the cooperative STOP flag (Story 14b / ADR 0043): how long
-   * a user's STOP tap stays armed in Redis. The tool loop checks it between rounds
-   * and after each committed write; the turn clears its own per-turn key on exit,
-   * so this only needs to outlive one in-flight turn (a generous multiple of the
-   * user-lock TTL) before self-expiring.
-   */
-  get stopFlagTtlSeconds(): number {
-    return this.configService.get('ASSISTANT_STOP_FLAG_TTL_SECONDS', {
-      infer: true,
-    });
-  }
-
-  /**
    * TTL (seconds) for the latest reply-keyboard button result (Story 16 / ADR
    * 0045): how long the last deterministic button outcome line waits in Redis
    * before injection into the next model turn's volatile tail. Read-then-cleared

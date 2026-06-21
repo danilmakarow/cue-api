@@ -30,7 +30,6 @@ import {
   PendingInteractionService,
 } from './session/pending-interaction.store';
 import { PendingQuestionCleanupService } from './session/pending-question-cleanup.service';
-import { StopFlagStore } from './session/stop-flag.store';
 import { TurnAuditStore } from './session/turn-audit.store';
 import { TurnRunnerService } from './session/turn-runner.service';
 import { UserLockStore } from './session/user-lock.store';
@@ -122,7 +121,6 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     PendingInteractionService,
     PendingQuestionCleanupService,
     UserLockStore,
-    StopFlagStore,
     MessageBufferStore,
     DebounceCoordinatorService,
     {

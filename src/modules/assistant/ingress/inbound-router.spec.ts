@@ -1,8 +1,4 @@
-import {
-  ASK_CALLBACK_PREFIX,
-  STOP_CALLBACK_PREFIX,
-  classifyFlow,
-} from './inbound-router';
+import { ASK_CALLBACK_PREFIX, classifyFlow } from './inbound-router';
 import {
   KeyboardAction,
   KEYBOARD_LABELS,
@@ -102,43 +98,6 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       callbackId: 'cb-3',
       callbackData,
     });
-  });
-
-  it('classifies a stop: callback as StopControlFlow (Story 14b, deterministic), carrying the turn id', async () => {
-    const flow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-stop',
-        callbackData: `${STOP_CALLBACK_PREFIX}turn-xyz`,
-      }),
-      USER,
-      buildPendingStore(),
-      buildActiveKeyboardStore(),
-    );
-
-    expect(flow).toEqual({
-      kind: 'stop_control',
-      callbackId: 'cb-stop',
-      turnId: 'turn-xyz',
-    });
-  });
-
-  it('keeps the stop: and ask: prefixes disjoint so a STOP tap is never any other flow', async () => {
-    expect(STOP_CALLBACK_PREFIX.startsWith(ASK_CALLBACK_PREFIX)).toBe(false);
-    expect(ASK_CALLBACK_PREFIX.startsWith(STOP_CALLBACK_PREFIX)).toBe(false);
-
-    const stopFlow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-s',
-        callbackData: `${STOP_CALLBACK_PREFIX}t`,
-      }),
-      USER,
-      buildPendingStore(true), // even with a pending question, a stop: tap is STOP
-      buildActiveKeyboardStore(),
-    );
-
-    expect(stopFlow.kind).toBe('stop_control');
   });
 
   it('classifies a plain text message with NO pending question as SimpleMessageFlow (fresh turn)', async () => {

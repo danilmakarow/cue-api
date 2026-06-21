@@ -2,7 +2,7 @@
  * L2 inbound router (taxonomy) — the divergence gate. Promoted from the old
  * `webhook.consumer.routeForUser` command/callback/voice/text branching, it
  * classifies one normalized inbound update into EXACTLY ONE flow. The consumer
- * then dispatches: the no-LLM paths (command, STOP-control) keep their
+ * then dispatches: the no-LLM paths (command, keyboard-action) keep their
  * deterministic handlers; the model paths (simple message, answer) converge at
  * the turn runner. (The ADR-0006 conflict-confirm tap was removed with the
  * deterministic hold — ADR 0011.)
@@ -34,18 +34,6 @@ import {
 export const ASK_CALLBACK_PREFIX = 'ask:';
 
 /**
- * Callback-data prefix (with trailing colon) that marks a STOP-control tap (Story
- * 14b / ADR 0043). The user taps the separate STOP message's inline button while a
- * turn runs; the callback data is `stop:<turnId>` (the in-flight turn's
- * correlationId). Disjoint from the conflict (`confirm:`/`cancel:`) and `ask:`
- * prefixes at the wire level, so STOP never collides with the deterministic
- * conflict path or the `ask_user` resume. Resolved by a deterministic no-LLM
- * handler that acknowledges the tap and arms the per-user/per-turn STOP flag — the
- * running turn's loop polls the flag at its cooperative checkpoints.
- */
-export const STOP_CALLBACK_PREFIX = 'stop:';
-
-/**
  * A slash command → the deterministic command handler (no LLM). Carries the
  * normalized command name + args verbatim.
  */
@@ -71,19 +59,6 @@ export interface AnswerFlow {
   contentType: InboundKind;
   callbackId: string | null;
   callbackData: string | null;
-}
-
-/**
- * A STOP-control button tap (Story 14b / ADR 0043) → resolved deterministically,
- * the model is NEVER re-invoked. The handler acknowledges the tap and arms the
- * per-user/per-turn STOP flag the running turn's loop polls. `turnId` is the
- * in-flight turn's correlationId parsed from the `stop:<turnId>` callback data, so
- * the flag is scoped to exactly the turn the STOP control belonged to.
- */
-export interface StopControlFlow {
-  kind: 'stop_control';
-  callbackId: string;
-  turnId: string;
 }
 
 /**
@@ -115,13 +90,12 @@ export interface SimpleMessageFlow {
 }
 
 /**
- * The five mutually-exclusive inbound flows. A discriminated union on `kind` so
+ * The four mutually-exclusive inbound flows. A discriminated union on `kind` so
  * the consumer's dispatch is exhaustive and the divergence gate is a single
  * `switch`.
  */
 export type InboundFlow =
   | CommandFlow
-  | StopControlFlow
   | KeyboardActionFlow
   | AnswerFlow
   | SimpleMessageFlow;
@@ -130,18 +104,16 @@ export type InboundFlow =
  * Classifies one normalized inbound update into exactly one {@link InboundFlow}
  * for the given user. Order matters — it encodes the taxonomy precedence:
  *  1. Command (slash) → CommandFlow (no LLM).
- *  2. Callback whose data starts with `stop:` → StopControlFlow (Story 14b,
- *     deterministic, NO model — arms the per-turn STOP flag).
- *  3. Callback whose data starts with `ask:` → AnswerFlow (button answer).
- *  4. TYPED text equal to a button label AND the reply keyboard is the active
+ *  2. Callback whose data starts with `ask:` → AnswerFlow (button answer).
+ *  3. TYPED text equal to a button label AND the reply keyboard is the active
  *     surface owning that label → KeyboardActionFlow (Story 16, deterministic, NO
  *     model). Gated on the active surface so a user who literally types a label in
  *     normal conversation is NOT hijacked — see the active-surface disambiguation.
  *     This precedes the answer/simple branches because a keyboard tap is plain text
  *     and must be claimed deterministically rather than fed to the model. (A VOICE
  *     transcript is never a keyboard tap — only typed text echoes a label verbatim.)
- *  5. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
- *  6. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
+ *  4. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
+ *  5. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
  *
  * Voice updates are routed by their transcript: the consumer transcribes first
  * and passes the resulting text, so a voice note is classified exactly like a
@@ -169,14 +141,6 @@ export const classifyFlow = async (
 
   if (normalized.kind === InboundKind.Callback && normalized.callbackId) {
     const callbackData = normalized.callbackData ?? '';
-
-    if (callbackData.startsWith(STOP_CALLBACK_PREFIX)) {
-      return {
-        kind: 'stop_control',
-        callbackId: normalized.callbackId,
-        turnId: callbackData.slice(STOP_CALLBACK_PREFIX.length),
-      };
-    }
 
     if (callbackData.startsWith(ASK_CALLBACK_PREFIX)) {
       return {

@@ -123,28 +123,6 @@ export const debounceBufferKey = (userId: string): string =>
   `${DEBOUNCE_BUFFER_KEY_PREFIX}:${userId}`;
 
 /**
- * Prefix for the per-user/per-turn cooperative STOP flag (Story 14b / ADR 0043),
- * keyed by the Cue user id AND the in-flight turn's id (the correlationId). When
- * the user taps the STOP control's inline button (`stop:` callback) the handler
- * SETs this key (short TTL); the tool loop checks it between rounds and after each
- * committed write and, when set, stops GRACEFULLY — keeping committed writes and
- * replying with a programmatic ledger summary (NO AI call). Keying by turn id is
- * what makes the flag turn-scoped: a stale flag from a previous turn can never
- * abort a fresh turn (a fresh turn has a new correlationId), and the turn clears
- * its own key on exit. Disjoint keyspace from the lock / status / ask / debounce
- * keys so the STOP flag never collides with any other assistant state.
- */
-export const STOP_FLAG_KEY_PREFIX = 'assistant:stop';
-
-/**
- * Builds the per-user/per-turn STOP-flag key (Story 14b / ADR 0043). Scoped by
- * BOTH the user id and the turn id (correlationId) so the flag aborts only the
- * exact in-flight turn the STOP control belongs to — never a later, fresh turn.
- */
-export const stopFlagKey = (userId: string, turnId: string): string =>
-  `${STOP_FLAG_KEY_PREFIX}:${userId}:${turnId}`;
-
-/**
  * Builds the STABLE per-user BullMQ jobId for the debounce-drain job (Story 14a /
  * ADR 0042). Because the jobId is keyed only by user, re-arming a window targets
  * the SAME job: the coordinator removes the still-delayed job and re-adds it with

@@ -5,7 +5,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { CommandHandlerService } from './commands/command-handler.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
 import { ConversationStore } from './session/conversation.store';
-import { StopFlagStore } from './session/stop-flag.store';
 import {
   Conversation,
   ConversationMessageContentType,
@@ -22,23 +21,14 @@ export interface HandleCommandParams {
   correlationId?: string;
 }
 
-/** Parameters for handling a STOP-control button tap (Story 14b / ADR 0043). */
-export interface HandleStopControlParams {
-  callbackId: string;
-  /** The in-flight turn's id (correlationId), parsed from the `stop:<turnId>` data. */
-  turnId: string;
-  /** Correlation id of THIS callback update (for logging); minted if absent. */
-  correlationId?: string;
-}
-
 /**
  * The assistant's deterministic, no-LLM command surface (ADR 0036). Since the
  * turn lifecycle moved down into {@link TurnRunnerService}, this is a thin facade
- * over the deterministic paths that never run the tool loop: a slash command (run
- * the handler, reply, persist a synthetic summary line) and a STOP-control tap
- * (arm the per-turn STOP flag). The model is never re-invoked here. The former
- * ADR-0006 conflict-confirm callback path was removed with the deterministic hold
- * (ADR 0011 — conflicts are now resolved inside the tool loop).
+ * over the deterministic path that never runs the tool loop: a slash command (run
+ * the handler, reply, persist a synthetic summary line). The model is never
+ * re-invoked here. The former ADR-0006 conflict-confirm callback path was removed
+ * with the deterministic hold (ADR 0011 — conflicts are now resolved inside the
+ * tool loop).
  */
 @Injectable()
 export class AssistantService {
@@ -48,7 +38,6 @@ export class AssistantService {
     private readonly commandHandler: CommandHandlerService,
     private readonly conversationStore: ConversationStore,
     private readonly replyPresenter: ReplyPresenter,
-    private readonly stopFlags: StopFlagStore,
   ) {}
 
   /**
@@ -111,36 +100,5 @@ export class AssistantService {
       result.syntheticLine,
       null,
     );
-  }
-
-  /**
-   * Handles a STOP-control button tap deterministically (Story 14b / ADR 0043) —
-   * no LLM. Acknowledges the callback (stops the client spinner) and ARMS the
-   * per-user/per-turn STOP flag keyed by the in-flight turn's id, which the running
-   * turn's tool loop polls at its cooperative checkpoints (between rounds + after
-   * each committed write) to halt gracefully. It does NOT touch the in-flight turn
-   * directly: the running turn (under the per-user lock) keeps committed writes and
-   * sends the programmatic summary itself when it next reaches a checkpoint. Both
-   * the ack and the arm degrade never-throw, so a STOP tap can never break the
-   * `attempts:1` callback path; an empty/garbled `turnId` simply arms nothing
-   * pollable and is a harmless no-op.
-   */
-  async handleStopControl(
-    user: User,
-    params: HandleStopControlParams,
-  ): Promise<void> {
-    const correlationId = params.correlationId ?? randomUUID();
-
-    this.logger.log(
-      `[cid=${correlationId}] STOP tapped for turn ${params.turnId} by user ${user.id}`,
-    );
-
-    await this.replyPresenter.acknowledgeCallback(params.callbackId);
-
-    if (!params.turnId) {
-      return;
-    }
-
-    await this.stopFlags.arm(user.id, params.turnId);
   }
 }

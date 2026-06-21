@@ -87,9 +87,6 @@ const buildConsumer = (
   const assistantService = {
     handleCommand: jest.fn().mockResolvedValue(undefined),
     handleCallback: jest.fn().mockResolvedValue(undefined),
-    // Story 14b (ADR 0043): the deterministic STOP-control handler the consumer
-    // dispatches a `stop:` callback to (it never buffers / never runs the loop).
-    handleStopControl: jest.fn().mockResolvedValue(undefined),
   };
   // Story 16 (ADR 0045): the deterministic reply-keyboard action handler the
   // consumer dispatches a `keyboard_action` flow to (renders a calendar / swaps the
@@ -216,6 +213,40 @@ describe('WebhookConsumer', () => {
     expect(
       harness.debounceCoordinator.runAnswerExclusive,
     ).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the STT-reported language into the debounce buffer (v2 Task 4 / ADR 0051 — was discarded)', async () => {
+    const normalized: NormalizedInboundMessage = {
+      kind: InboundKind.Voice,
+      vendorChatId: 'chat-1',
+      vendorUserId: 'u-1',
+      dedupeId: '109',
+      languageCode: 'en',
+      media: { vendorFileId: 'file-1', mimeHint: 'audio/ogg' },
+    };
+    const harness = buildConsumer(normalized);
+
+    harness.connector.fetchMedia.mockResolvedValue({
+      bytes: Buffer.from([1, 2, 3]),
+      mimeType: 'audio/ogg',
+    });
+    // The STT model reports the spoken language — it must be threaded onward so the
+    // post-STT loading words switch to it (previously the language was dropped).
+    harness.stt.transcribe.mockResolvedValue({
+      text: 'перенеси встречу на завтра',
+      language: 'ru',
+    });
+
+    await harness.consumer.process(buildJob('{"update_id":109}'));
+
+    expect(harness.debounceCoordinator.buffer).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        text: 'перенеси встречу на завтра',
+        kind: InboundKind.Voice,
+        sttLanguage: 'ru',
+      }),
+    );
   });
 
   it('replies "couldn\'t hear that" and persists no turn when STT is unavailable', async () => {
@@ -391,36 +422,6 @@ describe('WebhookConsumer', () => {
       expect.any(String),
       'cid-1',
     );
-  });
-
-  it('routes a stop: callback to the deterministic STOP handler — never buffers or runs the loop (Story 14b)', async () => {
-    const normalized: NormalizedInboundMessage = {
-      kind: InboundKind.Callback,
-      vendorChatId: 'chat-1',
-      vendorUserId: 'u-1',
-      dedupeId: '108',
-      callbackId: 'cb-stop',
-      callbackData: 'stop:turn-xyz',
-    };
-    const harness = buildConsumer(normalized);
-
-    await harness.consumer.process(buildJob('{"update_id":108}'));
-
-    // The STOP tap is handled deterministically with the parsed turn id…
-    expect(harness.assistantService.handleStopControl).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'user-1' }),
-      expect.objectContaining({
-        callbackId: 'cb-stop',
-        turnId: 'turn-xyz',
-        correlationId: 'cid-1',
-      }),
-    );
-    // …and it NEVER touches the debounce queue or the turn runner (so a STOP during
-    // a queued/debounced batch cannot corrupt the queue or start a turn).
-    expect(harness.debounceCoordinator.buffer).not.toHaveBeenCalled();
-    expect(
-      harness.debounceCoordinator.runAnswerExclusive,
-    ).not.toHaveBeenCalled();
   });
 
   it('releases the dedupe guard and rethrows when processing fails (so the job retries)', async () => {

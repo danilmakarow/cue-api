@@ -1,6 +1,7 @@
 import { ExternalVendorConfig } from '@/modules/external-vendor/external-vendor.config';
 import {
   AcknowledgeOptions,
+  MessageDraft,
   OutboundActions,
   OutboundKeyboardMessage,
   OutboundMessage,
@@ -14,17 +15,8 @@ export type CapturedSendMethod =
   | 'sendMessage'
   | 'sendActions'
   | 'sendMessageWithKeyboard'
-  | 'acknowledgeCallback'
-  | 'deleteMessage';
-
-/**
- * The Story 14b (ADR 0043) STOP control rides on a `stop:`-prefixed callback
- * button. The capturing connector treats its send + its later removal as FRAMING
- * (a per-turn control envelope), not a substantive reply: it records them in the
- * full `sends` log but `nextSend()` skips them, so a test's `nextSend()` still
- * resolves to the first real reply / keyboard exactly as before STOP existed.
- */
-const STOP_CALLBACK_PREFIX = 'stop:';
+  | 'sendMessageDraft'
+  | 'acknowledgeCallback';
 
 /** One recorded outbound vendor call (the deterministic terminal turn signal). */
 export interface CapturedSend {
@@ -34,6 +26,7 @@ export interface CapturedSend {
     | OutboundMessage
     | OutboundActions
     | OutboundKeyboardMessage
+    | MessageDraft
     | AcknowledgeOptions
     | null;
 }
@@ -109,44 +102,12 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
-   * Whether a captured send is the Story 14b STOP control envelope (its send or
-   * its removal) rather than a substantive reply. The STOP-control send is a
-   * `sendActions` whose button carries a `stop:` callback; its removal is the
-   * `deleteMessage` that tidies it on turn end. Such framing is recorded in the
-   * full `sends` log but skipped by `nextSend()` so reply-ordering assertions are
-   * unchanged from before STOP existed.
-   */
-  private isStopFraming(send: CapturedSend): boolean {
-    if (send.method === 'deleteMessage') {
-      return true;
-    }
-
-    if (send.method !== 'sendActions') {
-      return false;
-    }
-
-    const buttons = (send.payload as OutboundActions | null)?.buttons ?? [];
-
-    return buttons.some((row) =>
-      row.some((button) =>
-        button.callbackData.startsWith(STOP_CALLBACK_PREFIX),
-      ),
-    );
-  }
-
-  /**
    * Records an outbound send and either hands it to a parked `nextSend()` waiter
    * or buffers it for the next `nextSend()` call (so a send that arrives before
-   * the test awaits is never lost). STOP-control framing (Story 14b) is recorded
-   * in the full log but NOT surfaced to `nextSend()` waiters/buffer, so a test's
-   * `nextSend()` resolves to the first substantive reply exactly as before.
+   * the test awaits is never lost).
    */
   private record(send: CapturedSend): void {
     this.captured.push(send);
-
-    if (this.isStopFraming(send)) {
-      return;
-    }
 
     if (this.waiter) {
       const { resolve } = this.waiter;
@@ -242,6 +203,22 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
+   * Captures an ephemeral status draft (`sendMessageDraft`) instead of calling
+   * Telegram — covers the live-status loading frames, the streamed-answer
+   * preview, AND the empty-text collapse frame pushed on finalize (FIX 1 / ADR
+   * 0049). A draft is NOT a terminal turn signal (the real reply is), so it is
+   * logged into `captured` for inspection but does NOT resolve a `nextSend()`
+   * waiter — a test still awaits the substantive `sendMessage`. Returns nothing,
+   * matching the real connector.
+   */
+  async sendMessageDraft(
+    target: SendTarget,
+    draft: MessageDraft,
+  ): Promise<void> {
+    this.captured.push({ method: 'sendMessageDraft', target, payload: draft });
+  }
+
+  /**
    * Captures a callback acknowledgement (button-tap spinner stop) instead of
    * calling Telegram.
    */
@@ -253,22 +230,6 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
       method: 'acknowledgeCallback',
       target: { vendorChatId: callbackId },
       payload: options ?? null,
-    });
-  }
-
-  /**
-   * Captures a message deletion (Story 14b STOP-control removal) instead of
-   * calling Telegram, so the turn-end teardown never makes a real `deleteMessage`
-   * egress call in e2e. Recorded as STOP framing, so it never perturbs `nextSend()`.
-   */
-  async deleteMessage(
-    target: SendTarget,
-    vendorMessageId: string,
-  ): Promise<void> {
-    this.record({
-      method: 'deleteMessage',
-      target,
-      payload: { text: vendorMessageId },
     });
   }
 

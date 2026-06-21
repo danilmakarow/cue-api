@@ -24,6 +24,13 @@ export interface BufferedMessage {
   correlationId: string;
   chatType?: ChatType;
   languageCode?: string;
+  /**
+   * STT-reported spoken language for a voice note (v2 Task 4 / ADR 0051) — the
+   * highest-priority signal for the post-STT loading-word locale. Undefined for a
+   * typed message or when the STT model does not report a language. The FIRST
+   * buffered entry's value seeds the combined turn (like the other shared fields).
+   */
+  sttLanguage?: string;
 }
 
 /**

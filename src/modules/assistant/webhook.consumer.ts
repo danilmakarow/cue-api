@@ -126,13 +126,17 @@ export class WebhookConsumer extends WorkerHost {
 
   /**
    * Transcribes a voice note to text, mapping STT failures to a user-facing
-   * reply. Returns the transcript, or null when STT failed (the caller replies
-   * and persists no user turn, per the spec).
+   * reply. Returns the transcript AND the STT-reported spoken language (v2 Task 4
+   * / ADR 0051 — previously the language was discarded), or null when STT failed
+   * (the caller replies and persists no user turn, per the spec). The `language`
+   * is best-effort: not every model reports it (e.g. OpenAI's `gpt-4o-*-transcribe`
+   * return only text), so it is `undefined` then and the post-STT locale falls back
+   * to detecting the transcript, then `language_code`, then `en`.
    */
   private async transcribeVoice(
     connector: ReturnType<ExternalVendorConnectorFactory['get']>,
     normalized: NormalizedInboundMessage,
-  ): Promise<string | null> {
+  ): Promise<{ text: string; language?: string } | null> {
     if (!normalized.media) {
       return null;
     }
@@ -143,7 +147,7 @@ export class WebhookConsumer extends WorkerHost {
         translateToEnglish: this.config.translateVoiceToEnglish,
       });
 
-      return result.text;
+      return { text: result.text, language: result.language };
     } catch (error) {
       if (error instanceof SttError) {
         const reply =
@@ -166,7 +170,7 @@ export class WebhookConsumer extends WorkerHost {
   /**
    * Routes a normalized message for a linked user through the L2 inbound router
    * (flow taxonomy) and dispatches the resulting flow: the no-LLM paths (command,
-   * STOP-control) keep their deterministic handlers; the two model paths (simple
+   * keyboard-action) keep their deterministic handlers; the two model paths (simple
    * message, answer) converge at the turn runner.
    *
    * A voice note is transcribed BEFORE classification so it is routed by its
@@ -180,13 +184,17 @@ export class WebhookConsumer extends WorkerHost {
     correlationId: string,
   ): Promise<void> {
     let transcript: string | undefined;
+    let sttLanguage: string | undefined;
     let voiceStatus: StatusAnimation | undefined;
 
     if (normalized.kind === InboundKind.Voice) {
       // Show the localized "Listening to your beautiful voice" line on the SAME
       // (idempotent, keyed by correlationId) status surface the turn-runner will
       // re-use, so the voice notice transitions seamlessly into the loading
-      // animation once STT returns. Begin/voice-state degrade never-throw.
+      // animation once STT returns. The PRE-STT line uses `language_code`/en (no
+      // text yet); the POST-STT loading words switch to the spoken language once
+      // the turn re-opens this surface with `sttLanguage` + the transcript (v2
+      // Task 4 / ADR 0051). Begin/voice-state degrade never-throw.
       voiceStatus = await this.beginVoiceStatus(normalized, correlationId);
 
       const result = await this.transcribeVoice(connector, normalized);
@@ -200,7 +208,10 @@ export class WebhookConsumer extends WorkerHost {
         return;
       }
 
-      transcript = result;
+      transcript = result.text;
+      // The STT-reported spoken language is the HIGHEST-priority locale signal for
+      // the post-STT loading words (v2 Task 4 / ADR 0051); previously discarded.
+      sttLanguage = result.language;
     }
 
     const flow = await classifyFlow(
@@ -241,26 +252,11 @@ export class WebhookConsumer extends WorkerHost {
       // model. Render the requested ASCII calendar, swap the keyboard surface, or
       // disconnect — all direct reads/writes. It runs OUTSIDE the per-user lock /
       // debounce buffer (it never commits a calendar write and never coalesces with
-      // a message), exactly like the command and STOP paths, and records a
-      // latest-button line the next model turn injects into its volatile tail.
+      // a message), exactly like the command path, and records a latest-button line
+      // the next model turn injects into its volatile tail.
       await this.keyboardActionService.handleKeyboardAction(user, {
         action: flow.action,
         vendorChatId: normalized.vendorChatId,
-        correlationId,
-      });
-
-      return;
-    }
-
-    if (flow.kind === 'stop_control') {
-      // STOP-control tap (Story 14b / ADR 0043): deterministic, NO model — ack the
-      // tap and arm the per-user/per-turn STOP flag the in-flight turn's loop polls.
-      // It runs OUTSIDE the per-user lock (it must reach the lock-holding running
-      // turn, not queue behind it), so it never corrupts the debounce queue or the
-      // running turn — it only flips a Redis flag the turn cooperatively honours.
-      await this.assistantService.handleStopControl(user, {
-        callbackId: flow.callbackId,
-        turnId: flow.turnId,
         correlationId,
       });
 
@@ -294,6 +290,9 @@ export class WebhookConsumer extends WorkerHost {
         callbackId: flow.callbackId,
         chatType: normalized.chatType,
         languageCode: normalized.languageCode,
+        // The STT-reported language (a voice answer) drives the post-STT loading
+        // words; undefined for a typed answer (v2 Task 4 / ADR 0051).
+        sttLanguage,
       });
 
       return;
@@ -309,9 +308,12 @@ export class WebhookConsumer extends WorkerHost {
       vendorChatId: normalized.vendorChatId,
       correlationId,
       // Live-status surface inputs (Story 12 / ADR 0012): the chat kind gates the
-      // private-only draft, the language tag selects the localized vocabulary.
+      // private-only draft. The loading-word locale follows the MESSAGE first (v2
+      // Task 4 / ADR 0051): the combined text's detected language, the STT-reported
+      // spoken language for a voice note (highest priority), then `language_code`.
       chatType: normalized.chatType,
       languageCode: normalized.languageCode,
+      sttLanguage,
     });
 
     // FIX 3 — a NON-first voice note opened its own 'Listening…' surface (keyed by

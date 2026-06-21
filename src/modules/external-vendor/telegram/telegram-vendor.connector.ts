@@ -152,6 +152,10 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       return 'MarkdownV2';
     }
 
+    if (format === OutboundFormat.Html) {
+      return 'HTML';
+    }
+
     return undefined;
   }
 

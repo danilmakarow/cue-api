@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { buildAskKeyboard, buildStopKeyboard } from './quick-reply.builder';
+import { markdownToTelegramHtml } from './markdown-to-telegram-html';
+import { buildAskKeyboard } from './quick-reply.builder';
 import { AskUserOption } from '../assistant.types';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
@@ -29,11 +30,47 @@ export class ReplyPresenter {
   ) {}
 
   /**
-   * Sends a plain text reply, swallowing a send failure (e.g. the user blocked
-   * the bot) with a log rather than crashing the turn. Returns the vendor
-   * message id when the send succeeded, or null when it failed.
+   * Sends a model answer reply, formatted as Telegram HTML (ADR 0049): the model
+   * writes Markdown, which Telegram would otherwise show literally, so the text
+   * is converted to the safe HTML subset and sent with {@link OutboundFormat.Html}.
+   * If that formatted send fails (e.g. a malformed-HTML 400, or the user blocked
+   * the bot) it retries ONCE as PLAIN text (no parse_mode) so the user ALWAYS
+   * gets the answer rather than silence. Returns the vendor message id of the
+   * delivered message, or null when even the plain retry failed.
    */
   async sendText(
+    vendorChatId: string,
+    text: string,
+    correlationId?: string,
+  ): Promise<string | null> {
+    const html = markdownToTelegramHtml(text);
+
+    try {
+      const ref = await this.vendor.sendMessage(
+        { vendorChatId },
+        { text: html, format: OutboundFormat.Html },
+      );
+
+      return ref.vendorMessageId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] HTML reply to ${vendorChatId} failed (${message}); retrying as plain text`,
+      );
+
+      return this.sendPlainTextFallback(vendorChatId, text, correlationId);
+    }
+  }
+
+  /**
+   * Last-resort PLAIN-text send (no parse_mode) used when the formatted
+   * {@link sendText} attempt failed. Sends the ORIGINAL (un-converted) text so a
+   * formatting bug never strips meaning, swallowing a second failure with a log
+   * so a blocked-bot / down-vendor never crashes the turn. Returns the delivered
+   * message id, or null when this final attempt also failed.
+   */
+  private async sendPlainTextFallback(
     vendorChatId: string,
     text: string,
     correlationId?: string,
@@ -46,7 +83,7 @@ export class ReplyPresenter {
       const message = error instanceof Error ? error.message : 'unknown error';
 
       this.logger.warn(
-        `[cid=${correlationId ?? 'none'}] Failed to send reply to ${vendorChatId}: ${message}`,
+        `[cid=${correlationId ?? 'none'}] Plain-text reply to ${vendorChatId} also failed: ${message}`,
       );
 
       return null;
@@ -89,68 +126,6 @@ export class ReplyPresenter {
     }
 
     return null;
-  }
-
-  /**
-   * Sends the in-turn STOP control (Story 14b / ADR 0043): a SEPARATE real message
-   * (drafts carry no buttons) carrying a single STOP button whose callback data is
-   * `stop:<turnId>`. Shown while the turn runs; the returned vendor message id lets
-   * the turn runner delete it when the turn ends ({@link removeStopControl}).
-   * Swallows a send failure with a log (mirroring {@link sendText}) and returns null
-   * — a missing STOP control simply means the turn cannot be cooperatively stopped,
-   * never a broken turn.
-   */
-  async sendStopControl(
-    vendorChatId: string,
-    turnId: string,
-    correlationId?: string,
-  ): Promise<string | null> {
-    try {
-      const ref = await this.vendor.sendActions(
-        { vendorChatId },
-        {
-          text: 'Working on it…',
-          buttons: buildStopKeyboard(turnId),
-        },
-      );
-
-      return ref.vendorMessageId;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'unknown error';
-
-      this.logger.warn(
-        `[cid=${correlationId ?? 'none'}] Failed to send STOP control to ${vendorChatId}: ${message}`,
-      );
-
-      return null;
-    }
-  }
-
-  /**
-   * Removes the in-turn STOP control message once the turn ends (Story 14b / ADR
-   * 0043), so a finished turn leaves no dangling STOP button. A no-op when no
-   * control was sent (null id). Swallows a delete failure with a log — a stale STOP
-   * button is harmless (its callback arms a flag for an already-finished, turn-
-   * scoped key that nothing polls).
-   */
-  async removeStopControl(
-    vendorChatId: string,
-    vendorMessageId: string | null,
-    correlationId?: string,
-  ): Promise<void> {
-    if (!vendorMessageId) {
-      return;
-    }
-
-    try {
-      await this.vendor.deleteMessage({ vendorChatId }, vendorMessageId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'unknown error';
-
-      this.logger.debug(
-        `[cid=${correlationId ?? 'none'}] Failed to remove STOP control ${vendorMessageId} in ${vendorChatId}: ${message}`,
-      );
-    }
   }
 
   /**

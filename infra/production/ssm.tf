@@ -54,14 +54,34 @@ locals {
     ASSISTANT_APP_LINK_BASE_URL = var.assistant_app_link_base_url
 
     # Assistant orchestration knobs (formerly Zod defaults; now required, so set explicitly).
-    ASSISTANT_MAX_TOOL_ROUNDTRIPS       = "8"
-    ASSISTANT_MAX_SCHEDULE_FETCHES      = "5"
-    ASSISTANT_HELD_CONFLICT_TTL_SECONDS = "600"
-    ASSISTANT_LINK_NONCE_TTL_SECONDS    = "600"
-    ASSISTANT_DEDUPE_TTL_SECONDS        = "3600"
-    ASSISTANT_RECENT_WINDOW_SIZE        = "10"
-    ASSISTANT_PRELOAD_HORIZON_DAYS      = "7"
-    ASSISTANT_SUMMARIZE_THRESHOLD       = "20"
+    ASSISTANT_MAX_TOOL_ROUNDTRIPS    = "8"
+    ASSISTANT_MAX_SCHEDULE_FETCHES   = "5"
+    ASSISTANT_MAX_CORRECTIONS        = "5"
+    ASSISTANT_LINK_NONCE_TTL_SECONDS = "600"
+    ASSISTANT_DEDUPE_TTL_SECONDS     = "3600"
+    ASSISTANT_RECENT_WINDOW_SIZE     = "10"
+    ASSISTANT_PRELOAD_HORIZON_DAYS   = "7"
+    ASSISTANT_SUMMARIZE_THRESHOLD    = "20"
+
+    # ask_user durable suspend/resume (v1 Story 5).
+    ASSISTANT_ASK_USER_TTL_SECONDS     = "1800"
+    ASSISTANT_ASK_USER_RETENTION_HOURS = "168"
+
+    # v2 per-user serialization lock (Wave A) — RENEW must be strictly < TTL (enforced by a Zod boot guard).
+    ASSISTANT_USER_LOCK_TTL_MS   = "30000"
+    ASSISTANT_USER_LOCK_RENEW_MS = "10000"
+
+    # v2 live-status / streaming surface (Waves A-B).
+    ASSISTANT_STATUS_SESSION_TTL_SECONDS = "120"
+    ASSISTANT_STATUS_DOT_INTERVAL_MS     = "500"
+    ASSISTANT_STATUS_WORD_INTERVAL_MS    = "5000"
+
+    # v2 message debounce + queue-after (Wave C, Story 14a).
+    ASSISTANT_DEBOUNCE_WINDOW_MS      = "2000"
+    ASSISTANT_DEBOUNCE_QUEUE_AFTER_MS = "750"
+
+    # v2 reply-keyboard latest-button context (Wave E, Story 16).
+    ASSISTANT_LAST_BUTTON_TTL_SECONDS = "300"
   }
 }
 

@@ -25,11 +25,16 @@ export enum InboundKind {
 
 /**
  * Outbound text formatting hint. Connectors map this to their vendor's scheme
- * (e.g. Telegram `parse_mode`). `Plain` means no special formatting.
+ * (e.g. Telegram `parse_mode`). `Plain` means no special formatting. `Html` is
+ * the model-answer path's preferred rich format — the egress layer converts the
+ * model's Markdown to Telegram's restricted HTML subset (ADR 0049) because
+ * MarkdownV2 requires escaping a wide set of punctuation and any miss 400s the
+ * whole send; HTML escapes only `< > &` and so is far harder to malform.
  */
 export enum OutboundFormat {
   Plain = 'plain',
   Markdown = 'markdown',
+  Html = 'html',
 }
 
 /**

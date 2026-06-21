@@ -122,13 +122,6 @@ export const environmentSchema = z
     // batch re-polls promptly once the lock frees.
     ASSISTANT_DEBOUNCE_WINDOW_MS: z.coerce.number().int().positive(),
     ASSISTANT_DEBOUNCE_QUEUE_AFTER_MS: z.coerce.number().int().positive(),
-    // Cooperative STOP flag (Story 14b, ADR 0043) TTL (seconds): how long a STOP
-    // request set by the user's tap stays armed in Redis. It only needs to outlive
-    // one in-flight turn (the loop checks it between rounds + after each write and
-    // the turn clears its own key on exit), so keep it short — a generous multiple
-    // of the user-lock TTL is plenty so a STOP tapped just before a checkpoint is
-    // never missed, while a forgotten flag still self-expires.
-    ASSISTANT_STOP_FLAG_TTL_SECONDS: z.coerce.number().int().positive(),
     // Latest reply-keyboard button result (Story 16, ADR 0045) TTL (seconds): how
     // long the last deterministic button outcome line waits in Redis to be injected
     // into the NEXT model turn's volatile tail (never the cached prefix — ADR 0004).

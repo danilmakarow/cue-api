@@ -35,7 +35,7 @@ export const LAST_BUTTON_STORE = Symbol('LAST_BUTTON_STORE');
  * the context builder READS-and-CLEARS it on the next model turn and injects it
  * into the VOLATILE TAIL only — never the cached prefix (ADR 0004 cache
  * stability). A short TTL is a self-cleaning backstop for a tap with no follow-up
- * message. Redis-only (no DB entity), matching the stop-flag / active-keyboard
+ * message. Redis-only (no DB entity), matching the active-keyboard / user-lock
  * precedent.
  *
  * Every method degrades never-throw: a Redis fault is swallowed (logged at debug);
