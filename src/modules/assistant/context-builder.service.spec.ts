@@ -70,11 +70,17 @@ const buildHarness = () => {
     findAllByUserId: jest.fn().mockResolvedValue([]),
     findConflictPolicy: jest.fn().mockResolvedValue(null),
   };
+  const personaPromptDatabaseService = {
+    findActivePersonaText: jest.fn().mockResolvedValue(null),
+  };
   const scheduleReader = {
     occurrencesInRange: jest.fn().mockResolvedValue([]),
   };
   const taskGroupService = {
     findAllForUser: jest.fn().mockResolvedValue([]),
+  };
+  const lastButtonStore = {
+    takeLatest: jest.fn().mockResolvedValue(null),
   };
 
   const service = new ContextBuilderService(
@@ -82,8 +88,10 @@ const buildHarness = () => {
     conversationMessageDatabaseService as never,
     conversationSummaryDatabaseService as never,
     userMemoryFactDatabaseService as never,
+    personaPromptDatabaseService as never,
     scheduleReader as never,
     taskGroupService as never,
+    lastButtonStore as never,
   );
 
   return {
@@ -91,6 +99,8 @@ const buildHarness = () => {
     scheduleReader,
     taskGroupService,
     userMemoryFactDatabaseService,
+    personaPromptDatabaseService,
+    lastButtonStore,
   };
 };
 
@@ -245,6 +255,129 @@ describe('ContextBuilderService', () => {
     expect(groupsIndex).toBeLessThan(lastBoundaryIndex);
   });
 
+  it('injects the per-user persona BETWEEN profile/groups and the summary, with NO cacheBoundary of its own (Story 18 / ADR 0014)', async () => {
+    const harness = buildHarness();
+
+    harness.taskGroupService.findAllForUser.mockResolvedValue([
+      { name: 'Work' } as TaskGroup,
+    ]);
+    harness.personaPromptDatabaseService.findActivePersonaText.mockResolvedValue(
+      'Persona: a brisk pirate quartermaster.',
+    );
+
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'hi',
+      handleMap: new HandleMap(),
+    });
+
+    const personaIndex = prompt.system.findIndex((block) =>
+      block.content.includes('brisk pirate quartermaster'),
+    );
+    const profileIndex = prompt.system.findIndex((block) =>
+      block.content.startsWith('User profile:'),
+    );
+    const groupsIndex = prompt.system.findIndex((block) =>
+      block.content.includes('Groups:'),
+    );
+    const summaryBoundaryIndex = prompt.system.reduce(
+      (acc, block, index) => (block.cacheBoundary ? index : acc),
+      -1,
+    );
+
+    // The persona block exists, sits AFTER profile and groups …
+    expect(personaIndex).toBeGreaterThan(profileIndex);
+    expect(personaIndex).toBeGreaterThan(groupsIndex);
+    // … and BEFORE breakpoint #2 (the summary block) — inside the per-user region.
+    expect(personaIndex).toBeLessThan(summaryBoundaryIndex);
+    // The persona block carries NO breakpoint of its own (region closed by #2).
+    expect(prompt.system[personaIndex].cacheBoundary).toBeUndefined();
+    // It is resolved for THIS user.
+    expect(
+      harness.personaPromptDatabaseService.findActivePersonaText,
+    ).toHaveBeenCalledWith('user-1');
+  });
+
+  it('falls back to the default Jarvis persona block when the user has set none (and the seed is absent)', async () => {
+    const harness = buildHarness();
+
+    // findActivePersonaText defaults to null in the harness (no custom, no seed).
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'hi',
+      handleMap: new HandleMap(),
+    });
+
+    // The persona block is always present and carries the Jarvis default text.
+    expect(systemText(prompt.system)).toContain('J.A.R.V.I.S.');
+    expect(systemText(prompt.system)).toContain('Adopt this assistant persona');
+  });
+
+  it('keeps breakpoint #1 (shared system + tools prefix) BYTE-IDENTICAL across two DIFFERENT users while only the per-user region differs — the persona never leaks into the cross-user cached prefix (Story 18 / ADR 0014 + ADR 0004)', async () => {
+    // Tools precede `system` in the provider prefix, so block 1 (the system
+    // prompt up to and including breakpoint #1) is THE cross-user cached prefix.
+    // Two users with DIFFERENT personas must share a byte-identical block 1; only
+    // the per-user region (below #1, closed by #2) may diverge.
+    const userA = {
+      id: 'user-A',
+      timezone: 'UTC',
+      displayName: 'Tony',
+    } as User;
+    const userB = {
+      id: 'user-B',
+      timezone: 'UTC',
+      displayName: 'Pepper',
+    } as User;
+
+    const harnessA = buildHarness();
+    const harnessB = buildHarness();
+
+    harnessA.personaPromptDatabaseService.findActivePersonaText.mockResolvedValue(
+      'Persona: a dry English butler.',
+    );
+    harnessB.personaPromptDatabaseService.findActivePersonaText.mockResolvedValue(
+      'Persona: an upbeat surf instructor.',
+    );
+
+    const promptA = await harnessA.service.build({
+      user: userA,
+      conversationId: 'conv-A',
+      currentMessageText: 'hello',
+      handleMap: new HandleMap(),
+    });
+    const promptB = await harnessB.service.build({
+      user: userB,
+      conversationId: 'conv-B',
+      currentMessageText: 'hello',
+      handleMap: new HandleMap(),
+    });
+
+    // Block 1 is everything up to AND including the first cacheBoundary (#1).
+    const breakpointOnePrefix = (system: PromptBlock[]): PromptBlock[] => {
+      const firstBoundary = system.findIndex((block) => block.cacheBoundary);
+
+      return system.slice(0, firstBoundary + 1);
+    };
+
+    const prefixA = breakpointOnePrefix(promptA.system);
+    const prefixB = breakpointOnePrefix(promptB.system);
+
+    // The shared system+tools prefix is byte-identical, cacheBoundary flag and all.
+    expect(prefixB).toEqual(prefixA);
+
+    // Neither user's persona leaked into that cross-user cached prefix.
+    const prefixTextA = prefixA.map((block) => block.content).join('\n');
+
+    expect(prefixTextA).not.toContain('English butler');
+    expect(prefixTextA).not.toContain('surf instructor');
+    // … yet the per-user regions DO diverge: each persona lands below #1.
+    expect(systemText(promptA.system)).toContain('English butler');
+    expect(systemText(promptB.system)).toContain('surf instructor');
+    expect(promptA.system).not.toEqual(promptB.system);
+  });
+
   it('surfaces a standing ALLOW conflict policy into the volatile block AND returns it on the prompt (ADR 0011 + 0044)', async () => {
     const harness = buildHarness();
 
@@ -302,5 +435,99 @@ describe('ContextBuilderService', () => {
       /Standing conflict policy/,
     );
     expect(prompt.conflictPolicy).toBeNull();
+  });
+
+  it('injects the latest reply-keyboard button result into the VOLATILE tail, never a cached prefix block (Story 16 / ADR 0045)', async () => {
+    const harness = buildHarness();
+
+    harness.lastButtonStore.takeLatest.mockResolvedValue(
+      "Showed today's schedule.",
+    );
+
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'what about tomorrow?',
+      handleMap: new HandleMap(),
+    });
+
+    // The line lands in the final (volatile) message block …
+    expect(finalUserContent(prompt.messages)).toContain(
+      "Showed today's schedule.",
+    );
+    // … and is read-then-cleared exactly once for THIS user (one-shot nudge).
+    expect(harness.lastButtonStore.takeLatest).toHaveBeenCalledWith('user-1');
+    expect(harness.lastButtonStore.takeLatest).toHaveBeenCalledTimes(1);
+    // It NEVER appears in any cached-prefix (system) block — the persona/profile/
+    // groups/summary blocks must stay byte-stable for ADR 0004 cache hits.
+    expect(systemText(prompt.system)).not.toContain("Showed today's schedule.");
+  });
+
+  it('omits the latest-button line entirely when none is pending', async () => {
+    const harness = buildHarness();
+
+    // takeLatest defaults to null in the harness.
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'hi',
+      handleMap: new HandleMap(),
+    });
+
+    expect(finalUserContent(prompt.messages)).not.toContain('Recent action');
+  });
+
+  it('keeps the cached prefix (system blocks) byte-IDENTICAL whether or not a latest-button line is present (ADR 0004 cache stability)', async () => {
+    // Build once with NO pending button, once WITH one. The two volatile tails
+    // differ, but the system blocks (tools precede system in the provider prefix,
+    // so these ARE the cached region down to breakpoint #2) must be byte-for-byte
+    // identical — otherwise the latest-button injection would defeat the cache.
+    const withoutButton = buildHarness();
+    const withButton = buildHarness();
+
+    withButton.lastButtonStore.takeLatest.mockResolvedValue('Opened Settings.');
+
+    const baseInput = {
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'hello',
+    };
+
+    const promptA = await withoutButton.service.build({
+      ...baseInput,
+      handleMap: new HandleMap(),
+    });
+    const promptB = await withButton.service.build({
+      ...baseInput,
+      handleMap: new HandleMap(),
+    });
+
+    // The volatile tails diverge (the button line only in B) …
+    expect(finalUserContent(promptB.messages)).toContain('Opened Settings.');
+    expect(finalUserContent(promptA.messages)).not.toContain(
+      'Opened Settings.',
+    );
+    // … but the cached prefix is byte-identical, including every cacheBoundary flag.
+    expect(promptB.system).toEqual(promptA.system);
+  });
+
+  it('still injects the latest-button line even when the agenda is empty (volatile-only, prefix untouched)', async () => {
+    const harness = buildHarness();
+
+    harness.lastButtonStore.takeLatest.mockResolvedValue(
+      'Disconnected Telegram.',
+    );
+
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'are you there?',
+      handleMap: new HandleMap(),
+    });
+
+    expect(finalUserContent(prompt.messages)).toContain(
+      'Disconnected Telegram.',
+    );
+    expect(systemText(prompt.system)).not.toContain('Disconnected Telegram.');
   });
 });

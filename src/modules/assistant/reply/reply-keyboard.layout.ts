@@ -1,0 +1,122 @@
+/**
+ * L9 reply-keyboard layout — the single source of truth for the persistent
+ * reply-keyboard surfaces the assistant docks (Story 16 / ADR 0045) and the
+ * text-equality routing of their taps. Reply-keyboard taps arrive as PLAIN TEXT
+ * equal to the button label (NOT a callback — Verified Telegram facts, ADR 0012),
+ * so the label IS the routing key. Keeping the labels, the per-surface keyboards,
+ * and the label→action map in ONE module means the surface a user sees, the
+ * active-surface flag the router gates on, and the action the tap resolves to can
+ * never drift apart.
+ *
+ * Two surfaces: the MAIN keyboard ([Today's schedule] [Next week] [Settings]) and
+ * the SETTINGS keyboard ([Disconnect] [Back]). Both are persistent
+ * (`is_persistent` + `resize_keyboard`, via the Story-10 primitive); swapping one
+ * for the other is just sending a new message with the other's markup, and
+ * Disconnect removes the keyboard entirely (`ReplyKeyboardRemove`).
+ *
+ * See `docs/specs/assistant-layered-architecture.md` → L9 reply/egress.
+ */
+
+import { ReplyKeyboard } from '@/modules/external-vendor/external-vendor.types';
+
+/**
+ * Stable identifier of which reply-keyboard surface is docked for a user. Stored
+ * verbatim as the value of the active-surface Redis flag, so the router can both
+ * test "is a keyboard active?" (key present) and "does THIS keyboard own the
+ * tapped label?" (its label set) without re-deriving the layout.
+ */
+export enum KeyboardSurface {
+  Main = 'main',
+  Settings = 'settings',
+}
+
+/** The action a reply-keyboard tap resolves to (all deterministic — NO LLM). */
+export enum KeyboardAction {
+  /** [Today's schedule] — render today's ASCII calendar. */
+  TodaySchedule = 'today_schedule',
+  /** [Next week] — render the next 7-day ASCII calendar. */
+  NextWeek = 'next_week',
+  /** [Settings] — swap the main keyboard for the settings keyboard. */
+  OpenSettings = 'open_settings',
+  /** [Disconnect] — unlink Telegram and remove the keyboard. */
+  Disconnect = 'disconnect',
+  /** [Back] — swap the settings keyboard back to the main keyboard. */
+  Back = 'back',
+}
+
+/** Button labels — the verbatim text a tap echoes back as inbound plain text. */
+export const KEYBOARD_LABELS = {
+  todaySchedule: "Today's schedule",
+  nextWeek: 'Next week',
+  settings: 'Settings',
+  disconnect: 'Disconnect',
+  back: 'Back',
+} as const;
+
+/** The main reply keyboard: one row of [Today's schedule] [Next week] [Settings]. */
+export const MAIN_KEYBOARD: ReplyKeyboard = {
+  buttons: [
+    [
+      { label: KEYBOARD_LABELS.todaySchedule },
+      { label: KEYBOARD_LABELS.nextWeek },
+      { label: KEYBOARD_LABELS.settings },
+    ],
+  ],
+};
+
+/** The settings reply keyboard: one row of [Disconnect] [Back]. */
+export const SETTINGS_KEYBOARD: ReplyKeyboard = {
+  buttons: [
+    [{ label: KEYBOARD_LABELS.disconnect }, { label: KEYBOARD_LABELS.back }],
+  ],
+};
+
+/**
+ * Maps each surface to the label→action table of the buttons it owns. The router
+ * resolves a tapped label to an action ONLY through the table of the CURRENTLY
+ * docked surface, so a label that exists on another surface is never honoured out
+ * of context (e.g. "Back" is inert while the main keyboard is docked).
+ */
+const SURFACE_ACTIONS: Record<
+  KeyboardSurface,
+  Record<string, KeyboardAction>
+> = {
+  [KeyboardSurface.Main]: {
+    [KEYBOARD_LABELS.todaySchedule]: KeyboardAction.TodaySchedule,
+    [KEYBOARD_LABELS.nextWeek]: KeyboardAction.NextWeek,
+    [KEYBOARD_LABELS.settings]: KeyboardAction.OpenSettings,
+  },
+  [KeyboardSurface.Settings]: {
+    [KEYBOARD_LABELS.disconnect]: KeyboardAction.Disconnect,
+    [KEYBOARD_LABELS.back]: KeyboardAction.Back,
+  },
+};
+
+/**
+ * Resolves a tapped label to its {@link KeyboardAction} WITHIN the docked surface,
+ * or null when the docked surface does not own that label. This is the precise
+ * disambiguation that prevents hijacking a typed label: a message is a keyboard
+ * action only when the surface is active (the caller already checked the flag is
+ * present) AND that surface actually owns the exact label.
+ */
+export const resolveKeyboardAction = (
+  surface: KeyboardSurface,
+  label: string,
+): KeyboardAction | null => {
+  return SURFACE_ACTIONS[surface][label] ?? null;
+};
+
+/**
+ * Narrows a raw stored flag value to a {@link KeyboardSurface}, or null when the
+ * value is absent/unknown (no keyboard is the active surface). Keeps the router's
+ * gate total — a corrupt or missing flag simply means "not a keyboard action".
+ */
+export const toKeyboardSurface = (
+  value: string | null,
+): KeyboardSurface | null => {
+  if (value === KeyboardSurface.Main || value === KeyboardSurface.Settings) {
+    return value;
+  }
+
+  return null;
+};

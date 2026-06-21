@@ -164,6 +164,19 @@ export class AssistantConfig {
     });
   }
 
+  /**
+   * TTL (seconds) for the latest reply-keyboard button result (Story 16 / ADR
+   * 0045): how long the last deterministic button outcome line waits in Redis
+   * before injection into the next model turn's volatile tail. Read-then-cleared
+   * on the next turn, so this is only a self-cleaning backstop for a tap with no
+   * follow-up message.
+   */
+  get lastButtonTtlSeconds(): number {
+    return this.configService.get('ASSISTANT_LAST_BUTTON_TTL_SECONDS', {
+      infer: true,
+    });
+  }
+
   /** TTL (seconds) for a single-use link nonce. */
   get linkNonceTtlSeconds(): number {
     return this.configService.get('ASSISTANT_LINK_NONCE_TTL_SECONDS', {

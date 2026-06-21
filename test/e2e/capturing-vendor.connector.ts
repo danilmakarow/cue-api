@@ -2,6 +2,7 @@ import { ExternalVendorConfig } from '@/modules/external-vendor/external-vendor.
 import {
   AcknowledgeOptions,
   OutboundActions,
+  OutboundKeyboardMessage,
   OutboundMessage,
   SendTarget,
   VendorMessageRef,
@@ -12,6 +13,7 @@ import { TelegramVendorConnector } from '@/modules/external-vendor/telegram/tele
 export type CapturedSendMethod =
   | 'sendMessage'
   | 'sendActions'
+  | 'sendMessageWithKeyboard'
   | 'acknowledgeCallback'
   | 'deleteMessage';
 
@@ -28,7 +30,12 @@ const STOP_CALLBACK_PREFIX = 'stop:';
 export interface CapturedSend {
   method: CapturedSendMethod;
   target: SendTarget | null;
-  payload: OutboundMessage | OutboundActions | AcknowledgeOptions | null;
+  payload:
+    | OutboundMessage
+    | OutboundActions
+    | OutboundKeyboardMessage
+    | AcknowledgeOptions
+    | null;
 }
 
 /** A promise paired with its resolver, used to await the next outbound send. */
@@ -210,6 +217,26 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
     actions: OutboundActions,
   ): Promise<VendorMessageRef> {
     this.record({ method: 'sendActions', target, payload: actions });
+
+    return { vendorMessageId: this.nextVendorMessageId() };
+  }
+
+  /**
+   * Captures a reply-keyboard message (Story 16 / ADR 0045) instead of calling
+   * Telegram — the deterministic keyboard-action paths (calendar render / keyboard
+   * swap / disconnect) end in this send. Recorded as a substantive reply (NOT
+   * framing), so a test can await it via `nextSend()` and assert the docked keyboard
+   * markup. Returns a synthetic numeric message ref.
+   */
+  async sendMessageWithKeyboard(
+    target: SendTarget,
+    message: OutboundKeyboardMessage,
+  ): Promise<VendorMessageRef> {
+    this.record({
+      method: 'sendMessageWithKeyboard',
+      target,
+      payload: message,
+    });
 
     return { vendorMessageId: this.nextVendorMessageId() };
   }

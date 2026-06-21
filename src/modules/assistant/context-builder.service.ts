@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
 import { AssistantConfig } from './assistant.config';
 import { ASSISTANT_SYSTEM_PROMPT } from './assistant.prompts';
 import { formatTaskLine } from './event-formatting';
 import { ScheduleReaderService } from './schedule-reader.service';
+import { LAST_BUTTON_STORE } from './session/last-button.store';
+import type { LastButtonReadPort } from './session/last-button.store';
 import { HandleMap } from './tools/handle-map';
 import { toolRegistry } from './tools/tool-registry';
 import { PromptBlock, PromptRole, ToolSchema } from '@/modules/ai/ai.types';
@@ -19,8 +21,10 @@ import {
 import {
   ConversationMessageDatabaseService,
   ConversationSummaryDatabaseService,
+  PersonaPromptDatabaseService,
   UserMemoryFactDatabaseService,
 } from '@/modules/database/services';
+import { DEFAULT_PERSONA_TEXT } from '@/modules/persona/persona.constants';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
 
 /** Max characters of a memory fact's value rendered into the profile block. */
@@ -66,10 +70,13 @@ export interface BuildPromptInput {
  * Assembles the per-turn prompt in the fixed block order with two cache
  * breakpoints and the timestamp below both (ADR 0004), pulling the three memory
  * tiers (ADR 0005) and the preloaded + query-aware schedule (ADR 0006 layers
- * 1–2). The persona block is marked as breakpoint #1 (shared across users; its
- * cached prefix also covers the tool definitions, which precede `system` in the
- * provider prefix), and the rolling summary as breakpoint #2 (per-user). All
- * volatile data — now, agenda, recent window, new message — sits after both.
+ * 1–2). The shared system prompt is marked as breakpoint #1 (shared across all
+ * users; its cached prefix also covers the tool definitions, which precede
+ * `system` in the provider prefix), and the rolling summary as breakpoint #2
+ * (end of the per-user stable region). The per-user PERSONA (Story 18 / ADR
+ * 0014) sits inside that region — between profile/groups and the summary, with
+ * no boundary of its own — so it never leaks into the cross-user block-1 prefix.
+ * All volatile data — now, agenda, recent window, new message — sits after both.
  */
 @Injectable()
 export class ContextBuilderService {
@@ -78,8 +85,11 @@ export class ContextBuilderService {
     private readonly conversationMessageDatabaseService: ConversationMessageDatabaseService,
     private readonly conversationSummaryDatabaseService: ConversationSummaryDatabaseService,
     private readonly userMemoryFactDatabaseService: UserMemoryFactDatabaseService,
+    private readonly personaPromptDatabaseService: PersonaPromptDatabaseService,
     private readonly scheduleReader: ScheduleReaderService,
     private readonly taskGroupService: TaskGroupService,
+    @Inject(LAST_BUTTON_STORE)
+    private readonly lastButtonStore: LastButtonReadPort,
   ) {}
 
   /**
@@ -102,6 +112,19 @@ export class ContextBuilderService {
     });
 
     return `User profile:\n${lines.join('\n')}`;
+  }
+
+  /**
+   * Renders the active persona block (Story 18 / ADR 0014) for the PER-USER
+   * stable region. The text is the user's own persona, the seeded preset, or the
+   * code-constant default — resolved before this call so the block is always
+   * present and byte-stable for a given persona (a cache hit for the breakpoint-#2
+   * region holds until the persona OR the summary changes). It carries NO
+   * `cacheBoundary` of its own: the region is closed by the summary's breakpoint
+   * #2, and block 1 (system prompt + tool defs) is left byte-stable across users.
+   */
+  private static renderPersona(personaText: string): string {
+    return `Adopt this assistant persona for all replies:\n${personaText}`;
   }
 
   /**
@@ -278,6 +301,10 @@ export class ContextBuilderService {
         input.user.id,
       );
     const groups = await this.taskGroupService.findAllForUser(input.user.id);
+    const personaText =
+      (await this.personaPromptDatabaseService.findActivePersonaText(
+        input.user.id,
+      )) ?? DEFAULT_PERSONA_TEXT;
     const summary = await this.conversationSummaryDatabaseService.findLatest(
       input.conversationId,
     );
@@ -310,6 +337,16 @@ export class ContextBuilderService {
       stableUserBlocks.push({ role: PromptRole.USER, content: groupsLine });
     }
 
+    // Per-user persona (Story 18 / ADR 0014): injected into the per-user stable
+    // region — AFTER profile/groups, BEFORE the rolling summary — with NO
+    // `cacheBoundary`. It is closed by the summary's breakpoint #2 and never
+    // touches block 1 (the shared system prompt + tool defs), which stays
+    // byte-stable across users so the cross-user cached prefix keeps hitting.
+    stableUserBlocks.push({
+      role: PromptRole.USER,
+      content: ContextBuilderService.renderPersona(personaText),
+    });
+
     const system: PromptBlock[] = [
       {
         role: PromptRole.USER,
@@ -331,10 +368,25 @@ export class ContextBuilderService {
     const conflictPolicyLine =
       ContextBuilderService.renderConflictPolicy(conflictPolicy);
 
+    // Latest reply-keyboard button outcome (Story 16 / ADR 0045), read-then-cleared
+    // for a one-shot injection into THIS turn's volatile tail ONLY — never the
+    // cached prefix (the system/profile/groups/summary blocks above stay byte-stable
+    // so the ADR 0004 cache breakpoints keep hitting). Placed in the volatile final
+    // user content alongside the now-context, so a button the user just tapped is
+    // recent context for the model without ever touching the cached region.
+    const lastButtonOutcome = await this.lastButtonStore.takeLatest(
+      input.user.id,
+    );
+    const lastButtonLine =
+      lastButtonOutcome === null
+        ? null
+        : `Recent action (you, via a menu button): ${lastButtonOutcome}`;
+
     const finalUserContent = [
       nowContext,
       queryAware,
       conflictPolicyLine,
+      lastButtonLine,
       `New message: ${input.currentMessageText}`,
     ]
       .filter((section): section is string => section !== null)

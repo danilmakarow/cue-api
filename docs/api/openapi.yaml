@@ -23,6 +23,8 @@ tags:
     description: Task/event CRUD. A Task is the unified event + todo primitive.
   - name: task-groups
     description: TaskGroup CRUD. A TaskGroup is a calendar-owned bucket of tasks that may carry a default recurrence rule.
+  - name: users
+    description: Current-user profile and per-user settings (e.g. the daily notification report).
 
 paths:
   /health:
@@ -710,6 +712,103 @@ paths:
         '404':
           description: No task group with that id.
 
+  /users/me/report-settings:
+    get:
+      tags: [users]
+      summary: Get the current user daily-report settings
+      description: |
+        Returns the signed-in user's daily notification-report settings, creating
+        a default (`enabled: false`, `reportTimeLocal: "08:00"`) on the first read
+        so the iOS Settings screen always has a row to render. Telegram exposes no
+        config — these settings are REST/iOS only. See `docs/adr/0046-assistant-daily-report-scheduler.md`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current daily-report settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportSettingsDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    patch:
+      tags: [users]
+      summary: Update the current user daily-report settings
+      description: |
+        Updates `enabled` and/or `reportTimeLocal` for the signed-in user. Both
+        fields are optional — send only what changed. `reportTimeLocal` must be a
+        24-hour zero-padded `HH:mm`; an out-of-range or malformed value is rejected
+        with 400. Creates the default row first when none exists.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateReportSettingsRequest'
+      responses:
+        '200':
+          description: Updated daily-report settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportSettingsDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /users/me/persona-settings:
+    get:
+      tags: [users]
+      summary: Get the current user AI persona
+      description: |
+        Returns the signed-in user's active AI persona — their own custom text
+        when set, otherwise the seeded out-of-box "Jarvis" preset (a dry, formal
+        English-butler persona). Always returns a usable persona so the iOS
+        Settings screen has something to render. Telegram exposes no config —
+        these settings are REST/iOS only. See `docs/adr/0047-assistant-per-user-persona.md`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The current user's active AI persona.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonaSettingsDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    patch:
+      tags: [users]
+      summary: Update the current user custom AI persona
+      description: |
+        Sets the signed-in user's custom persona text. `promptText` is required,
+        trimmed, and bounded (1–2000 characters); an empty (whitespace-only) or
+        over-long value is rejected with 400. Upserts the user's persona row; the
+        response reflects the persisted persona (`source: custom`).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePersonaSettingsRequest'
+      responses:
+        '200':
+          description: The persisted AI persona.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonaSettingsDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
 components:
   securitySchemes:
     bearerAuth:
@@ -718,6 +817,70 @@ components:
       bearerFormat: JWT
 
   schemas:
+    ReportSettingsDTO:
+      type: object
+      description: |
+        The signed-in user's daily notification-report settings. `reportTimeLocal`
+        is a wall-clock send time interpreted in the user's timezone (User.timezone).
+        The internal last-sent-date idempotency guard is not exposed.
+      required: [enabled, reportTimeLocal]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether the daily report is switched on.
+        reportTimeLocal:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+          example: '08:00'
+          description: Local wall-clock send time as HH:mm (24-hour, zero-padded).
+    UpdateReportSettingsRequest:
+      type: object
+      description: |
+        Partial update for the daily-report settings. Send only the fields that
+        changed; an omitted field is left untouched.
+      properties:
+        enabled:
+          type: boolean
+          description: Switch the daily report on or off.
+        reportTimeLocal:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+          example: '08:00'
+          description: Local wall-clock send time as HH:mm (24-hour, zero-padded).
+    PersonaSettingsDTO:
+      type: object
+      description: |
+        The signed-in user's active AI persona. `promptText` is the persona text
+        the assistant adopts (the user's own when set, else the seeded preset);
+        `source` distinguishes a curated preset from the user's own custom text;
+        `presetName` is the preset's display name when `source` is `preset`,
+        otherwise null.
+      required: [promptText, source, presetName]
+      properties:
+        promptText:
+          type: string
+          description: The active persona instruction text the assistant adopts.
+        source:
+          type: string
+          enum: [preset, custom]
+          description: Whether the active persona is a curated preset or custom text.
+        presetName:
+          type: ['string', 'null']
+          example: 'Jarvis'
+          description: Preset display name when source is `preset`, else null.
+    UpdatePersonaSettingsRequest:
+      type: object
+      description: |
+        Sets the user's custom persona text. `promptText` is required, trimmed,
+        and bounded (1–2000 characters); an empty or over-long value is rejected
+        with 400.
+      required: [promptText]
+      properties:
+        promptText:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: The custom persona instruction text for the assistant.
     RecurrenceRuleDTO:
       type: object
       description: |

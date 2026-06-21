@@ -6,6 +6,7 @@ import { AssistantConfig } from './assistant.config';
 import { CommandHandlerService } from './commands/command-handler.service';
 import { ContextBuilderService } from './context-builder.service';
 import { ScheduleReaderService } from './schedule-reader.service';
+import { LAST_BUTTON_STORE } from './session/last-button.store';
 import { ToolDispatcherService } from './tools/tool-dispatcher.service';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { CalendarModule } from '@/modules/calendar/calendar.module';
@@ -18,6 +19,7 @@ import {
   DeviceDatabaseService,
   NotificationRuleDatabaseService,
   NotificationStrategyDatabaseService,
+  PersonaPromptDatabaseService,
   RecurrenceRuleDatabaseService,
   ScheduledNotificationDatabaseService,
   TaskDatabaseService,
@@ -52,6 +54,7 @@ const DATABASE_SERVICE_TOKENS: Type<unknown>[] = [
   ConversationMessageDatabaseService,
   ConversationSummaryDatabaseService,
   UserMemoryFactDatabaseService,
+  PersonaPromptDatabaseService,
 ];
 
 /**
@@ -86,6 +89,11 @@ const CONFIG_STUB = {
     { provide: ConfigService, useValue: CONFIG_STUB },
     AssistantConfig,
     ScheduleReaderService,
+    // The context builder reads the latest-button line through the narrow read
+    // port (Story 16 / ADR 0045). The real LastButtonStore needs the shared Redis
+    // client, which this hermetic harness deliberately omits; a trivial value stub
+    // for the token keeps the wiring guard focused on the cross-MODULE graph.
+    { provide: LAST_BUTTON_STORE, useValue: { takeLatest: () => null } },
     ContextBuilderService,
     ToolDispatcherService,
     CommandHandlerService,

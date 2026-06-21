@@ -6,12 +6,14 @@ import { Redis } from 'ioredis';
 import { AssistantConfig } from './assistant.config';
 import { AssistantService } from './assistant.service';
 import { WebhookQueueJob } from './assistant.types';
+import { KeyboardActionService } from './commands/keyboard-action.service';
 import { classifyFlow } from './ingress/inbound-router';
 import { LinkingService } from './linking.service';
 import {
   StatusAnimation,
   StatusAnimatorService,
 } from './reply/status-animator.service';
+import { ActiveKeyboardStore } from './session/active-keyboard.store';
 import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
 import { PENDING_INTERACTION_STORE } from './session/pending-interaction.store';
 import type { PendingInteractionStore } from './session/pending-interaction.store';
@@ -68,6 +70,8 @@ export class WebhookConsumer extends WorkerHost {
     private readonly userDatabaseService: UserDatabaseService,
     private readonly linkingService: LinkingService,
     private readonly assistantService: AssistantService,
+    private readonly keyboardActionService: KeyboardActionService,
+    private readonly activeKeyboardStore: ActiveKeyboardStore,
     private readonly debounceCoordinator: DebounceCoordinatorService,
     private readonly statusAnimator: StatusAnimatorService,
     private readonly config: AssistantConfig,
@@ -203,6 +207,7 @@ export class WebhookConsumer extends WorkerHost {
       normalized,
       user,
       this.pendingStore,
+      this.activeKeyboardStore,
       transcript,
     );
 
@@ -210,6 +215,36 @@ export class WebhookConsumer extends WorkerHost {
       await this.assistantService.handleCommand(user, {
         command: flow.command,
         args: flow.args,
+        vendorChatId: normalized.vendorChatId,
+        correlationId,
+      });
+
+      // `/start` and `/link` are the (re)engagement entry points for an
+      // already-linked user (Story 16 / ADR 0045): dock the persistent main reply
+      // keyboard and mark it the active surface so [Today's schedule] [Next week]
+      // [Settings] appear and a subsequent label tap routes deterministically.
+      // Degrades never-throw (the keyboard send + Redis write both swallow faults).
+      if (flow.command === 'start' || flow.command === 'link') {
+        await this.keyboardActionService.showMainKeyboard(
+          user,
+          normalized.vendorChatId,
+          'Tap a button below or just tell me what you need.',
+          correlationId,
+        );
+      }
+
+      return;
+    }
+
+    if (flow.kind === 'keyboard_action') {
+      // A persistent reply-keyboard tap (Story 16 / ADR 0045): deterministic, NO
+      // model. Render the requested ASCII calendar, swap the keyboard surface, or
+      // disconnect — all direct reads/writes. It runs OUTSIDE the per-user lock /
+      // debounce buffer (it never commits a calendar write and never coalesces with
+      // a message), exactly like the command and STOP paths, and records a
+      // latest-button line the next model turn injects into its volatile tail.
+      await this.keyboardActionService.handleKeyboardAction(user, {
+        action: flow.action,
         vendorChatId: normalized.vendorChatId,
         correlationId,
       });

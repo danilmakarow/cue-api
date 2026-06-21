@@ -41,3 +41,5 @@ export type {
   PendingQuestionPayload,
   PendingQuestionOption,
 } from './pending-question.entity';
+export { UserReportSettings } from './user-report-settings.entity';
+export { PersonaPrompt, PersonaPromptSource } from './persona-prompt.entity';

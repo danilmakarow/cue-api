@@ -13,8 +13,10 @@ import { DatabaseModule } from './modules/database/database.module';
 import { DeviceModule } from './modules/device/device.module';
 import { NotificationRuleModule } from './modules/notification-rule/notification-rule.module';
 import { NotificationStrategyModule } from './modules/notification-strategy/notification-strategy.module';
+import { PersonaModule } from './modules/persona/persona.module';
 import { RecurrenceRuleModule } from './modules/recurrence-rule/recurrence-rule.module';
 import { RedisModule } from './modules/redis/redis.module';
+import { ReportModule } from './modules/report/report.module';
 import { ScheduledNotificationModule } from './modules/scheduled-notification/scheduled-notification.module';
 import { TaskModule } from './modules/task/task.module';
 import { TaskGroupModule } from './modules/task-group/task-group.module';
@@ -74,6 +76,8 @@ import { getDatabaseConfig, getDataSource } from '@/config/typeorm.config';
     NotificationRuleModule,
     ScheduledNotificationModule,
     AssistantModule,
+    ReportModule,
+    PersonaModule,
   ],
   controllers: [AppController, WellKnownController],
   providers: [

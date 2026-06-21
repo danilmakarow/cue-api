@@ -10,6 +10,7 @@ import {
   NotificationRule,
   NotificationStrategy,
   PendingQuestion,
+  PersonaPrompt,
   RecurrenceRule,
   ScheduledNotification,
   Task,
@@ -18,6 +19,7 @@ import {
   TelegramLink,
   User,
   UserMemoryFact,
+  UserReportSettings,
 } from './entities';
 import {
   CalendarRepository,
@@ -28,6 +30,7 @@ import {
   NotificationRuleRepository,
   NotificationStrategyRepository,
   PendingQuestionRepository,
+  PersonaPromptRepository,
   RecurrenceRuleRepository,
   ScheduledNotificationRepository,
   TaskGroupRepository,
@@ -35,6 +38,7 @@ import {
   TaskRepository,
   TelegramLinkRepository,
   UserMemoryFactRepository,
+  UserReportSettingsRepository,
   UserRepository,
 } from './repositories';
 import {
@@ -46,6 +50,7 @@ import {
   NotificationRuleDatabaseService,
   NotificationStrategyDatabaseService,
   PendingQuestionDatabaseService,
+  PersonaPromptDatabaseService,
   RecurrenceRuleDatabaseService,
   ScheduledNotificationDatabaseService,
   TaskDatabaseService,
@@ -54,6 +59,7 @@ import {
   TelegramLinkDatabaseService,
   UserDatabaseService,
   UserMemoryFactDatabaseService,
+  UserReportSettingsDatabaseService,
 } from './services';
 
 /**
@@ -81,6 +87,8 @@ import {
       ConversationSummary,
       UserMemoryFact,
       PendingQuestion,
+      UserReportSettings,
+      PersonaPrompt,
     ]),
   ],
   providers: [
@@ -100,6 +108,8 @@ import {
     ConversationSummaryRepository,
     UserMemoryFactRepository,
     PendingQuestionRepository,
+    UserReportSettingsRepository,
+    PersonaPromptRepository,
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
@@ -116,6 +126,8 @@ import {
     ConversationSummaryDatabaseService,
     UserMemoryFactDatabaseService,
     PendingQuestionDatabaseService,
+    UserReportSettingsDatabaseService,
+    PersonaPromptDatabaseService,
   ],
   exports: [
     UserDatabaseService,
@@ -134,6 +146,8 @@ import {
     ConversationSummaryDatabaseService,
     UserMemoryFactDatabaseService,
     PendingQuestionDatabaseService,
+    UserReportSettingsDatabaseService,
+    PersonaPromptDatabaseService,
   ],
 })
 export class DatabaseModule {}

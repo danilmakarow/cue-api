@@ -8,6 +8,7 @@ import { MemoryExtractorService } from './background/memory-extractor.service';
 import { RoundRecapService } from './background/round-recap.service';
 import { SummarizerService } from './background/summarizer.service';
 import { CommandHandlerService } from './commands/command-handler.service';
+import { KeyboardActionService } from './commands/keyboard-action.service';
 import { ContextBuilderService } from './context-builder.service';
 import { DebounceConsumer } from './debounce.consumer';
 import { LinkingService } from './linking.service';
@@ -16,8 +17,13 @@ import { ReplyPresenter } from './reply/reply-presenter.service';
 import { StatusAnimatorService } from './reply/status-animator.service';
 import { StatusSessionStore } from './reply/status-session.store';
 import { ScheduleReaderService } from './schedule-reader.service';
+import { ActiveKeyboardStore } from './session/active-keyboard.store';
 import { ConversationStore } from './session/conversation.store';
 import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
+import {
+  LAST_BUTTON_STORE,
+  LastButtonStore,
+} from './session/last-button.store';
 import { MessageBufferStore } from './session/message-buffer.store';
 import {
   PENDING_INTERACTION_STORE,
@@ -93,6 +99,18 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     ToolDispatcherService,
     ToolLoopService,
     CommandHandlerService,
+    KeyboardActionService,
+    ActiveKeyboardStore,
+    LastButtonStore,
+    {
+      // The context builder reads the latest-button line through the narrow
+      // read port; the keyboard-action handler writes it through the concrete
+      // store. Both resolve to the SAME LastButtonStore instance so the
+      // overwrite-on-write / read-then-clear pair shares one Redis keyspace
+      // (Story 16 / ADR 0045).
+      provide: LAST_BUTTON_STORE,
+      useExisting: LastButtonStore,
+    },
     LinkingService,
     SummarizerService,
     MemoryExtractorService,

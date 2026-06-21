@@ -129,6 +129,13 @@ export const environmentSchema = z
     // of the user-lock TTL is plenty so a STOP tapped just before a checkpoint is
     // never missed, while a forgotten flag still self-expires.
     ASSISTANT_STOP_FLAG_TTL_SECONDS: z.coerce.number().int().positive(),
+    // Latest reply-keyboard button result (Story 16, ADR 0045) TTL (seconds): how
+    // long the last deterministic button outcome line waits in Redis to be injected
+    // into the NEXT model turn's volatile tail (never the cached prefix — ADR 0004).
+    // It is read-then-cleared on the next turn, so this is only a self-cleaning
+    // backstop for a user who taps a button and then never sends a follow-up
+    // message; keep it short (a few minutes).
+    ASSISTANT_LAST_BUTTON_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_LINK_NONCE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_DEDUPE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_RECENT_WINDOW_SIZE: z.coerce.number().int().positive(),

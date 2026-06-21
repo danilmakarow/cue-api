@@ -4,6 +4,10 @@ import { buildAskKeyboard, buildStopKeyboard } from './quick-reply.builder';
 import { AskUserOption } from '../assistant.types';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
+import {
+  OutboundFormat,
+  ReplyKeyboard,
+} from '@/modules/external-vendor/external-vendor.types';
 
 /**
  * L9 reply / egress layer — the SOLE caller of the vendor send surface
@@ -145,6 +149,61 @@ export class ReplyPresenter {
 
       this.logger.debug(
         `[cid=${correlationId ?? 'none'}] Failed to remove STOP control ${vendorMessageId} in ${vendorChatId}: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Sends a text message that ALSO docks a persistent reply keyboard (Story 16 /
+   * ADR 0045), via the Story-10 {@link ExternalVendorConnector.sendMessageWithKeyboard}
+   * primitive (`is_persistent` + `resize_keyboard`). Swapping the docked keyboard
+   * is just sending a new message with the other keyboard's markup. Swallows a send
+   * failure with a log (mirroring {@link sendText}) so a keyboard send can never
+   * crash the deterministic keyboard path; an optional `format` carries through (the
+   * ASCII calendar is sent as Markdown so it lands in a monospace code block).
+   */
+  async sendTextWithKeyboard(
+    vendorChatId: string,
+    text: string,
+    keyboard: ReplyKeyboard,
+    format?: OutboundFormat,
+    correlationId?: string,
+  ): Promise<void> {
+    try {
+      await this.vendor.sendMessageWithKeyboard(
+        { vendorChatId },
+        { text, format, replyKeyboard: keyboard },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] Failed to send keyboard message to ${vendorChatId}: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Sends a text message that REMOVES any docked persistent reply keyboard (Story
+   * 16 / ADR 0045) via the `ReplyKeyboardRemove` sentinel — used by Disconnect so
+   * the keyboard vanishes once the chat is unlinked. Swallows a send failure with a
+   * log (mirroring {@link sendText}).
+   */
+  async sendTextRemovingKeyboard(
+    vendorChatId: string,
+    text: string,
+    correlationId?: string,
+  ): Promise<void> {
+    try {
+      await this.vendor.sendMessageWithKeyboard(
+        { vendorChatId },
+        { text, replyKeyboard: { remove: true } },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] Failed to remove keyboard for ${vendorChatId}: ${message}`,
       );
     }
   }

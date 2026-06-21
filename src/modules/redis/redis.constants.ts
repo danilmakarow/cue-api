@@ -171,3 +171,45 @@ export const debounceJobId = (userId: string): string => `debounce-${userId}`;
  */
 export const debounceAfterJobId = (userId: string, nonce: string): string =>
   `debounce-after-${userId}-${nonce}`;
+
+/**
+ * Prefix for the active reply-keyboard surface flag (Story 16 / ADR 0045), keyed
+ * by the Cue user id. Its VALUE is the id of the keyboard currently docked for the
+ * user (`main` or `settings`); its mere presence is the active-surface gate the
+ * inbound router consults to decide whether a plain-text message that equals a
+ * known button label is a KEYBOARD ACTION versus ordinary conversation. Gating on
+ * this flag is the disambiguation that prevents hijacking a user who literally
+ * TYPES "Settings": a label is routed as a keyboard tap ONLY when the reply
+ * keyboard is the active surface AND the docked keyboard actually owns that label.
+ * Set whenever a keyboard is docked, deleted when the keyboard is removed
+ * (Disconnect). Disjoint keyspace from the lock / status / ask / debounce / stop
+ * keys so the active-surface flag never collides with any other assistant state.
+ */
+export const ACTIVE_KEYBOARD_KEY_PREFIX = 'assistant:keyboard';
+
+/**
+ * Builds the active reply-keyboard surface key for a Cue user id. One key per user
+ * records which keyboard (if any) is currently docked for that user's chat.
+ */
+export const activeKeyboardKey = (userId: string): string =>
+  `${ACTIVE_KEYBOARD_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the latest reply-keyboard button result (Story 16 / ADR 0045), keyed
+ * by the Cue user id. Its VALUE is a short human-readable line describing the most
+ * recent deterministic button outcome (e.g. "Showed this week's schedule"), which
+ * the context builder injects into the NEXT turn's VOLATILE TAIL only — never the
+ * cached prefix (ADR 0004 cache stability). Overwritten on each button tap and
+ * read-then-cleared on the next model turn so it is a one-shot nudge, with a short
+ * TTL as a self-cleaning backstop. Disjoint keyspace from every other assistant
+ * key so the last-button context never collides with the lock / status / ask /
+ * debounce / stop / active-keyboard state.
+ */
+export const LAST_BUTTON_KEY_PREFIX = 'assistant:lastButton';
+
+/**
+ * Builds the latest-button-result key for a Cue user id. One key per user holds
+ * the most recent button outcome line awaiting injection into the next turn.
+ */
+export const lastButtonKey = (userId: string): string =>
+  `${LAST_BUTTON_KEY_PREFIX}:${userId}`;

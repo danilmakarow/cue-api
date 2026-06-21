@@ -4,6 +4,7 @@ import { AssistantConfig } from './assistant.config';
 import { AssistantService } from './assistant.service';
 import { WebhookQueueJob } from './assistant.types';
 import { LinkingService } from './linking.service';
+import { KeyboardSurface } from './reply/reply-keyboard.layout';
 import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
 import { PendingInteractionStore } from './session/pending-interaction.store';
 import { WebhookConsumer } from './webhook.consumer';
@@ -44,6 +45,7 @@ const buildConsumer = (
     link?: { userId: string } | null;
     dedupeAcquired?: boolean;
     hasPendingQuestion?: boolean;
+    activeKeyboardSurface?: KeyboardSurface | null;
   } = {},
 ) => {
   const connector = {
@@ -88,6 +90,22 @@ const buildConsumer = (
     // Story 14b (ADR 0043): the deterministic STOP-control handler the consumer
     // dispatches a `stop:` callback to (it never buffers / never runs the loop).
     handleStopControl: jest.fn().mockResolvedValue(undefined),
+  };
+  // Story 16 (ADR 0045): the deterministic reply-keyboard action handler the
+  // consumer dispatches a `keyboard_action` flow to (renders a calendar / swaps the
+  // keyboard / disconnects — never buffers, never runs the loop).
+  const keyboardActionService = {
+    handleKeyboardAction: jest.fn().mockResolvedValue(undefined),
+    showMainKeyboard: jest.fn().mockResolvedValue(undefined),
+  };
+  // Story 16 (ADR 0045): the active reply-keyboard surface read port the inbound
+  // router gates a typed label on. Defaults to null (NO keyboard docked) so an
+  // ordinary typed message routes exactly as before — a label is a keyboard action
+  // only when this resolves to the surface owning it.
+  const activeKeyboardStore = {
+    getActiveSurface: jest
+      .fn()
+      .mockResolvedValue(options.activeKeyboardSurface ?? null),
   };
   // The pending-interaction store gates the free-text answer flow. For this wave
   // it resolves false by default (no question is ever created), so a typed
@@ -139,6 +157,8 @@ const buildConsumer = (
     userDatabaseService as never,
     linkingService as unknown as LinkingService,
     assistantService as unknown as AssistantService,
+    keyboardActionService as never,
+    activeKeyboardStore as never,
     debounceCoordinator,
     statusAnimator as never,
     config,
@@ -151,6 +171,8 @@ const buildConsumer = (
     stt,
     linkingService,
     assistantService,
+    keyboardActionService,
+    activeKeyboardStore,
     pendingStore,
     debounceCoordinator,
     telegramLinkDatabaseService,
@@ -336,6 +358,38 @@ describe('WebhookConsumer', () => {
     expect(harness.assistantService.handleCommand).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'user-1' }),
       expect.objectContaining({ command: 'today', correlationId: 'cid-1' }),
+    );
+    // A content command (/today) is NOT a (re)engagement entry point, so it must
+    // NOT dock the persistent reply keyboard (Story 16 / ADR 0045).
+    expect(
+      harness.keyboardActionService.showMainKeyboard,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('docks the persistent main reply keyboard after /start (Story 16 entry point)', async () => {
+    const normalized: NormalizedInboundMessage = {
+      kind: InboundKind.Command,
+      vendorChatId: 'chat-1',
+      vendorUserId: 'u-1',
+      dedupeId: '106',
+      command: 'start',
+      commandArgs: [],
+    };
+    const harness = buildConsumer(normalized);
+
+    await harness.consumer.process(buildJob('{"update_id":106}'));
+
+    expect(harness.assistantService.handleCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'user-1' }),
+      expect.objectContaining({ command: 'start', correlationId: 'cid-1' }),
+    );
+    // /start (re)engagement docks the main keyboard + marks it the active surface,
+    // so [Today's schedule] [Next week] [Settings] appear and a label tap routes.
+    expect(harness.keyboardActionService.showMainKeyboard).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'user-1' }),
+      'chat-1',
+      expect.any(String),
+      'cid-1',
     );
   });
 

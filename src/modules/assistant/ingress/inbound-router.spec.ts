@@ -3,6 +3,12 @@ import {
   STOP_CALLBACK_PREFIX,
   classifyFlow,
 } from './inbound-router';
+import {
+  KeyboardAction,
+  KEYBOARD_LABELS,
+  KeyboardSurface,
+} from '../reply/reply-keyboard.layout';
+import { ActiveKeyboardReadPort } from '../session/active-keyboard.store';
 import { PendingInteractionStore } from '../session/pending-interaction.store';
 import { User } from '@/modules/database/entities';
 import {
@@ -20,6 +26,17 @@ const buildPendingStore = (
   hasPending = false,
 ): jest.Mocked<PendingInteractionStore> => ({
   hasPendingQuestion: jest.fn().mockResolvedValue(hasPending),
+});
+
+/**
+ * Builds an {@link ActiveKeyboardReadPort} stub whose `getActiveSurface` resolves
+ * the given surface (default null — NO keyboard is the active surface, so a typed
+ * label is never hijacked as a keyboard action).
+ */
+const buildActiveKeyboardStore = (
+  surface: KeyboardSurface | null = null,
+): jest.Mocked<ActiveKeyboardReadPort> => ({
+  getActiveSurface: jest.fn().mockResolvedValue(surface),
 });
 
 /**
@@ -45,6 +62,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(),
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toEqual({
@@ -59,6 +77,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       normalize({ kind: InboundKind.Command, command: 'help' }),
       USER,
       buildPendingStore(),
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toMatchObject({ kind: 'command', args: [] });
@@ -74,6 +93,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(),
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toMatchObject({
@@ -93,6 +113,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(),
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toEqual({
@@ -114,6 +135,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(true), // even with a pending question, a stop: tap is STOP
+      buildActiveKeyboardStore(),
     );
 
     expect(stopFlow.kind).toBe('stop_control');
@@ -125,6 +147,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       normalize({ kind: InboundKind.Text, text: 'what is on tomorrow?' }),
       USER,
       store,
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toEqual({
@@ -144,6 +167,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       normalize({ kind: InboundKind.Text, text: 'actually, Friday' }),
       USER,
       store,
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toMatchObject({
@@ -163,6 +187,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       normalize({ kind: InboundKind.Text, text: 'hello' }),
       USER,
       store,
+      buildActiveKeyboardStore(),
     );
 
     expect(flow.kind).toBe('simple_message');
@@ -181,6 +206,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       store,
+      buildActiveKeyboardStore(),
     );
 
     expect(flow).toMatchObject({ kind: 'answer', source: 'callback' });
@@ -195,6 +221,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(false),
+      buildActiveKeyboardStore(),
       'move my 3pm to 4',
     );
 
@@ -213,6 +240,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       }),
       USER,
       buildPendingStore(true),
+      buildActiveKeyboardStore(),
       'Friday works',
     );
 
@@ -222,5 +250,119 @@ describe('classifyFlow (inbound router taxonomy)', () => {
       text: 'Friday works',
       contentType: InboundKind.Voice,
     });
+  });
+
+  // --- Story 16: reply-keyboard taps (text-equality, gated on the active surface) ---
+
+  it('routes a typed label to KeyboardActionFlow ONLY when the matching keyboard is the active surface', async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Main);
+    const flow = await classifyFlow(
+      normalize({
+        kind: InboundKind.Text,
+        text: KEYBOARD_LABELS.todaySchedule,
+      }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(flow).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.TodaySchedule,
+    });
+    expect(keyboard.getActiveSurface).toHaveBeenCalledWith('user-1');
+  });
+
+  it('does NOT hijack a literally-typed "Settings" when NO keyboard is the active surface (default null) — it is a fresh turn', async () => {
+    const keyboard = buildActiveKeyboardStore(null);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.settings }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    // The exact button label, but with no active surface it is plain conversation.
+    expect(flow).toEqual({
+      kind: 'simple_message',
+      text: 'Settings',
+      contentType: InboundKind.Text,
+    });
+  });
+
+  it('does NOT route a label the DOCKED surface does not own (e.g. "Back" while the main keyboard is active) — fresh turn', async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Main);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.back }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    // "Back" only exists on the settings surface; with main docked it is inert.
+    expect(flow.kind).toBe('simple_message');
+  });
+
+  it('routes the settings-surface labels only when the settings keyboard is active', async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Settings);
+    const disconnect = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.disconnect }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+    const back = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.back }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(disconnect).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.Disconnect,
+    });
+    expect(back).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.Back,
+    });
+  });
+
+  it('a keyboard tap takes precedence over a pending question — it is never consumed as a free-text answer', async () => {
+    const pending = buildPendingStore(true);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.nextWeek }),
+      USER,
+      pending,
+      buildActiveKeyboardStore(KeyboardSurface.Main),
+    );
+
+    expect(flow).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.NextWeek,
+    });
+    // The deterministic keyboard tap short-circuits before the pending-question gate.
+    expect(pending.hasPendingQuestion).not.toHaveBeenCalled();
+  });
+
+  it('a VOICE transcript that happens to equal a label is NEVER a keyboard tap (only typed text echoes a label)', async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Main);
+    const flow = await classifyFlow(
+      normalize({
+        kind: InboundKind.Voice,
+        media: { vendorFileId: 'file-3' },
+      }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+      KEYBOARD_LABELS.todaySchedule,
+    );
+
+    expect(flow).toMatchObject({
+      kind: 'simple_message',
+      contentType: InboundKind.Voice,
+    });
+    // The active-surface lookup is never even consulted for a voice transcript.
+    expect(keyboard.getActiveSurface).not.toHaveBeenCalled();
   });
 });
