@@ -1,10 +1,14 @@
 import {
   AcknowledgeOptions,
+  ChatAction,
+  EditMessage,
   ExternalVendor,
   MediaPayload,
   MediaRef,
+  MessageDraft,
   NormalizedInboundMessage,
   OutboundActions,
+  OutboundKeyboardMessage,
   OutboundMessage,
   SendTarget,
   VendorCapabilities,
@@ -68,6 +72,79 @@ export abstract class ExternalVendorConnector {
     target: SendTarget,
     actions: OutboundActions,
   ): Promise<VendorMessageRef>;
+
+  /**
+   * Sends a plain/markdown text message that ALSO docks a persistent reply
+   * keyboard or removes the docked one (`ReplyKeyboardMarkup`). The persistent
+   * keyboard (`is_persistent` + `resize_keyboard`) stays below the input; a tap
+   * arrives back as **plain inbound text equal to the button label** (NOT a
+   * callback), so callers route taps by label text-equality. Swapping the
+   * keyboard = sending a new message with different markup; the
+   * `ReplyKeyboardRemove` sentinel clears it. Returns the created message ref.
+   */
+  abstract sendMessageWithKeyboard(
+    target: SendTarget,
+    message: OutboundKeyboardMessage,
+  ): Promise<VendorMessageRef>;
+
+  /**
+   * Edits the text of an already-sent message in place (Telegram
+   * `editMessageText`). This is the **non-private degraded path** for the
+   * live-status / streaming surface — drafts are private-only — and it shares
+   * the per-chat ~1 msg/s send budget, so callers MUST throttle their edits
+   * (ADR 0012).
+   */
+  abstract editMessageText(
+    target: SendTarget,
+    edit: EditMessage,
+  ): Promise<void>;
+
+  /**
+   * Shows an ephemeral "chat action" presence hint (typing…/recording…) in the
+   * target chat. Fire-and-forget; the vendor clears it after a few seconds or on
+   * the next message. Returns nothing — there is no message to reference.
+   */
+  abstract sendChatAction(
+    target: SendTarget,
+    action: ChatAction,
+  ): Promise<void>;
+
+  /**
+   * Deletes a previously-sent message (Telegram `deleteMessage`). Used to tidy a
+   * transient status/control message once the turn finalizes.
+   */
+  abstract deleteMessage(
+    target: SendTarget,
+    vendorMessageId: string,
+  ): Promise<void>;
+
+  /**
+   * Streams ONE ephemeral draft update (Telegram `sendMessageDraft`).
+   *
+   * **CONTRACT (ADR 0012 / Verified Telegram facts):**
+   * - **Private chat only.** This method MUST NOT be called for a non-private
+   *   chat — the connector throws if `target.chatType` is set and not
+   *   `ChatType.Private`. Non-private surfaces degrade to {@link editMessageText}.
+   * - A draft is an **ephemeral ~30-second preview** that **never persists**. To
+   *   keep it alive the caller re-calls within the TTL; to make the output
+   *   durable the caller MUST **finalize with a real {@link sendMessage}** (the
+   *   draft itself vanishes after 30 s).
+   * - **Re-calling with the same `draft.draftId` IS the update mechanism** — the
+   *   client animates the transition natively; there is no "edit draft" variant.
+   * - An **empty `draft.text`** renders the native "Thinking…" shimmer.
+   * - A draft **carries no buttons** — STOP / inline controls ride a separate
+   *   real message.
+   * - The **draft-call rate limit is undocumented**; all draft callers MUST go
+   *   through the central L9 throttle (~2–5/s) rather than calling this directly
+   *   in a tight loop.
+   *
+   * Returns nothing — the draft has no stable message id to thread back; the
+   * caller owns the `draftId` it chose.
+   */
+  abstract sendMessageDraft(
+    target: SendTarget,
+    draft: MessageDraft,
+  ): Promise<void>;
 
   /**
    * Acknowledges a callback (e.g. a button tap) so the client stops its loading

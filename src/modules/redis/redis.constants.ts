@@ -58,3 +58,45 @@ export const heldConflictKey = (callbackId: string): string =>
  */
 export const pendingQuestionKey = (userId: string): string =>
   `${PENDING_QUESTION_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the live-status handle (`StatusSession`, Story 10 / ADR 0012),
+ * keyed per chat + turn. It holds the JSON `{ draftId | messageId, chatType,
+ * locale, phase }` for the in-flight turn's animated status surface so creating
+ * it is IDEMPOTENT — a second create for the same turn re-reads the existing
+ * handle instead of orphaning a second draft/message. Short-lived (TTL
+ * `ASSISTANT_STATUS_SESSION_TTL_SECONDS`); cleared when the turn finalizes. The
+ * surface Stories 12/13 animate; this story builds only the store + lifecycle.
+ */
+export const STATUS_SESSION_KEY_PREFIX = 'assistant:status';
+
+/**
+ * Builds the live-status handle key for a chat + turn pair. Keyed per turn (not
+ * just per chat) so concurrent turns in the same chat never share one status
+ * surface, while a re-entrant create within ONE turn is idempotent.
+ */
+export const statusSessionKey = (
+  vendorChatId: string,
+  turnId: string,
+): string => `${STATUS_SESSION_KEY_PREFIX}:${vendorChatId}:${turnId}`;
+
+/**
+ * Prefix for the per-user serialization lock (Story 11 / ADR 0039), keyed by the
+ * Cue user id. The value is a unique fencing token (`randomUUID`) written with
+ * `SET key token NX PX <ttlMs>`: NX makes acquisition mutually exclusive, PX
+ * auto-expires it so a crashed holder never deadlocks. Release is token-checked
+ * (Lua compare-and-del) so only the holder can unlock; a watchdog renews the TTL
+ * (also token-checked) while work is in progress. Disjoint keyspace from
+ * {@link HELD_CONFLICT_KEY_PREFIX} / {@link PENDING_QUESTION_KEY_PREFIX} /
+ * {@link STATUS_SESSION_KEY_PREFIX} so the mutex never collides with suspend or
+ * status state. Consumed by Story 14 (queue-after) and the ADR-0010 `ask_user`
+ * resume double-resume race — see `docs/adr/0039-assistant-per-user-serialization-lock.md`.
+ */
+export const USER_LOCK_KEY_PREFIX = 'assistant:lock';
+
+/**
+ * Builds the per-user serialization-lock key for a Cue user id. One key per user
+ * serializes that user's turns; different users never contend.
+ */
+export const userLockKey = (userId: string): string =>
+  `${USER_LOCK_KEY_PREFIX}:${userId}`;

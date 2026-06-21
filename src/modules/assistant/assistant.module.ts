@@ -13,6 +13,7 @@ import { ContextBuilderService } from './context-builder.service';
 import { LinkingService } from './linking.service';
 import { ToolLoopService } from './orchestration/tool-loop.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
+import { StatusSessionStore } from './reply/status-session.store';
 import { ScheduleReaderService } from './schedule-reader.service';
 import { ConversationStore } from './session/conversation.store';
 import {
@@ -22,6 +23,7 @@ import {
 import { PendingQuestionCleanupService } from './session/pending-question-cleanup.service';
 import { TurnAuditStore } from './session/turn-audit.store';
 import { TurnRunnerService } from './session/turn-runner.service';
+import { UserLockStore } from './session/user-lock.store';
 import { ToolDispatcherService } from './tools/tool-dispatcher.service';
 import { WebhookRegistrarService } from './webhook-registrar.service';
 import { WebhookConsumer } from './webhook.consumer';
@@ -67,6 +69,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
   providers: [
     AssistantConfig,
     ReplyPresenter,
+    StatusSessionStore,
     ScheduleReaderService,
     ContextBuilderService,
     ToolDispatcherService,
@@ -83,6 +86,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     ConflictResolverService,
     PendingInteractionService,
     PendingQuestionCleanupService,
+    UserLockStore,
     {
       // The router's read port and the orchestrator's write side are the SAME
       // instance — the token aliases the concrete service so `hasPendingQuestion`

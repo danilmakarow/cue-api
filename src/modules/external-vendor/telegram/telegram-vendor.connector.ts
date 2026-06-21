@@ -9,14 +9,20 @@ import {
 } from '../external-vendor.config';
 import {
   AcknowledgeOptions,
+  ChatAction,
+  ChatType,
+  EditMessage,
   ExternalVendor,
   InboundKind,
   MediaPayload,
   MediaRef,
+  MessageDraft,
   NormalizedInboundMessage,
   OutboundActions,
   OutboundFormat,
+  OutboundKeyboardMessage,
   OutboundMessage,
+  ReplyKeyboardMarkup,
   SendTarget,
   VendorCapabilities,
   VendorMessageRef,
@@ -25,9 +31,11 @@ import {
 } from '../external-vendor.types';
 import {
   TelegramApiResponse,
-  TelegramFile,
   TelegramInlineKeyboardButton,
+  TelegramFile,
   TelegramMessage,
+  TelegramReplyKeyboardMarkup,
+  TelegramReplyKeyboardRemove,
   TelegramUpdate,
 } from './telegram-api.types';
 
@@ -162,6 +170,54 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
   }
 
   /**
+   * Maps Telegram's `chat.type` string onto the normalized {@link ChatType}, or
+   * `undefined` when absent / unrecognized. Drives the draft private-chat gate.
+   */
+  private toChatType(rawType: string | undefined): ChatType | undefined {
+    switch (rawType) {
+      case 'private':
+        return ChatType.Private;
+      case 'group':
+        return ChatType.Group;
+      case 'supergroup':
+        return ChatType.Supergroup;
+      case 'channel':
+        return ChatType.Channel;
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Maps a normalized {@link ChatAction} onto its Telegram `sendChatAction` wire
+   * value (the enum values already match the Bot API strings).
+   */
+  private toTelegramChatAction(action: ChatAction): string {
+    return action;
+  }
+
+  /**
+   * Builds the Telegram `reply_markup` for a persistent reply keyboard or the
+   * remove sentinel. Persistent keyboards always set `is_persistent` +
+   * `resize_keyboard` (Bot API 6.4) so they stay docked and sized to content.
+   */
+  private toReplyKeyboardMarkup(
+    markup: ReplyKeyboardMarkup,
+  ): TelegramReplyKeyboardMarkup | TelegramReplyKeyboardRemove {
+    if ('remove' in markup) {
+      return { remove_keyboard: true };
+    }
+
+    return {
+      keyboard: markup.buttons.map((row) =>
+        row.map((button) => ({ text: button.label })),
+      ),
+      is_persistent: true,
+      resize_keyboard: true,
+    };
+  }
+
+  /**
    * Builds a {@link VendorMessageRef} from a sent Telegram message, stringifying
    * `message_id` for the bigint-as-string convention. Throws when the response
    * carried no message.
@@ -186,6 +242,7 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       vendorChatId: String(message.chat.id),
       vendorUserId: message.from ? String(message.from.id) : '',
       dedupeId: String(update.update_id),
+      chatType: this.toChatType(message.chat.type),
     };
 
     if (message.voice) {
@@ -245,6 +302,9 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       dedupeId: String(update.update_id),
       callbackData: callback.data,
       callbackId: callback.id,
+      chatType: callback.message
+        ? this.toChatType(callback.message.chat.type)
+        : undefined,
     };
   }
 
@@ -365,6 +425,92 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
     });
 
     return this.toMessageRef(sent);
+  }
+
+  /**
+   * Sends a text message that also docks a persistent reply keyboard (or removes
+   * the docked one) via `sendMessage` + `reply_markup`. Returns the created
+   * message ref. Reply-keyboard taps later arrive as plain inbound text equal to
+   * the button label — not callbacks.
+   */
+  async sendMessageWithKeyboard(
+    target: SendTarget,
+    message: OutboundKeyboardMessage,
+  ): Promise<VendorMessageRef> {
+    const sent = await this.callApi<TelegramMessage>('sendMessage', {
+      chat_id: target.vendorChatId,
+      text: message.text,
+      parse_mode: this.toParseMode(message.format),
+      reply_markup: this.toReplyKeyboardMarkup(message.replyKeyboard),
+    });
+
+    return this.toMessageRef(sent);
+  }
+
+  /**
+   * Edits an already-sent message's text in place via `editMessageText`. The
+   * non-private degraded path for live status / streaming (drafts are
+   * private-only); shares the per-chat send budget, so callers throttle.
+   */
+  async editMessageText(target: SendTarget, edit: EditMessage): Promise<void> {
+    await this.callApi('editMessageText', {
+      chat_id: target.vendorChatId,
+      message_id: Number(edit.vendorMessageId),
+      text: edit.text,
+      parse_mode: this.toParseMode(edit.format),
+    });
+  }
+
+  /**
+   * Shows an ephemeral presence hint via `sendChatAction` (typing…/recording…).
+   * Fire-and-forget; Telegram clears it after a few seconds or the next message.
+   */
+  async sendChatAction(target: SendTarget, action: ChatAction): Promise<void> {
+    await this.callApi('sendChatAction', {
+      chat_id: target.vendorChatId,
+      action: this.toTelegramChatAction(action),
+    });
+  }
+
+  /**
+   * Deletes a previously-sent message via `deleteMessage` — used to tidy a
+   * transient status/control message once the turn finalizes.
+   */
+  async deleteMessage(
+    target: SendTarget,
+    vendorMessageId: string,
+  ): Promise<void> {
+    await this.callApi('deleteMessage', {
+      chat_id: target.vendorChatId,
+      message_id: Number(vendorMessageId),
+    });
+  }
+
+  /**
+   * Streams one ephemeral draft update via `sendMessageDraft`. GATED to private
+   * chats: throws when `target.chatType` is set and not {@link ChatType.Private}
+   * (non-private callers must degrade to {@link editMessageText}). The draft is a
+   * ~30s preview animated client-side by re-calling with the same `draft_id`; an
+   * empty `text` yields the native "Thinking…" shimmer; it carries no buttons and
+   * MUST be finalized with a real {@link sendMessage} to persist (ADR 0012). The
+   * central L9 throttle governs the call cadence (~2–5/s).
+   */
+  async sendMessageDraft(
+    target: SendTarget,
+    draft: MessageDraft,
+  ): Promise<void> {
+    if (target.chatType !== undefined && target.chatType !== ChatType.Private) {
+      throw new Error(
+        `sendMessageDraft is private-chat only; got chatType=${target.chatType}`,
+      );
+    }
+
+    await this.callApi('sendMessageDraft', {
+      chat_id: target.vendorChatId,
+      draft_id: draft.draftId,
+      text: draft.text,
+      parse_mode: this.toParseMode(draft.format),
+    });
   }
 
   /**

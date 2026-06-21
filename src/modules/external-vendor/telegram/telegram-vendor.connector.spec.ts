@@ -3,6 +3,8 @@ import {
   TelegramVendorConfig,
 } from '../external-vendor.config';
 import {
+  ChatAction,
+  ChatType,
   ExternalVendor,
   InboundKind,
   OutboundFormat,
@@ -141,7 +143,7 @@ describe('TelegramVendorConnector', () => {
           update_id: 42,
           message: {
             message_id: 7,
-            chat: { id: 12345 },
+            chat: { id: 12345, type: 'private' },
             from: { id: 999 },
             text: 'move my 3pm to tomorrow',
           },
@@ -154,6 +156,7 @@ describe('TelegramVendorConnector', () => {
         vendorUserId: '999',
         dedupeId: '42',
         text: 'move my 3pm to tomorrow',
+        chatType: ChatType.Private,
       });
     });
 
@@ -452,6 +455,218 @@ describe('TelegramVendorConnector', () => {
       await expect(
         connector.sendMessage({ vendorChatId: 'bad' }, { text: 'hi' }),
       ).rejects.toThrow(/chat not found/);
+    });
+  });
+
+  describe('messenger primitives (Story 10, ADR 0012)', () => {
+    it('normalizes chat.type onto a callback query (group → ChatType.Group)', async () => {
+      const connector = createConnector();
+
+      const result = await connector.handleWebhook(
+        jobFromUpdate({
+          update_id: 70,
+          callback_query: {
+            id: 'cb-2',
+            from: { id: 999 },
+            data: 'ask:row:opt',
+            message: { message_id: 10, chat: { id: 12345, type: 'group' } },
+          },
+        }),
+      );
+
+      expect(result?.chatType).toBe(ChatType.Group);
+    });
+
+    it('leaves chatType undefined when chat.type is absent/unknown', async () => {
+      const connector = createConnector();
+
+      const result = await connector.handleWebhook(
+        jobFromUpdate({
+          update_id: 71,
+          message: {
+            message_id: 7,
+            chat: { id: 12345 },
+            from: { id: 999 },
+            text: 'hi',
+          },
+        }),
+      );
+
+      expect(result?.chatType).toBeUndefined();
+    });
+
+    it('sendMessageWithKeyboard docks a persistent reply keyboard (is_persistent + resize_keyboard)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 111 }));
+
+      const ref = await connector.sendMessageWithKeyboard(
+        { vendorChatId: '12345' },
+        {
+          text: 'Pick one',
+          replyKeyboard: {
+            buttons: [
+              [{ label: "Today's schedule" }, { label: 'Next week' }],
+              [{ label: 'Settings' }],
+            ],
+          },
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      expect(body.chat_id).toBe('12345');
+      expect(body.text).toBe('Pick one');
+      expect(body.reply_markup).toEqual({
+        keyboard: [
+          [{ text: "Today's schedule" }, { text: 'Next week' }],
+          [{ text: 'Settings' }],
+        ],
+        is_persistent: true,
+        resize_keyboard: true,
+      });
+      expect(ref).toEqual({ vendorMessageId: '111' });
+    });
+
+    it('sendMessageWithKeyboard removes the docked keyboard via the remove sentinel', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 112 }));
+
+      await connector.sendMessageWithKeyboard(
+        { vendorChatId: '12345' },
+        { text: 'done', replyKeyboard: { remove: true } },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      expect(body.reply_markup).toEqual({ remove_keyboard: true });
+    });
+
+    it('editMessageText posts editMessageText with numeric message_id', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 5 }));
+
+      await connector.editMessageText(
+        { vendorChatId: '12345' },
+        { vendorMessageId: '5', text: 'updated' },
+      );
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+      expect(url).toBe(
+        'https://api.telegram.test/botTEST_TOKEN/editMessageText',
+      );
+
+      const body = JSON.parse(init.body as string);
+
+      expect(body).toEqual({
+        chat_id: '12345',
+        message_id: 5,
+        text: 'updated',
+        parse_mode: undefined,
+      });
+    });
+
+    it('sendChatAction posts sendChatAction with the mapped action string', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse());
+
+      await connector.sendChatAction(
+        { vendorChatId: '12345' },
+        ChatAction.Typing,
+      );
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+      expect(url).toBe(
+        'https://api.telegram.test/botTEST_TOKEN/sendChatAction',
+      );
+
+      const body = JSON.parse(init.body as string);
+
+      expect(body).toEqual({ chat_id: '12345', action: 'typing' });
+    });
+
+    it('deleteMessage posts deleteMessage with numeric message_id', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse(true));
+
+      await connector.deleteMessage({ vendorChatId: '12345' }, '5');
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+      expect(url).toBe('https://api.telegram.test/botTEST_TOKEN/deleteMessage');
+
+      const body = JSON.parse(init.body as string);
+
+      expect(body).toEqual({ chat_id: '12345', message_id: 5 });
+    });
+
+    it('sendMessageDraft posts sendMessageDraft with draft_id + text in a private chat', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse());
+
+      await connector.sendMessageDraft(
+        { vendorChatId: '12345', chatType: ChatType.Private },
+        { draftId: 7, text: '' },
+      );
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+      expect(url).toBe(
+        'https://api.telegram.test/botTEST_TOKEN/sendMessageDraft',
+      );
+
+      const body = JSON.parse(init.body as string);
+
+      // Empty text ⇒ native "Thinking…" shimmer; draft_id is the animation key.
+      expect(body).toEqual({
+        chat_id: '12345',
+        draft_id: 7,
+        text: '',
+        parse_mode: undefined,
+      });
+    });
+
+    it('sendMessageDraft allows a private chat with no chatType set (back-compat)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse());
+
+      await connector.sendMessageDraft(
+        { vendorChatId: '12345' },
+        { draftId: 9, text: 'partial' },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('GATE: sendMessageDraft throws for a non-private chat and never calls the API', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      await expect(
+        connector.sendMessageDraft(
+          { vendorChatId: '12345', chatType: ChatType.Group },
+          { draftId: 7, text: 'hi' },
+        ),
+      ).rejects.toThrow(/private-chat only/);
+
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

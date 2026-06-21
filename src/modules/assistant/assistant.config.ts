@@ -77,6 +77,39 @@ export class AssistantConfig {
     });
   }
 
+  /**
+   * TTL (seconds) for the live-status handle (`StatusSession`, ADR 0012): the
+   * per-chat/turn Redis pointer to the animated status surface. Short — it only
+   * needs to outlive one in-flight turn and is cleared on finalize.
+   */
+  get statusSessionTtlSeconds(): number {
+    return this.configService.get('ASSISTANT_STATUS_SESSION_TTL_SECONDS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Auto-expiry TTL (ms) for the per-user serialization lock (Story 11): the
+   * deadlock backstop a crashed holder relies on so the mutex self-releases. A
+   * live holder extends it via the watchdog ({@link userLockRenewMs}).
+   */
+  get userLockTtlMs(): number {
+    return this.configService.get('ASSISTANT_USER_LOCK_TTL_MS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Watchdog renew interval (ms) for the per-user serialization lock (Story 11):
+   * how often a live holder extends its TTL while work is in progress. MUST be
+   * strictly below {@link userLockTtlMs} so the lock never lapses mid-turn.
+   */
+  get userLockRenewMs(): number {
+    return this.configService.get('ASSISTANT_USER_LOCK_RENEW_MS', {
+      infer: true,
+    });
+  }
+
   /** TTL (seconds) for a single-use link nonce. */
   get linkNonceTtlSeconds(): number {
     return this.configService.get('ASSISTANT_LINK_NONCE_TTL_SECONDS', {

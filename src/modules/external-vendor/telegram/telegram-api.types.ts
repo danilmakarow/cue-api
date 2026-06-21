@@ -6,9 +6,11 @@
  * Reference: https://core.telegram.org/bots/api
  */
 
-/** A Telegram chat (only the id is used). */
+/** A Telegram chat (id + kind; kind drives the draft private-chat gate). */
 export interface TelegramChat {
   id: number;
+  /** `private` | `group` | `supergroup` | `channel`; absent on some legacy updates. */
+  type?: string;
 }
 
 /** A Telegram user (only the id is used). */
@@ -69,4 +71,25 @@ export interface TelegramInlineKeyboardButton {
 /** `reply_markup` carrying an inline keyboard. */
 export interface TelegramInlineKeyboardMarkup {
   inline_keyboard: TelegramInlineKeyboardButton[][];
+}
+
+/** A single persistent reply-keyboard button (text-only variant). */
+export interface TelegramKeyboardButton {
+  text: string;
+}
+
+/**
+ * `reply_markup` carrying a persistent custom reply keyboard (Bot API 6.4). We
+ * always set `is_persistent` + `resize_keyboard` so it stays docked and sized to
+ * its buttons.
+ */
+export interface TelegramReplyKeyboardMarkup {
+  keyboard: TelegramKeyboardButton[][];
+  is_persistent: boolean;
+  resize_keyboard: boolean;
+}
+
+/** `reply_markup` sentinel that removes the docked custom reply keyboard. */
+export interface TelegramReplyKeyboardRemove {
+  remove_keyboard: true;
 }
