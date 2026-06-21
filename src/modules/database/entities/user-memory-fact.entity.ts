@@ -16,6 +16,29 @@ export enum UserMemoryFactType {
   PERSON = 'person',
   PLACE = 'place',
   OTHER = 'other',
+  /**
+   * Standing double-booking policy (Story 15 / ADR 0011 + 0044) — the durable,
+   * EXPLICIT-only authorization that lets the assistant book over (or refuse) an
+   * overlap WITHOUT asking each time. Its `value` is `{ policy: ConflictPolicy }`.
+   * NEVER inferred: only a fact the user explicitly set counts as standing
+   * authorization, so the background extractor must never emit this type. A single
+   * in-message "yes, double-book it" is in-message authorization (confirmOverlap),
+   * not a standing policy.
+   */
+  CONFLICT_POLICY = 'conflict_policy',
+}
+
+/**
+ * The three standing double-booking dispositions a `CONFLICT_POLICY` fact may
+ * carry (Story 15 / ADR 0011 + 0044). `ALLOW` lets the assistant book over an
+ * overlap without asking; `DENY` refuses every overlap outright (even an
+ * in-message `confirmOverlap`); `ASK` is the explicit form of the default — always
+ * ask. Absent any fact, the system defaults to ASK (default-deny).
+ */
+export enum ConflictPolicy {
+  ALLOW = 'allow',
+  ASK = 'ask',
+  DENY = 'deny',
 }
 
 /**

@@ -187,6 +187,12 @@ export const createTaskInputSchema = z.object({
     .string()
     .optional()
     .describe('Optional calendar id; omit to use the primary calendar.'),
+  confirmOverlap: z
+    .boolean()
+    .optional()
+    .describe(
+      'Set true ONLY when the user has explicitly authorized booking over an existing commitment (ADR 0011, default-deny). Leave unset and the dispatcher refuses an overlapping write and tells you to ask the user first.',
+    ),
 });
 
 /**
@@ -227,6 +233,12 @@ export const updateTaskInputSchema = z.object({
   group: z.string().optional().describe('New group name.'),
   recurrence: recurrenceInputSchema.optional(),
   editScope: editScopeSchema.optional().describe(EDIT_SCOPE_DESCRIPTION),
+  confirmOverlap: z
+    .boolean()
+    .optional()
+    .describe(
+      'Set true ONLY when the user has explicitly authorized moving onto an existing commitment (ADR 0011, default-deny). Leave unset and the dispatcher refuses an overlapping move and tells you to ask the user first.',
+    ),
 });
 
 /** Zod schema validating `complete_task` input. */
@@ -244,6 +256,12 @@ export const deleteTaskInputSchema = z.object({
     .string()
     .describe('Bracketed handle of the task to delete, e.g. e2.'),
   editScope: editScopeSchema.optional().describe(EDIT_SCOPE_DESCRIPTION),
+  confirmDelete: z
+    .boolean()
+    .optional()
+    .describe(
+      'Set true ONLY after the user has explicitly confirmed deleting/removing this specific commitment in their message (ADR 0011 + 0044). A delete is destructive and irreversible; leave unset and the dispatcher refuses and tells you to ask the user first. Neither confirmOverlap nor a standing allow-policy authorizes a delete.',
+    ),
 });
 
 /** Zod schema validating `set_reminder` input. */

@@ -8,8 +8,6 @@ import { MemoryExtractorService } from './background/memory-extractor.service';
 import { RoundRecapService } from './background/round-recap.service';
 import { SummarizerService } from './background/summarizer.service';
 import { CommandHandlerService } from './commands/command-handler.service';
-import { ConflictResolverService } from './conflict/conflict-resolver.service';
-import { HeldConflictStore } from './conflict/held-conflict.store';
 import { ContextBuilderService } from './context-builder.service';
 import { DebounceConsumer } from './debounce.consumer';
 import { LinkingService } from './linking.service';
@@ -103,8 +101,6 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     TurnRunnerService,
     ConversationStore,
     TurnAuditStore,
-    HeldConflictStore,
-    ConflictResolverService,
     PendingInteractionService,
     PendingQuestionCleanupService,
     UserLockStore,

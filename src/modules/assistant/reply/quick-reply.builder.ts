@@ -1,15 +1,16 @@
 /**
- * L9 quick-reply builder — pure inline-keyboard button construction for the two
- * keyboards the assistant emits: the held-conflict confirm/cancel keyboard (ADR
- * 0006) and the `ask_user` quick-reply keyboard (ADR 0010). It owns NO vendor IO
- * — it only maps domain inputs to the vendor-agnostic {@link
- * OutboundActionButton} rows, so the {@link ReplyPresenter} stays the sole
- * caller of `vendor.sendActions` while the button shapes live in one tested place.
+ * L9 quick-reply builder — pure inline-keyboard button construction for the
+ * keyboards the assistant emits: the `ask_user` quick-reply keyboard (ADR 0010)
+ * and the STOP control (Story 14b). It owns NO vendor IO — it only maps domain
+ * inputs to the vendor-agnostic {@link OutboundActionButton} rows, so the
+ * {@link ReplyPresenter} stays the sole caller of `vendor.sendActions` while the
+ * button shapes live in one tested place. (The ADR-0006 held-conflict keyboard
+ * was removed with the deterministic hold — ADR 0011.)
  *
  * See `docs/specs/assistant-layered-architecture.md` → L9 reply/egress.
  */
 
-import { AskUserOption, ConflictCallbackAction } from '../assistant.types';
+import { AskUserOption } from '../assistant.types';
 import {
   ASK_CALLBACK_PREFIX,
   STOP_CALLBACK_PREFIX,
@@ -18,31 +19,6 @@ import { OutboundActionButton } from '@/modules/external-vendor/external-vendor.
 
 /** Button label shown on the STOP control message (Story 14b / ADR 0043). */
 const STOP_BUTTON_LABEL = '⏹ Stop';
-
-/**
- * Builds the single confirm/cancel button row for a held-conflict keyboard (ADR
- * 0006). The confirm label pluralizes for a batch ("Book all anyway") vs a
- * single hold ("Book anyway"); both buttons carry `confirm:<token>` /
- * `cancel:<token>` callback data so the deterministic conflict handler can
- * resolve the tap without re-invoking the model.
- */
-export const buildHeldKeyboard = (
-  heldCount: number,
-  token: string,
-): OutboundActionButton[][] => {
-  return [
-    [
-      {
-        label: heldCount > 1 ? 'Book all anyway' : 'Book anyway',
-        callbackData: `${ConflictCallbackAction.CONFIRM}:${token}`,
-      },
-      {
-        label: 'Cancel',
-        callbackData: `${ConflictCallbackAction.CANCEL}:${token}`,
-      },
-    ],
-  ];
-};
 
 /**
  * Builds the `ask_user` quick-reply keyboard (ADR 0010): one button per option,

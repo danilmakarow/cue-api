@@ -11,11 +11,17 @@ import { ScriptedAiConnector } from './scripted-ai.connector';
 import { AppModule } from '@/app.module';
 import { ACTIVE_AI_CONNECTOR } from '@/modules/ai/ai.module';
 import { AnthropicAiConnector } from '@/modules/ai/anthropic/anthropic-ai.connector';
-import { Calendar, TelegramLink, User } from '@/modules/database/entities';
+import {
+  Calendar,
+  ConflictPolicy,
+  TelegramLink,
+  User,
+} from '@/modules/database/entities';
 import {
   CalendarDatabaseService,
   TelegramLinkDatabaseService,
   UserDatabaseService,
+  UserMemoryFactDatabaseService,
 } from '@/modules/database/services';
 import { ExternalVendorConfig } from '@/modules/external-vendor/external-vendor.config';
 import { TelegramVendorConnector } from '@/modules/external-vendor/telegram/telegram-vendor.connector';
@@ -232,7 +238,7 @@ export class E2eHarness {
 
   /**
    * Builds a unique-`update_id` Telegram callback-query update (inline button
-   * tap) carrying the given callback data, for the held-conflict confirm flow.
+   * tap) carrying the given callback data, e.g. an `ask_user` quick-reply tap.
    */
   buildCallbackUpdate(
     chatId: string,
@@ -327,11 +333,19 @@ export class E2eHarness {
   }
 
   /**
-   * Returns the held-conflict Redis keys currently set (`assistant:held:*`), so a
-   * test can assert a write was parked (and read its TTL) without knowing the token.
+   * Records a STANDING explicit `conflict_policy` for a user (Story 15 / ADR 0011 +
+   * 0044), the durable opt-in/harden path the AI-judged-conflict gate honours: an
+   * `allow` policy lets an overlap commit without asking, a `deny` policy refuses
+   * every overlap. Persisted via the same `UserMemoryFactDatabaseService.save`
+   * path the settings action uses, so the context builder surfaces it next turn.
    */
-  async heldConflictKeys(): Promise<string[]> {
-    return this.redis.keys('assistant:held:*');
+  async setConflictPolicy(
+    userId: string,
+    policy: ConflictPolicy,
+  ): Promise<void> {
+    const factDb = this.moduleRef.get(UserMemoryFactDatabaseService);
+
+    await factDb.setConflictPolicy(userId, policy);
   }
 
   /**

@@ -1,25 +1,16 @@
 /**
- * Internal types for the assistant module — the BullMQ job payloads, the held
- * conflict record, and the tool-dispatch context. Vendor/AI/STT DTOs live in
- * their connector modules and are imported where needed; nothing here leaks a
- * vendor wire shape.
+ * Internal types for the assistant module — the BullMQ job payloads and the
+ * tool-dispatch context. Vendor/AI/STT DTOs live in their connector modules and
+ * are imported where needed; nothing here leaks a vendor wire shape.
  */
 
 import { HandleMap } from './tools/handle-map';
-import { User } from '@/modules/database/entities';
+import { ConflictPolicy, User } from '@/modules/database/entities';
 import {
   ChatType,
   ExternalVendor,
   InboundKind,
 } from '@/modules/external-vendor/external-vendor.types';
-
-/**
- * The scope a recurring edit (update / delete) resolves to — the three
- * operations from the recurrence-expansion spec. `this` overrides a single
- * occurrence, `this_and_following` splits the series, `all` edits the master.
- * Ignored entirely on a non-recurring task.
- */
-export type EditScope = 'this' | 'this_and_following' | 'all';
 
 /**
  * Per-turn context a tool dispatch needs: who the user is (for ownership and
@@ -38,6 +29,18 @@ export interface ToolDispatchContext {
   handleMap?: HandleMap;
   /** Turn correlation id, so a tool-dispatch failure log is greppable by turn. */
   correlationId?: string;
+  /**
+   * The user's STANDING double-booking policy (Story 15 / ADR 0011 + 0044),
+   * resolved from their EXPLICIT `conflict_policy` `UserMemoryFact` by the context
+   * builder and threaded onto the dispatch context so the conflict gate can honour
+   * it WITHOUT a model round-trip. `ALLOW` lets an overlapping write commit as if
+   * `confirmOverlap` were set (the user opted in once and for all); `DENY` refuses
+   * every overlap even when the model passes `confirmOverlap`; absent / `ASK` keeps
+   * the default-deny posture (refuse + restate, the model asks the user). It NEVER
+   * authorizes a destructive delete — those always ask. Optional so the existing
+   * orchestrator/test context literals keep compiling; absent ⇒ default-deny.
+   */
+  conflictPolicy?: ConflictPolicy;
 }
 
 /**
@@ -119,122 +122,12 @@ export interface BackgroundQueueJob {
 }
 
 /**
- * The proposed action held in Redis when a write conflicts with an existing
- * event (ADR 0006 layer 4). Resolved deterministically by the user's callback
- * tap — never by re-invoking the model.
- */
-export interface HeldConflictWrite {
-  /** The Cue user this write belongs to. */
-  userId: string;
-  /** Vendor chat to reply into once resolved. */
-  vendorChatId: string;
-  /** The write the model proposed, validated and ready to execute on confirm. */
-  action: HeldWriteAction;
-}
-
-/**
- * The concrete write a {@link HeldConflictWrite} will perform on confirmation.
- * Discriminated by `kind`. Four shapes:
- * - `create_event` — a single one-off create (the original conflict-producing
- *   write).
- * - `update_event` — a single one-off timed move.
- * - `create_recurring_event` — a whole proposed recurring SERIES held as ONE
- *   write because at least one of its occurrences overlaps an existing event
- *   (Story 9); on confirm it is created verbatim with its `recurrence` payload,
- *   bypassing the conflict check (the user chose "book the series anyway").
- * - `update_recurring_event` — a recurring EDIT whose time/recurrence change
- *   introduces an overlap (Story 9); on confirm it re-runs the chosen-scope edit
- *   verbatim, bypassing the check.
- *
- * The recurring shapes carry the full payload the dispatcher resolved so the
- * orchestrator's confirm-time executor needs no re-resolution — it replays the
- * exact `TaskService` call the check would have committed.
- */
-export type HeldWriteAction =
-  | {
-      kind: 'create_event';
-      calendarId: string;
-      title: string;
-      startAt: string;
-      endAt: string | null;
-      timezone: string;
-      notes: string | null;
-    }
-  | {
-      kind: 'update_event';
-      taskId: string;
-      startAt: string;
-      endAt: string | null;
-    }
-  | {
-      kind: 'create_recurring_event';
-      calendarId: string;
-      title: string;
-      startAt: string;
-      endAt: string;
-      timezone: string;
-      notes: string | null;
-      groupId: string | null;
-      isAllDay: boolean;
-      requiresCompletion: boolean;
-      /** The validated rule grammar, serialized as it crossed the dispatcher. */
-      recurrence: HeldRecurrence;
-    }
-  | {
-      kind: 'update_recurring_event';
-      taskId: string;
-      /** The recurring-edit scope the user originally chose. */
-      editScope: EditScope;
-      /** The occurrence coordinate the edit targets (ISO), for scoped writes. */
-      originalStart: string;
-      title: string | null;
-      startAt: string | null;
-      endAt: string | null;
-      groupId: string | null;
-      /** A rule change carried with the edit, or null when only time changed. */
-      recurrence: HeldRecurrence | null;
-    };
-
-/**
- * The serialized recurrence rule grammar carried inside a held recurring write.
- * Mirrors `CreateRecurrenceRuleDto` field-for-field (it survives a Redis JSON
- * round-trip), so the executor can pass it straight back to `TaskService`.
- */
-export interface HeldRecurrence {
-  frequency: string;
-  interval?: number;
-  byWeekday?: number[];
-  byMonthDay?: number[];
-  byMonth?: number[];
-  endType?: string;
-  endDate?: string;
-  count?: number;
-}
-
-/**
- * A batch of held writes stashed in Redis under one callback token. A single
- * turn can produce several conflicting writes (e.g. seven lessons where two
- * overlap); they are confirmed/cancelled together by one button tap rather than
- * abandoning the rest. The shared `vendorChatId` is injected when the batch is
- * stored; `userId` owns every action.
- */
-export interface HeldConflictBatch {
-  userId: string;
-  vendorChatId: string;
-  actions: HeldWriteAction[];
-}
-
-/** Callback-data verbs sent on inline keyboard buttons for held conflicts. */
-export enum ConflictCallbackAction {
-  CONFIRM = 'confirm',
-  CANCEL = 'cancel',
-}
-
-/**
  * One persisted tool-loop step inside a {@link ToolRoundAuditPayload}: the tool
  * the model called, its arguments, the result text fed back, and whether that
- * result was an error or a held (awaiting-confirmation) write. Stored verbatim
- * in `ConversationMessage.toolPayload` for the audit trail.
+ * result was an error. Stored verbatim in `ConversationMessage.toolPayload` for
+ * the audit trail. `held` is retained as a structural flag (always false since
+ * Story 15 / ADR 0011 removed the deterministic hold) so the audit / recap / stop
+ * -summary readers keep their stable step shape.
  */
 export interface ToolStepRecord {
   name: string;
@@ -327,8 +220,11 @@ export interface ToolRoundAuditPayload {
 
 /**
  * Outcome of a single dispatched tool call inside the orchestrator loop. The
- * orchestrator turns this into a `ToolResultBlock` for the next model round-trip
- * (or, for a held conflict, ends the turn and asks the user instead).
+ * orchestrator turns this into a `ToolResultBlock` for the next model round-trip.
+ * An overlapping write is reported here as an ordinary recoverable `isError`
+ * result restating the clash (ADR 0011 default-deny) — there is no separate hold
+ * channel; the model recovers by asking the user or retrying with
+ * `confirmOverlap`.
  */
 export interface ToolDispatchOutcome {
   /** Text fed back to the model as the tool result content. */
@@ -338,38 +234,15 @@ export interface ToolDispatchOutcome {
   /** True when this fetch counted against the schedule-fetch read cap. */
   countsAsScheduleFetch?: boolean;
   /**
-   * Present when the tool produced a conflicting write that must be held and
-   * confirmed by the user; the orchestrator stops the loop and asks via inline
-   * keyboard rather than re-invoking the model. Used by the single-write tools
-   * (`create_task`, `update_task`) — a batch tool reports many via
-   * {@link ToolDispatchOutcome.heldConflicts} instead.
-   */
-  heldConflict?: {
-    promptText: string;
-    write: HeldConflictWrite;
-  };
-  /**
-   * Present when a BATCH tool (`create_tasks`) produced one or more conflicting
-   * writes: every held item is carried so the orchestrator collects them all
-   * into the existing batch-hold confirmation alongside the items that did
-   * commit. Each entry mirrors the singular {@link heldConflict} shape. The
-   * singular and plural fields are mutually exclusive — a single-write tool sets
-   * the former, a batch tool the latter.
-   */
-  heldConflicts?: {
-    promptText: string;
-    write: HeldConflictWrite;
-  }[];
-  /**
-   * Number of writes a BATCH tool actually committed this call (non-error,
-   * non-held). The orchestrator adds this to `committedWrites` so the
-   * saved-changes count is accurate; absent for a single-write tool, where the
-   * loop falls back to its existing per-call +1 accounting.
+   * Number of writes a BATCH tool actually committed this call (non-error). The
+   * orchestrator adds this to `committedWrites` so the saved-changes count is
+   * accurate; absent for a single-write tool, where the loop falls back to its
+   * existing per-call +1 accounting.
    */
   committedCount?: number;
   /**
    * Number of write attempts a BATCH tool made this call (every item it tried to
-   * create, committed or held or errored). The orchestrator adds this to
+   * create, committed or refused). The orchestrator adds this to
    * `attemptedWrites`; absent for a single-write tool (loop falls back to +1).
    */
   attemptedCount?: number;
@@ -378,8 +251,7 @@ export interface ToolDispatchOutcome {
    * to ask and the optional tappable quick-replies. It is a SENTINEL — the tool
    * touches no database; the orchestrator recognizes it, STOPS the loop, and
    * suspends the turn (persists a `pending_question` row + Redis mirror, sends the
-   * question), resuming on the user's answer. Disjoint from `heldConflict[s]` (the
-   * deterministic ADR-0006 path that never re-invokes the model).
+   * question), resuming on the user's answer.
    */
   askUser?: {
     question: string;

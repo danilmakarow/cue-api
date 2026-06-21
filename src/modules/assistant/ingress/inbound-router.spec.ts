@@ -1,11 +1,8 @@
 import {
   ASK_CALLBACK_PREFIX,
-  CANCEL_CALLBACK_PREFIX,
-  CONFIRM_CALLBACK_PREFIX,
   STOP_CALLBACK_PREFIX,
   classifyFlow,
 } from './inbound-router';
-import { ConflictCallbackAction } from '../assistant.types';
 import { PendingInteractionStore } from '../session/pending-interaction.store';
 import { User } from '@/modules/database/entities';
 import {
@@ -67,40 +64,6 @@ describe('classifyFlow (inbound router taxonomy)', () => {
     expect(flow).toMatchObject({ kind: 'command', args: [] });
   });
 
-  it('classifies a confirm: callback as ConflictConfirmFlow (ADR 0006, deterministic)', async () => {
-    const callbackData = `${ConflictCallbackAction.CONFIRM}:token-1`;
-    const flow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-1',
-        callbackData,
-      }),
-      USER,
-      buildPendingStore(),
-    );
-
-    expect(flow).toEqual({
-      kind: 'conflict_confirm',
-      callbackId: 'cb-1',
-      callbackData,
-    });
-  });
-
-  it('classifies a cancel: callback as ConflictConfirmFlow too (shares the deterministic path)', async () => {
-    const callbackData = `${ConflictCallbackAction.CANCEL}:token-2`;
-    const flow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-2',
-        callbackData,
-      }),
-      USER,
-      buildPendingStore(),
-    );
-
-    expect(flow).toMatchObject({ kind: 'conflict_confirm', callbackData });
-  });
-
   it('classifies an ask: callback as AnswerFlow from a button (re-invoke path; Story-5-only at the wire)', async () => {
     const callbackData = `${ASK_CALLBACK_PREFIX}row-id:opt2`;
     const flow = await classifyFlow(
@@ -139,11 +102,7 @@ describe('classifyFlow (inbound router taxonomy)', () => {
     });
   });
 
-  it('keeps the stop: prefix disjoint from confirm:/cancel:/ask: so a STOP tap is never any other flow', async () => {
-    expect(STOP_CALLBACK_PREFIX.startsWith(CONFIRM_CALLBACK_PREFIX)).toBe(
-      false,
-    );
-    expect(STOP_CALLBACK_PREFIX.startsWith(CANCEL_CALLBACK_PREFIX)).toBe(false);
+  it('keeps the stop: and ask: prefixes disjoint so a STOP tap is never any other flow', async () => {
     expect(STOP_CALLBACK_PREFIX.startsWith(ASK_CALLBACK_PREFIX)).toBe(false);
     expect(ASK_CALLBACK_PREFIX.startsWith(STOP_CALLBACK_PREFIX)).toBe(false);
 
@@ -158,36 +117,6 @@ describe('classifyFlow (inbound router taxonomy)', () => {
     );
 
     expect(stopFlow.kind).toBe('stop_control');
-  });
-
-  it('keeps the ask: and confirm:/cancel: prefixes disjoint — an ask: tap is never a conflict-confirm', async () => {
-    // Sanity: the three prefixes do not overlap, so a tap is classified into
-    // exactly one suspend/resume path at the wire level.
-    expect(ASK_CALLBACK_PREFIX.startsWith(CONFIRM_CALLBACK_PREFIX)).toBe(false);
-    expect(CONFIRM_CALLBACK_PREFIX.startsWith(ASK_CALLBACK_PREFIX)).toBe(false);
-    expect(CANCEL_CALLBACK_PREFIX.startsWith(ASK_CALLBACK_PREFIX)).toBe(false);
-
-    const askFlow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-a',
-        callbackData: `${ASK_CALLBACK_PREFIX}x`,
-      }),
-      USER,
-      buildPendingStore(),
-    );
-    const confirmFlow = await classifyFlow(
-      normalize({
-        kind: InboundKind.Callback,
-        callbackId: 'cb-c',
-        callbackData: `${ConflictCallbackAction.CONFIRM}:y`,
-      }),
-      USER,
-      buildPendingStore(),
-    );
-
-    expect(askFlow.kind).toBe('answer');
-    expect(confirmFlow.kind).toBe('conflict_confirm');
   });
 
   it('classifies a plain text message with NO pending question as SimpleMessageFlow (fresh turn)', async () => {

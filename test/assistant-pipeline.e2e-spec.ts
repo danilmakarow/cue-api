@@ -2,6 +2,7 @@ import { CapturedSend } from './e2e/capturing-vendor.connector';
 import { E2eHarness, SeededFixtures } from './e2e/harness';
 import { completion, toolCall } from './e2e/scripted-ai.connector';
 import { AiModelRole, AiStopReason } from '@/modules/ai/ai.types';
+import { ConflictPolicy } from '@/modules/database/entities';
 import { TaskService } from '@/modules/task/task.service';
 
 /**
@@ -164,8 +165,8 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
     );
   });
 
-  it('holds an overlapping create and asks via inline keyboard (no commit yet)', async () => {
-    // Seed an existing timed task that the new create will overlap.
+  it('CASE 1 (core no-double-book): an unauthorized overlapping create is REFUSED in-loop, NO write, model steered to ask_user (ADR 0011 + 0044)', async () => {
+    // Seed an existing timed task the new create will overlap.
     const taskService = harness.moduleRef.get(TaskService);
 
     await taskService.create(fixtures.user.id, {
@@ -176,11 +177,12 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       timezone: 'UTC',
     });
 
-    const tasksBefore = await harness.countTasks(fixtures.calendar.id);
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(1);
 
-    expect(tasksBefore).toBe(1);
-
-    // The model creates an overlapping timed task; the dispatcher holds it.
+    // Round 1: the model issues an overlapping create with NO authorization. The
+    // dispatcher REFUSES it with a recoverable is_error restating the clash + the
+    // default-deny rule (no hold, no sendActions). Round 2: heeding that, the model
+    // calls ask_user — the turn suspends, still NO new write.
     harness.scriptedAi.script([
       completion({
         stopReason: AiStopReason.TOOL_USE,
@@ -192,6 +194,18 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
           }),
         ],
       }),
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('ask_user', {
+            question: 'That clashes with "Existing meeting". Book over it?',
+            options: [
+              { id: 'yes', label: 'Book anyway' },
+              { id: 'no', label: 'Pick another time' },
+            ],
+          }),
+        ],
+      }),
     ]);
 
     await harness.postWebhook(
@@ -200,7 +214,8 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const ask = await harness.vendor.nextSend();
 
-    // The hold is asked via an inline keyboard (sendActions), not a plain reply.
+    // The clash surfaced as an ask_user inline-keyboard question (the model's
+    // choice), NOT a deterministic hold keyboard — there is no held Redis key.
     expect(ask.method).toBe('sendActions');
 
     const actions = ask.payload as {
@@ -208,47 +223,236 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       buttons: Array<Array<{ label: string; callbackData: string }>>;
     };
 
-    expect(actions.buttons[0][0].label).toMatch(/book anyway/i);
-    expect(actions.buttons[0][1].label).toMatch(/cancel/i);
+    expect(actions.text).toMatch(/clash|over it/i);
 
-    // A held key was written to Redis with a TTL set.
-    const heldKeys = await harness.heldConflictKeys();
-
-    expect(heldKeys).toHaveLength(1);
-
-    const ttl = await harness.redis.ttl(heldKeys[0]);
-
-    expect(ttl).toBeGreaterThan(0);
-
-    // No NEW task committed — still just the seeded overlapping one.
-    const tasksAfter = await harness.countTasks(fixtures.calendar.id);
-
-    expect(tasksAfter).toBe(1);
-
-    // Confirming via the callback then commits the held write and burns the key.
-    const confirmData = actions.buttons[0][0].callbackData;
-
-    harness.scriptedAi.script([]);
-    await harness.postWebhook(
-      harness.buildCallbackUpdate(fixtures.chatId, confirmData),
+    // The dispatcher fed back a recoverable conflict tool_result (default-deny),
+    // proving the refusal happened in-loop rather than via a hold channel.
+    const auditRows = await harness.listToolAuditRows();
+    const refusalRow = auditRows.find((row) =>
+      JSON.stringify(row.toolPayload ?? {}).match(/Do NOT book over it/i),
     );
 
-    // The callback path acknowledges, then sends a confirmation reply.
-    let confirmReply = await harness.vendor.nextSend();
+    expect(refusalRow).toBeDefined();
 
-    if (confirmReply.method === 'acknowledgeCallback') {
-      confirmReply = await harness.vendor.nextSend();
-    }
+    // A durable pending_question exists (the ask_user suspend) — NOT a held key.
+    expect(await harness.listPendingQuestions()).toHaveLength(1);
 
-    expect(replyTextOf(confirmReply)).toMatch(/booked|done/i);
+    // CORE INVARIANT: no new task committed — still just the seeded overlapping one.
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(1);
+  });
 
-    const tasksFinal = await harness.countTasks(fixtures.calendar.id);
+  it('CASE 2 (explicit in-message authorization): confirmOverlap lands the overlapping write (ADR 0011 + 0044)', async () => {
+    const taskService = harness.moduleRef.get(TaskService);
 
-    expect(tasksFinal).toBe(2);
+    await taskService.create(fixtures.user.id, {
+      calendarId: fixtures.calendar.id,
+      title: 'Existing meeting',
+      startAt: '2026-07-01T15:00:00.000Z',
+      endAt: '2026-07-01T16:00:00.000Z',
+      timezone: 'UTC',
+    });
 
-    const heldKeysAfter = await harness.heldConflictKeys();
+    // The user authorized it in their message, so the model sets confirmOverlap:
+    // the gate is skipped and the overlapping write COMMITS in one turn.
+    harness.scriptedAi.script([
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('create_task', {
+            title: 'Dentist',
+            startAt: '2026-07-01T15:30:00.000Z',
+            endAt: '2026-07-01T16:30:00.000Z',
+            confirmOverlap: true,
+          }),
+        ],
+      }),
+      completion({
+        stopReason: AiStopReason.END_TURN,
+        text: 'Done — booked the dentist over your meeting as you asked.',
+      }),
+    ]);
 
-    expect(heldKeysAfter).toHaveLength(0);
+    await harness.postWebhook(
+      harness.buildTextUpdate(
+        fixtures.chatId,
+        'book dentist at 3:30, double-book it over my meeting',
+      ),
+    );
+
+    const reply = await harness.vendor.nextSend();
+
+    expect(reply.method).toBe('sendMessage');
+    expect(replyTextOf(reply)).toMatch(/booked|done/i);
+
+    // The authorized overlap landed: now two tasks, no pending question, no hold.
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(2);
+    expect(await harness.listPendingQuestions()).toHaveLength(0);
+  });
+
+  it('CASE 4 (destructive replace always asks): a delete without confirmDelete is REFUSED and asks first, NO delete (ADR 0011 + 0044)', async () => {
+    const taskService = harness.moduleRef.get(TaskService);
+
+    await taskService.create(fixtures.user.id, {
+      calendarId: fixtures.calendar.id,
+      title: 'Important meeting',
+      startAt: '2026-07-01T15:00:00.000Z',
+      endAt: '2026-07-01T16:00:00.000Z',
+      timezone: 'UTC',
+    });
+
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(1);
+
+    // Round 1: the model lists the day (so the task gets a handle). Round 2: it
+    // tries to delete WITHOUT confirmDelete — the dispatcher refuses destructively
+    // and tells it to ask first. Round 3: the model asks the user; the turn
+    // suspends with the task still intact.
+    harness.scriptedAi.script([
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('list_tasks', {
+            from: '2026-07-01T00:00:00.000Z',
+            to: '2026-07-02T00:00:00.000Z',
+          }),
+        ],
+      }),
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [toolCall('delete_task', { handle: 'e1' })],
+      }),
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('ask_user', {
+            question: 'Delete "Important meeting"? This cannot be undone.',
+            options: [
+              { id: 'yes', label: 'Delete it' },
+              { id: 'no', label: 'Keep it' },
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    await harness.postWebhook(
+      harness.buildTextUpdate(fixtures.chatId, 'delete my 3pm'),
+    );
+
+    const ask = await harness.vendor.nextSend();
+
+    expect(ask.method).toBe('sendActions');
+
+    // The destructive-replace refusal was fed back to the model in-loop.
+    const auditRows = await harness.listToolAuditRows();
+    const askFirstRow = auditRows.find((row) =>
+      JSON.stringify(row.toolPayload ?? {}).match(/confirmDelete/i),
+    );
+
+    expect(askFirstRow).toBeDefined();
+
+    // The task was NOT deleted — destructive replace always asks first.
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(1);
+    expect(await harness.listPendingQuestions()).toHaveLength(1);
+  });
+
+  it('CASE 5 (standing allow policy): an explicit conflict_policy=allow fact lets an overlap commit WITHOUT asking (ADR 0011 + 0044)', async () => {
+    const taskService = harness.moduleRef.get(TaskService);
+
+    await taskService.create(fixtures.user.id, {
+      calendarId: fixtures.calendar.id,
+      title: 'Existing meeting',
+      startAt: '2026-07-01T15:00:00.000Z',
+      endAt: '2026-07-01T16:00:00.000Z',
+      timezone: 'UTC',
+    });
+
+    // The user has a STANDING explicit allow-policy (set once in settings). The
+    // context builder surfaces it; the dispatcher proceeds over the overlap with
+    // NO confirmOverlap and NO ask.
+    await harness.setConflictPolicy(fixtures.user.id, ConflictPolicy.ALLOW);
+
+    harness.scriptedAi.script([
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          // No confirmOverlap — the standing allow-policy authorizes it.
+          toolCall('create_task', {
+            title: 'Dentist',
+            startAt: '2026-07-01T15:30:00.000Z',
+            endAt: '2026-07-01T16:30:00.000Z',
+          }),
+        ],
+      }),
+      completion({
+        stopReason: AiStopReason.END_TURN,
+        text: 'Done — booked the dentist (overlaps are fine for you).',
+      }),
+    ]);
+
+    await harness.postWebhook(
+      harness.buildTextUpdate(fixtures.chatId, 'book dentist at 3:30'),
+    );
+
+    const reply = await harness.vendor.nextSend();
+
+    // It committed without asking: a plain reply, two tasks, no pending question.
+    expect(reply.method).toBe('sendMessage');
+    expect(replyTextOf(reply)).toMatch(/booked|done/i);
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(2);
+    expect(await harness.listPendingQuestions()).toHaveLength(0);
+  });
+
+  it('CASE 5 (standing deny policy): an explicit conflict_policy=deny fact REFUSES an overlap, NO write (ADR 0011 + 0044)', async () => {
+    const taskService = harness.moduleRef.get(TaskService);
+
+    await taskService.create(fixtures.user.id, {
+      calendarId: fixtures.calendar.id,
+      title: 'Existing meeting',
+      startAt: '2026-07-01T15:00:00.000Z',
+      endAt: '2026-07-01T16:00:00.000Z',
+      timezone: 'UTC',
+    });
+
+    await harness.setConflictPolicy(fixtures.user.id, ConflictPolicy.DENY);
+
+    // Even if the model sets confirmOverlap, the standing deny-policy overrides it:
+    // the dispatcher refuses, the model relays it, NO new write.
+    harness.scriptedAi.script([
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [
+          toolCall('create_task', {
+            title: 'Dentist',
+            startAt: '2026-07-01T15:30:00.000Z',
+            endAt: '2026-07-01T16:30:00.000Z',
+            confirmOverlap: true,
+          }),
+        ],
+      }),
+      completion({
+        stopReason: AiStopReason.END_TURN,
+        text: 'That clashes with your meeting and you never double-book — shall I find another time?',
+      }),
+    ]);
+
+    await harness.postWebhook(
+      harness.buildTextUpdate(fixtures.chatId, 'book dentist at 3:30'),
+    );
+
+    const reply = await harness.vendor.nextSend();
+
+    expect(reply.method).toBe('sendMessage');
+
+    // The deny-policy refusal reached the model in-loop.
+    const auditRows = await harness.listToolAuditRows();
+    const denyRow = auditRows.find((row) =>
+      JSON.stringify(row.toolPayload ?? {}).match(/standing policy refuses/i),
+    );
+
+    expect(denyRow).toBeDefined();
+
+    // Refused under deny: still just the seeded task, no double-book.
+    expect(await harness.countTasks(fixtures.calendar.id)).toBe(1);
   });
 
   it('suspends on ask_user then resumes on the button tap and commits (ADR 0010 round-trip)', async () => {

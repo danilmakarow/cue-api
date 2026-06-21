@@ -31,6 +31,7 @@ export {
   UserMemoryFact,
   UserMemoryFactType,
   UserMemoryFactSource,
+  ConflictPolicy,
 } from './user-memory-fact.entity';
 export {
   PendingQuestion,

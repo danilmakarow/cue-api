@@ -15,7 +15,6 @@ import { isFalseSuccessReply, writeLedgerDelta } from './write-ledger';
 import { AssistantConfig } from '../assistant.config';
 import {
   AskUserOption,
-  HeldConflictWrite,
   StopController,
   ToolDispatchContext,
   ToolRoundAuditPayload,
@@ -23,7 +22,6 @@ import {
   TurnStreamSink,
 } from '../assistant.types';
 import { RoundRecapService } from '../background/round-recap.service';
-import { ConflictResolverService } from '../conflict/conflict-resolver.service';
 import { ContextBuilderService } from '../context-builder.service';
 import { HandleMap } from '../tools/handle-map';
 import { ToolDispatcherService } from '../tools/tool-dispatcher.service';
@@ -61,7 +59,6 @@ export interface AskSuspension {
 /** The outcome of the tool-use loop for one user turn. */
 export type LoopOutcome =
   | { kind: 'reply'; text: string }
-  | { kind: 'held'; held: HeldConflictWrite[]; promptText: string }
   | {
       /**
        * The model called `ask_user` (ADR 0010): suspend the turn. Carries the
@@ -110,12 +107,6 @@ export interface ToolLoopResult {
   attemptedWrites: number;
 }
 
-/** A held conflict paired with the per-conflict prompt the dispatcher built. */
-interface CollectedHeldConflict {
-  write: HeldConflictWrite;
-  promptText: string;
-}
-
 /**
  * The inputs that seed one tool-use loop run. A fresh turn supplies the user, the
  * conversation id, the current message text, and the correlation id; an
@@ -153,12 +144,13 @@ export interface ToolLoopState {
 /**
  * L4 tool-loop orchestration layer (the keystone). Owns the bounded agent loop:
  * call the model; on `tool_use` dispatch each tool (enforcing the schedule-fetch
- * read cap), feed the results back, and re-invoke — until `end_turn`, a held
- * conflict, an `ask_user` suspension (ADR 0010), the narration re-drive budget
- * (ADR 0009), the round-trip ceiling, or a terminal AI error. It is vendor /
- * redis / ORM blind: it injects only the L10 {@link AiConnector}, the config, the
- * L6 {@link ContextBuilderService}, and the L5 {@link ToolDispatcherService} (plus
- * the L8 {@link ConflictResolverService} purely for the held-prompt label).
+ * read cap), feed the results back, and re-invoke — until `end_turn`, an
+ * `ask_user` suspension (ADR 0010), the narration re-drive budget (ADR 0009), the
+ * round-trip ceiling, or a terminal AI error. A conflicting write is just a
+ * recoverable `isError` tool result (ADR 0011 default-deny) the model recovers
+ * from in-loop — no separate hold outcome. It is vendor / redis / ORM blind: it
+ * injects only the L10 {@link AiConnector}, the config, the L6
+ * {@link ContextBuilderService}, and the L5 {@link ToolDispatcherService}.
  */
 @Injectable()
 export class ToolLoopService {
@@ -169,15 +161,14 @@ export class ToolLoopService {
     private readonly config: AssistantConfig,
     private readonly contextBuilder: ContextBuilderService,
     private readonly toolDispatcher: ToolDispatcherService,
-    private readonly conflictResolver: ConflictResolverService,
     private readonly roundRecap: RoundRecapService,
   ) {}
 
   /**
    * Drives the consolidated tool-use loop for one turn. Calls the model; on
    * `tool_use` it dispatches each tool (enforcing the schedule-fetch read cap),
-   * feeds the results back, and re-invokes — until `end_turn`, a held conflict,
-   * the overall round-trip ceiling, or a terminal AI error.
+   * feeds the results back, and re-invokes — until `end_turn`, an `ask_user`
+   * suspension, the overall round-trip ceiling, or a terminal AI error.
    */
   async run(state: ToolLoopState): Promise<ToolLoopResult> {
     const { user, conversationId, currentMessageText, correlationId } = state;
@@ -231,6 +222,11 @@ export class ToolLoopService {
         user,
         handleMap,
         correlationId,
+        // The standing conflict policy (Story 15 / ADR 0011 + 0044), resolved once
+        // in the context build and threaded here so the dispatcher's conflict gate
+        // honours an explicit allow/deny without a model round-trip — sharing the
+        // same value restated to the model in the now-context.
+        conflictPolicy: prompt.conflictPolicy ?? undefined,
       };
 
       for (
@@ -389,7 +385,6 @@ export class ToolLoopService {
         const roundToolCalls = result.toolCalls;
         const roundResults: ToolRound['toolResults'] = [];
         const steps: ToolStepRecord[] = [];
-        const heldConflicts: CollectedHeldConflict[] = [];
         // Set when the cooperative STOP checkpoint fires AFTER a committed write
         // mid-round (Story 14b / ADR 0043). We finish recording THIS call's result
         // and the round's audit (so the just-committed write is in the ledger), then
@@ -466,48 +461,11 @@ export class ToolLoopService {
             };
           }
 
-          // A held conflict no longer aborts the batch (failure mode #2): record
-          // it, hand the model a benign tool result, and keep dispatching the
-          // rest of the round — non-conflicting writes still commit. All collected
-          // conflicts are confirmed together after the round. A single-write tool
-          // (`create_task` / `update_task`) reports ONE via `heldConflict` and
-          // produces no committed write, so it stops here entirely.
-          if (outcome.heldConflict) {
-            const heldContent =
-              'Held for the user to confirm (time conflict); not executed yet.';
-
-            heldConflicts.push({
-              write: outcome.heldConflict.write,
-              promptText: outcome.heldConflict.promptText,
-            });
-            roundResults.push({
-              toolCallId: toolCall.id,
-              content: heldContent,
-              isError: false,
-            });
-            steps.push({
-              name: toolCall.name,
-              input: toolCall.input,
-              resultContent: heldContent,
-              isError: false,
-              held: true,
-            });
-            continue;
-          }
-
-          // A BATCH tool (`create_tasks`) reports every held item via the plural
-          // `heldConflicts`; collect them all into the same batch-hold, then fall
-          // through so its own (real) tool result and committed/attempted counts
-          // are still recorded — a batch can both hold some items AND commit others.
-          if (outcome.heldConflicts) {
-            for (const held of outcome.heldConflicts) {
-              heldConflicts.push({
-                write: held.write,
-                promptText: held.promptText,
-              });
-            }
-          }
-
+          // A write that overlaps an existing commitment comes back as an ordinary
+          // recoverable `isError` result (ADR 0011 default-deny) — the dispatcher
+          // restates the clash and the model recovers in-loop (asks the user or
+          // retries with `confirmOverlap`). No separate hold channel; it is fed
+          // back like any other tool result below.
           const isError = outcome.isError ?? false;
 
           roundResults.push({
@@ -520,7 +478,7 @@ export class ToolLoopService {
             input: toolCall.input,
             resultContent: outcome.content,
             isError,
-            held: (outcome.heldConflicts?.length ?? 0) > 0,
+            held: false,
           });
 
           // Write accounting: a batch tool supplies its own committed/attempted
@@ -577,23 +535,9 @@ export class ToolLoopService {
           await this.renderRoundRecap(streamSink, steps, correlationId);
         }
 
-        if (heldConflicts.length > 0) {
-          return {
-            outcome: {
-              kind: 'held',
-              held: heldConflicts.map((conflict) => conflict.write),
-              promptText: this.buildHeldPrompt(heldConflicts, committedWrites),
-            },
-            rounds,
-            committedWrites,
-            attemptedWrites,
-          };
-        }
-
         // STOP fired after a committed write this round (checkpoint #2): the round
         // audit is now recorded, so stop gracefully with the programmatic ledger
-        // summary. Held precedence above is preserved — a held conflict in the same
-        // round resolves deterministically first; only a clean committed round stops.
+        // summary.
         if (stoppedAfterWrite) {
           return this.stoppedResult(rounds, committedWrites, attemptedWrites);
         }
@@ -619,39 +563,6 @@ export class ToolLoopService {
         attemptedWrites,
       };
     }
-  }
-
-  /**
-   * Builds the confirmation prompt for one or more held conflicts. A single
-   * conflict with nothing else committed keeps the dispatcher's own wording; a
-   * batch (or a partial success) reports how many already saved and lists the
-   * overlapping items so the user confirms or cancels the whole group at once.
-   */
-  private buildHeldPrompt(
-    held: CollectedHeldConflict[],
-    committedWrites: number,
-  ): string {
-    if (held.length === 1 && committedWrites === 0) {
-      return held[0].promptText;
-    }
-
-    const titles = held
-      .map((conflict) =>
-        this.conflictResolver.heldActionLabel(conflict.write.action),
-      )
-      .join(', ');
-    const prefix =
-      committedWrites > 0
-        ? `Saved ${committedWrites} change${committedWrites === 1 ? '' : 's'}. `
-        : '';
-    const overlap =
-      held.length === 1
-        ? `1 overlaps an existing event (${titles})`
-        : `${held.length} overlap existing events (${titles})`;
-
-    return `${prefix}${overlap} — book ${
-      held.length === 1 ? 'it' : 'them all'
-    } anyway, or cancel?`;
   }
 
   /**

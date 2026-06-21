@@ -19,9 +19,20 @@ import {
 /** How many recent messages the extractor scans for durable facts. */
 const EXTRACTION_WINDOW = 12;
 
-/** One durable fact the background model may extract. */
+/**
+ * One durable fact the background model may extract. `conflict_policy` is
+ * explicitly EXCLUDED (Story 15 / ADR 0011 + 0044): a standing double-booking
+ * policy must NEVER be inferred — only a user-set EXPLICIT fact counts as
+ * standing authorization — so the extractor cannot emit one even if the model
+ * tries. The refinement drops it as an invalid type rather than persisting an
+ * inferred policy that could silently widen the conflict gate.
+ */
 const extractedFactSchema = z.object({
-  type: z.nativeEnum(UserMemoryFactType),
+  type: z
+    .nativeEnum(UserMemoryFactType)
+    .refine((type) => type !== UserMemoryFactType.CONFLICT_POLICY, {
+      message: 'conflict_policy is user-set only and can never be inferred.',
+    }),
   key: z.string().min(1),
   value: z.object({}).catchall(z.unknown()),
   confidence: z.number().min(0).max(1),

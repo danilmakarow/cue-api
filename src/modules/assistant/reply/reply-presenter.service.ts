@@ -1,10 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import {
-  buildAskKeyboard,
-  buildHeldKeyboard,
-  buildStopKeyboard,
-} from './quick-reply.builder';
+import { buildAskKeyboard, buildStopKeyboard } from './quick-reply.builder';
 import { AskUserOption } from '../assistant.types';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
@@ -89,27 +85,6 @@ export class ReplyPresenter {
     }
 
     return null;
-  }
-
-  /**
-   * Sends the held-conflict confirmation keyboard (ADR 0006): the prompt text
-   * plus a single confirm/cancel button row whose callback data carries the
-   * Redis hold token. The model is never re-invoked — the user's tap resumes or
-   * cancels the held action deterministically.
-   */
-  async sendHeldKeyboard(
-    vendorChatId: string,
-    promptText: string,
-    heldCount: number,
-    token: string,
-  ): Promise<void> {
-    await this.vendor.sendActions(
-      { vendorChatId },
-      {
-        text: promptText,
-        buttons: buildHeldKeyboard(heldCount, token),
-      },
-    );
   }
 
   /**

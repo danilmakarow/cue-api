@@ -105,6 +105,11 @@ const createTaskProperties = {
     type: 'string',
     description: 'Optional calendar id; omit to use the primary calendar.',
   },
+  confirmOverlap: {
+    type: 'boolean',
+    description:
+      'Set true ONLY when the user explicitly authorized booking over an existing commitment. Leave unset and an overlapping write is refused (ask the user first).',
+  },
 };
 
 const EXPECTED_SCHEMAS: ToolSchema[] = [
@@ -165,7 +170,7 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
   {
     name: 'create_task',
     description:
-      'Create a timed event, an all-day event, or a todo (omit startAt for a todo with no time). Supports recurrence (one task, one rule) and an optional group by name. A non-recurring timed task that overlaps an existing one is held for the user to confirm — do not resolve conflicts yourself.',
+      'Create a timed event, an all-day event, or a todo (omit startAt for a todo with no time). Supports recurrence (one task, one rule) and an optional group by name. If the time overlaps an existing commitment the write is REFUSED with a recoverable error restating the clash — do NOT book over it unless the user explicitly authorized this; otherwise call ask_user. Only when the user has explicitly authorized booking over it, retry with confirmOverlap:true.',
     inputSchema: {
       type: 'object',
       properties: createTaskProperties,
@@ -175,7 +180,7 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
   {
     name: 'update_task',
     description:
-      'Update a task or occurrence by its handle (move its time, rename it, change its group or recurrence). For a repeating task, pass editScope; if you omit it you will be asked which scope. Overlaps on a one-off move are handled by the confirmation flow.',
+      'Update a task or occurrence by its handle (move its time, rename it, change its group or recurrence). For a repeating task, pass editScope; if you omit it you will be asked which scope. If a timed move overlaps an existing commitment the write is REFUSED with a recoverable error restating the clash — do NOT move onto it unless the user explicitly authorized this; otherwise call ask_user. Only when the user authorized it, retry with confirmOverlap:true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -195,6 +200,11 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
         group: { type: 'string', description: 'New group name.' },
         recurrence: recurrenceJsonSchema,
         editScope: editScopeJsonSchema,
+        confirmOverlap: {
+          type: 'boolean',
+          description:
+            'Set true ONLY when the user explicitly authorized moving onto an existing commitment. Leave unset and an overlapping move is refused (ask the user first).',
+        },
       },
       required: ['handle'],
     },
@@ -221,7 +231,7 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
   {
     name: 'delete_task',
     description:
-      'Delete a task or series by handle, or skip a single occurrence with editScope:"this". For a repeating task without editScope you will be asked which scope.',
+      'Delete a task or series by handle, or skip a single occurrence with editScope:"this". For a repeating task without editScope you will be asked which scope. Deleting is destructive and irreversible: you MUST ask the user to confirm first, then retry with confirmDelete:true. Leave confirmDelete unset and the delete is REFUSED with a recoverable error telling you to ask first — confirmOverlap and a standing allow-policy do NOT authorize a delete.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -230,6 +240,11 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
           description: 'Bracketed handle of the task to delete, e.g. e2.',
         },
         editScope: editScopeJsonSchema,
+        confirmDelete: {
+          type: 'boolean',
+          description:
+            'Set true ONLY after the user explicitly confirmed deleting this commitment. A delete is destructive: leave unset and it is refused (ask the user first). confirmOverlap and a standing allow-policy never authorize a delete.',
+        },
       },
       required: ['handle'],
     },
@@ -285,7 +300,7 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
   {
     name: 'create_tasks',
     description:
-      'Create MANY tasks in one call, applied in the given order — prefer this over repeated create_task when the user asks for several at once (e.g. "create all seven driving lessons"). Each item is a full create_task input (timed event, all-day event, or todo, optionally recurring or grouped). Non-conflicting items are created immediately; any non-recurring timed item that overlaps an existing one is held for the user to confirm — the rest still commit, so a single overlap never aborts the batch. Up to 25 items per call: split a larger list across several calls.',
+      'Create MANY tasks in one call, applied in the given order — prefer this over repeated create_task when the user asks for several at once (e.g. "create all seven driving lessons"). Each item is a full create_task input (timed event, all-day event, or todo, optionally recurring or grouped). Non-conflicting items are created immediately; any item that overlaps an existing commitment is REFUSED with a recoverable error restating the clash (the rest still commit, so one overlap never aborts the batch) — do NOT book over a clash unless the user explicitly authorized it; otherwise ask_user, then retry that item with confirmOverlap:true. Up to 25 items per call: split a larger list across several calls.',
     inputSchema: {
       type: 'object',
       properties: {

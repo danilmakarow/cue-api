@@ -1,9 +1,6 @@
 import { ConversationStore } from './conversation.store';
 import { TurnAuditStore } from './turn-audit.store';
 import { TurnRunnerService } from './turn-runner.service';
-import { HeldConflictWrite } from '../assistant.types';
-import { ConflictResolverService } from '../conflict/conflict-resolver.service';
-import { HeldConflictStore } from '../conflict/held-conflict.store';
 import { ToolLoopService } from '../orchestration/tool-loop.service';
 import { ReplyPresenter } from '../reply/reply-presenter.service';
 import {
@@ -96,7 +93,6 @@ const buildHarness = () => {
     maxToolRoundtrips: 8,
     maxScheduleFetches: 5,
     maxCorrections: 5,
-    heldConflictTtlSeconds: 600,
   };
   const contextBuilder = {
     build: jest.fn().mockResolvedValue({ system: [], messages: [], tools: [] }),
@@ -159,39 +155,25 @@ const buildHarness = () => {
   const removeStopControl = jest
     .spyOn(replyPresenter, 'removeStopControl')
     .mockResolvedValue(undefined);
-  // Story 8 (L8 conflict layer, ADR 0006): the deterministic held-conflict state
-  // + replay now live in dedicated providers. We wrap REAL instances around the
-  // same redis / config / taskService / replyPresenter / conversationStore mocks
-  // so every existing redis.set/getdel, taskService.*, and vendor.* assertion
-  // observes the identical calls through the new layer — no assertion changes.
-  const heldConflictStore = new HeldConflictStore(
-    redis as never,
-    config as never,
-  );
-  const conflictResolver = new ConflictResolverService(
-    taskService as never,
-    heldConflictStore,
-    replyPresenter,
-    conversationStore,
-  );
   // Story 8 (L4 tool-loop, the keystone): the agent loop now lives in a dedicated
   // ToolLoopService. We wrap a REAL instance around the same ai / config /
-  // contextBuilder / toolDispatcher / conflictResolver mocks so every existing
-  // ai.complete, contextBuilder.build, and toolDispatcher.dispatch assertion
-  // observes the identical loop calls through the new layer — no assertion changes.
+  // contextBuilder / toolDispatcher mocks so every existing ai.complete,
+  // contextBuilder.build, and toolDispatcher.dispatch assertion observes the
+  // identical loop calls through the new layer — no assertion changes.
   const toolLoop = new ToolLoopService(
     ai as never,
     config as never,
     contextBuilder as never,
     toolDispatcher as never,
-    conflictResolver,
     roundRecap as never,
   );
 
   // Story 8 (L3 turn runner, ADR 0036): the turn lifecycle now OWNS handleText /
-  // resumeAnswer / finishTurn + the held-hold + ask-suspend tail. The runner is
-  // assembled around the same REAL layer instances + mocks above so every
-  // assertion below observes the identical persistence / send / loop calls.
+  // resumeAnswer / finishTurn + the ask-suspend tail. The runner is assembled
+  // around the same REAL layer instances + mocks above so every assertion below
+  // observes the identical persistence / send / loop calls. (Story 15 / ADR 0011
+  // removed the deterministic held-conflict hold — a conflict is now a recoverable
+  // tool result the loop handles, so there is no conflict store/resolver here.)
   // Story 12 (L9 live status): the runner opens a status animation per turn and
   // finalizes it in a `finally`. We stub the animator with an inert handle whose
   // open/startLoading/finalize are no-ops so every existing assertion (which
@@ -229,7 +211,6 @@ const buildHarness = () => {
     turnAuditStore as never,
     pendingInteraction as never,
     replyPresenter as never,
-    heldConflictStore as never,
     statusAnimator as never,
     stopFlags as never,
   );
@@ -666,55 +647,6 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     );
   });
 
-  it('holds a conflicting write, asks via inline keyboard, and does NOT re-invoke the model', async () => {
-    const harness = buildHarness();
-    const held: HeldConflictWrite = {
-      userId: USER.id,
-      vendorChatId: '',
-      action: {
-        kind: 'create_event',
-        calendarId: 'cal-1',
-        title: 'Dentist',
-        startAt: '2026-06-02T15:00:00Z',
-        endAt: '2026-06-02T16:00:00Z',
-        timezone: 'UTC',
-        notes: null,
-      },
-    };
-
-    harness.ai.complete.mockResolvedValueOnce(
-      completion({
-        stopReason: AiStopReason.TOOL_USE,
-        toolCalls: [toolCall('create_event')],
-      }),
-    );
-    harness.toolDispatcher.dispatch.mockResolvedValue({
-      content: 'held',
-      heldConflict: {
-        promptText: 'That overlaps with Lunch. Book anyway?',
-        write: held,
-      },
-    });
-
-    await harness.service.handleText(USER, {
-      text: 'book dentist at 3',
-      contentType: ConversationMessageContentType.TEXT,
-      vendorChatId: CHAT_ID,
-      vendorMessageId: null,
-    });
-
-    // Model called exactly once — not re-invoked to resolve the conflict.
-    expect(harness.ai.complete).toHaveBeenCalledTimes(1);
-    expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
-    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
-    // The held write is stashed in Redis with the real chat id injected.
-    expect(harness.redis.set).toHaveBeenCalled();
-
-    const [, payload] = harness.redis.set.mock.calls[0];
-
-    expect(JSON.parse(payload)).toMatchObject({ vendorChatId: CHAT_ID });
-  });
-
   it('replies gracefully and persists nothing extra when the AI errors terminally', async () => {
     const harness = buildHarness();
 
@@ -769,113 +701,39 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(harness.summarizer.maybeSummarize).not.toHaveBeenCalled();
   });
 
-  it('does NOT abort the batch on the first held conflict — commits the rest and holds all conflicts together', async () => {
-    const harness = buildHarness();
-    const heldWrite: HeldConflictWrite = {
-      userId: USER.id,
-      vendorChatId: '',
-      action: {
-        kind: 'create_event',
-        calendarId: 'cal-1',
-        title: 'Lesson 2',
-        startAt: '2026-06-13T08:00:00Z',
-        endAt: '2026-06-13T11:00:00Z',
-        timezone: 'UTC',
-        notes: null,
-      },
-    };
-
-    // One round emitting three create_task calls; the middle one conflicts.
-    harness.ai.complete.mockResolvedValueOnce(
-      completion({
-        stopReason: AiStopReason.TOOL_USE,
-        toolCalls: [
-          toolCall('create_task', { title: 'Lesson 1' }),
-          toolCall('create_task', { title: 'Lesson 2' }),
-          toolCall('create_task', { title: 'Lesson 3' }),
-        ],
-      }),
-    );
-    harness.toolDispatcher.dispatch
-      .mockResolvedValueOnce({ content: 'Created "Lesson 1".' })
-      .mockResolvedValueOnce({
-        content: 'held',
-        heldConflict: {
-          promptText: 'That overlaps with Tennis. Book anyway?',
-          write: heldWrite,
-        },
-      })
-      .mockResolvedValueOnce({ content: 'Created "Lesson 3".' });
-
-    await harness.service.handleText(USER, {
-      text: 'create three lessons',
-      contentType: ConversationMessageContentType.TEXT,
-      vendorChatId: CHAT_ID,
-      vendorMessageId: null,
-    });
-
-    // All three calls were dispatched — the conflict did not short-circuit.
-    expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(3);
-    // The model was not re-invoked to resolve the conflict.
-    expect(harness.ai.complete).toHaveBeenCalledTimes(1);
-    // One held write stashed, with the 2 committed writes reported in the prompt.
-    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
-
-    const [, actions] = harness.vendor.sendActions.mock.calls[0];
-
-    expect(actions.text).toMatch(/saved 2 changes/i);
-    expect(actions.buttons[0][0].label).toMatch(/book anyway/i);
-
-    const [, payload] = harness.redis.set.mock.calls[0];
-
-    expect(JSON.parse(payload).actions).toHaveLength(1);
-  });
-
-  it('counts every committed item of a create_tasks batch toward committedWrites (saved N changes)', async () => {
+  it('does NOT hold or stash on an overlap — a refused create_tasks item is a recoverable result, the rest commit, and the runner sends a normal reply (ADR 0011)', async () => {
     const harness = buildHarness();
 
-    // Round 0: the model issues ONE create_tasks call for three lessons; round 1
-    // would normally be the terminal reply, but here a held conflict from the
-    // batch ends the turn first so we can read the committed count off the
-    // held-confirmation prompt ("Saved N changes").
-    harness.ai.complete.mockResolvedValueOnce(
-      completion({
-        stopReason: AiStopReason.TOOL_USE,
-        toolCalls: [
-          toolCall('create_tasks', {
-            tasks: [
-              { title: 'Lesson 1' },
-              { title: 'Lesson 2' },
-              { title: 'Lesson 3' },
-            ],
-          }),
-        ],
-      }),
-    );
-    // The batch tool returns ONE outcome: 2 committed, 1 held.
+    // Round 0: ONE create_tasks call for three lessons; the batch tool refuses the
+    // middle item under default-deny (recoverable, in the per-item summary) and
+    // commits the other two. Round 1: the model recovers and sends a normal reply.
+    harness.ai.complete
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.TOOL_USE,
+          toolCalls: [
+            toolCall('create_tasks', {
+              tasks: [
+                { title: 'Lesson 1' },
+                { title: 'Lesson 2' },
+                { title: 'Lesson 3' },
+              ],
+            }),
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Booked Lessons 1 and 3; Lesson 2 clashes — shall I book over it?',
+        }),
+      );
+    // The batch tool returns ONE outcome: 2 committed, 1 refused (recoverable).
     harness.toolDispatcher.dispatch.mockResolvedValueOnce({
       content:
-        '1: created "Lesson 1"; 2: held (overlaps Tennis); 3: created "Lesson 3"',
+        '1: created "Lesson 1"; 2: refused (That overlaps an existing commitment ("Tennis"). Do NOT book over it…); 3: created "Lesson 3"',
       committedCount: 2,
       attemptedCount: 3,
-      heldConflicts: [
-        {
-          promptText: 'That overlaps with Tennis. Shall I book it anyway?',
-          write: {
-            userId: USER.id,
-            vendorChatId: '',
-            action: {
-              kind: 'create_event',
-              calendarId: 'cal-1',
-              title: 'Lesson 2',
-              startAt: '2026-06-13T08:00:00Z',
-              endAt: '2026-06-13T11:00:00Z',
-              timezone: 'UTC',
-              notes: null,
-            },
-          },
-        },
-      ],
     });
 
     await harness.service.handleText(USER, {
@@ -885,22 +743,17 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    // One model call (the batch is a single tool call) and one dispatch.
-    expect(harness.ai.complete).toHaveBeenCalledTimes(1);
-    expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(1);
+    // A conflict is a recoverable tool result the loop handles in-line — no hold:
+    // NO inline keyboard sent, NOTHING stashed in Redis.
+    expect(harness.vendor.sendActions).not.toHaveBeenCalled();
+    expect(harness.redis.set).not.toHaveBeenCalled();
 
-    // The held item routes into the batch-hold confirmation, and the 2 committed
-    // items from the SAME batch are reported as saved changes.
-    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
+    // The turn ends with a normal text reply.
+    expect(harness.vendor.sendMessage).toHaveBeenCalledTimes(1);
 
-    const [, actions] = harness.vendor.sendActions.mock.calls[0];
+    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
 
-    expect(actions.text).toMatch(/saved 2 changes/i);
-
-    // Only the single held write is stashed for confirmation.
-    const [, payload] = harness.redis.set.mock.calls[0];
-
-    expect(JSON.parse(payload).actions).toHaveLength(1);
+    expect(reply.text).toMatch(/Lesson 2 clashes/);
   });
 
   it('treats a fully-committed create_tasks batch as genuine — no re-drive, real reply sent', async () => {

@@ -6,15 +6,9 @@ import { ConversationStore } from './conversation.store';
 import { PendingInteractionService } from './pending-interaction.store';
 import { StopFlagStore } from './stop-flag.store';
 import { TurnAuditStore } from './turn-audit.store';
-import {
-  HeldConflictBatch,
-  HeldConflictWrite,
-  ToolRoundAuditPayload,
-  TurnStreamSink,
-} from '../assistant.types';
+import { ToolRoundAuditPayload, TurnStreamSink } from '../assistant.types';
 import { MemoryExtractorService } from '../background/memory-extractor.service';
 import { SummarizerService } from '../background/summarizer.service';
-import { HeldConflictStore } from '../conflict/held-conflict.store';
 import { ASK_CALLBACK_PREFIX } from '../ingress/inbound-router';
 import {
   AskSuspension,
@@ -169,10 +163,11 @@ const contentTypeFor = (kind: InboundKind): ConversationMessageContentType =>
  * question) are seeded into a {@link TurnState} and run here: it persists the
  * turn (via {@link ConversationStore} / {@link TurnAuditStore}), drives the
  * bounded tool-use loop ({@link ToolLoopService}), presents the reply via the L9
- * {@link ReplyPresenter}, holds conflicting writes (ADR 0006), suspends/resumes
- * `ask_user` (ADR 0010), and fires the post-turn background jobs. The two no-LLM
- * paths (command, conflict-confirm) bypass this entirely and keep their existing
- * deterministic handlers on {@link AssistantService}.
+ * {@link ReplyPresenter}, suspends/resumes `ask_user` (ADR 0010), and fires the
+ * post-turn background jobs. A conflicting write is resolved inside the loop as a
+ * recoverable tool result (ADR 0011 default-deny), so there is no hold step here.
+ * The command path bypasses this entirely and keeps its deterministic handler on
+ * {@link AssistantService}.
  *
  * `runTurn` is the divergence: a `simple_message` origin runs a fresh
  * {@link handleText}; an `answer_*` origin runs the `ask_user` resume
@@ -193,7 +188,6 @@ export class TurnRunnerService {
     private readonly turnAuditStore: TurnAuditStore,
     private readonly pendingInteraction: PendingInteractionService,
     private readonly replyPresenter: ReplyPresenter,
-    private readonly heldConflictStore: HeldConflictStore,
     private readonly statusAnimator: StatusAnimatorService,
     private readonly stopFlags: StopFlagStore,
   ) {}
@@ -235,42 +229,6 @@ export class TurnRunnerService {
     rounds: ToolRoundAuditPayload[],
   ): Promise<void> {
     return this.turnAuditStore.persistToolRounds(conversationId, rounds);
-  }
-
-  /**
-   * Holds a conflicting write in Redis (short TTL) and asks the user to resolve
-   * it via an inline keyboard — the model is never re-invoked (ADR 0006 layer
-   * 4). The user's button tap later resumes or cancels the held action.
-   */
-  private async holdAndAsk(
-    conversation: Conversation,
-    vendorChatId: string,
-    held: HeldConflictWrite[],
-    promptText: string,
-  ): Promise<void> {
-    const token = randomUUID();
-    const batch: HeldConflictBatch = {
-      userId: held[0].userId,
-      vendorChatId,
-      actions: held.map((conflict) => conflict.action),
-    };
-
-    await this.heldConflictStore.stash(token, batch);
-
-    await this.replyPresenter.sendHeldKeyboard(
-      vendorChatId,
-      promptText,
-      held.length,
-      token,
-    );
-
-    await this.persistMessage(
-      conversation,
-      ConversationMessageRole.ASSISTANT,
-      ConversationMessageContentType.TEXT,
-      promptText,
-      null,
-    );
   }
 
   /**
@@ -477,15 +435,17 @@ export class TurnRunnerService {
   }
 
   /**
-   * The shared post-loop tail (ADR 0006/0009/0010): persists the audit trail,
-   * then branches on the {@link LoopOutcome} — `held` parks + asks via inline
-   * keyboard, `ask` suspends the turn (ADR 0010), `error` sends the AI-failure
-   * line, `unresolved` escalates honestly (alert + reply), and a plain reply runs
+   * The shared post-loop tail (ADR 0009/0010/0011): persists the audit trail, then
+   * branches on the {@link LoopOutcome} — `ask` suspends the turn (ADR 0010),
+   * `error` sends the AI-failure line, `unresolved` escalates honestly (alert +
+   * reply), `stopped` sends the programmatic STOP summary, and a plain reply runs
    * the false-success guard before sending + persisting and firing the background
-   * jobs. Single-sourced so a fresh turn ({@link handleText}) and an `ask_user`
-   * resume ({@link resumeAnswer}) end identically — including the ability to
-   * suspend AGAIN when the resumed model asks a follow-up question. Never throws
-   * (attempts:1); every helper it calls swallows its own send/persist failure.
+   * jobs. A conflicting write never reaches here as a distinct outcome — it is a
+   * recoverable tool result the loop already handled (ADR 0011 default-deny).
+   * Single-sourced so a fresh turn ({@link handleText}) and an `ask_user` resume
+   * ({@link resumeAnswer}) end identically — including the ability to suspend AGAIN
+   * when the resumed model asks a follow-up question. Never throws (attempts:1);
+   * every helper it calls swallows its own send/persist failure.
    */
   private async finishTurn(
     user: User,
@@ -498,17 +458,6 @@ export class TurnRunnerService {
 
     // Persist the tool-loop audit trail regardless of how the turn ended.
     await this.persistToolRounds(conversation.id, rounds);
-
-    if (outcome.kind === 'held') {
-      await this.holdAndAsk(
-        conversation,
-        vendorChatId,
-        outcome.held,
-        outcome.promptText,
-      );
-
-      return;
-    }
 
     if (outcome.kind === 'ask') {
       await this.suspendAndAsk(

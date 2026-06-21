@@ -101,4 +101,9 @@ export const createTaskProperties: ToolJsonSchema = {
     type: 'string',
     description: 'Optional calendar id; omit to use the primary calendar.',
   },
+  confirmOverlap: {
+    type: 'boolean',
+    description:
+      'Set true ONLY when the user explicitly authorized booking over an existing commitment. Leave unset and an overlapping write is refused (ask the user first).',
+  },
 };

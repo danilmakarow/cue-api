@@ -7,7 +7,12 @@ import { HandleMap } from './handle-map';
 import { ToolDispatcherService } from './tool-dispatcher.service';
 import { ToolCall } from '@/modules/ai/ai.types';
 import { CalendarService } from '@/modules/calendar/calendar.service';
-import { Task, TaskGroup, User } from '@/modules/database/entities';
+import {
+  ConflictPolicy,
+  Task,
+  TaskGroup,
+  User,
+} from '@/modules/database/entities';
 import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
 import { TaskService } from '@/modules/task/task.service';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
@@ -19,6 +24,18 @@ const buildContext = (handleMap = new HandleMap()): ToolDispatchContext => ({
   userId: 'user-1',
   user: { id: 'user-1', timezone: 'UTC' } as User,
   handleMap,
+});
+
+/**
+ * Builds a dispatch context carrying a STANDING `conflict_policy` (Story 15 / ADR
+ * 0011 + 0044), to exercise the allow/deny override of the overlap gate.
+ */
+const buildContextWithPolicy = (
+  conflictPolicy: ConflictPolicy,
+  handleMap = new HandleMap(),
+): ToolDispatchContext => ({
+  ...buildContext(handleMap),
+  conflictPolicy,
 });
 
 /**
@@ -325,7 +342,7 @@ describe('ToolDispatcherService', () => {
       );
 
       expect(harness.taskService.create).toHaveBeenCalledTimes(1);
-      expect(outcome.heldConflict).toBeUndefined();
+      expect(outcome.isError).toBeUndefined();
       expect(outcome.content).toMatch(/created/i);
     });
 
@@ -367,10 +384,10 @@ describe('ToolDispatcherService', () => {
       expect(
         harness.taskService.findRecurringSeriesConflicts,
       ).toHaveBeenCalledTimes(1);
-      expect(outcome.heldConflict).toBeUndefined();
+      expect(outcome.isError).toBeUndefined();
     });
 
-    it('holds the WHOLE series when a recurring create overlaps existing events (Story 9)', async () => {
+    it('REFUSES the whole series with a recoverable default-deny error when a recurring create overlaps (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (
@@ -393,23 +410,46 @@ describe('ToolDispatcherService', () => {
         buildContext(),
       );
 
-      // The series is held, NOT committed.
+      // The series is REFUSED, NOT committed — a recoverable error restating the
+      // clash + the default-deny instruction, no hold.
       expect(harness.taskService.create).not.toHaveBeenCalled();
-      expect(outcome.heldConflict).toBeDefined();
-      expect(outcome.heldConflict?.write.action.kind).toBe(
-        'create_recurring_event',
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(
+        /overlaps existing commitments on 2 dates/i,
       );
-      expect(outcome.heldConflict?.promptText).toMatch(
-        /overlaps existing events on 2 dates/i,
+      expect(outcome.content).toMatch(/Gym/);
+      expect(outcome.content).toMatch(/Do NOT book over it/i);
+      expect(outcome.content).toMatch(/confirmOverlap/);
+    });
+
+    it('books the recurring series when confirmOverlap is set, skipping the series conflict check (ADR 0011)', async () => {
+      const harness = buildDispatcher();
+
+      (
+        harness.taskService.findRecurringSeriesConflicts as jest.Mock
+      ).mockResolvedValue({
+        conflictDates: [new Date('2026-06-10T09:00:00.000Z')],
+        conflictingTasks: [{ id: 'task-x', title: 'Gym' } as Task],
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_task', {
+          title: 'Standup',
+          startAt: '2026-06-10T09:00:00.000Z',
+          endAt: '2026-06-10T09:15:00.000Z',
+          recurrence: { frequency: 'WEEKLY', byWeekday: [0, 1, 2, 3, 4] },
+          confirmOverlap: true,
+        }),
+        buildContext(),
       );
-      expect(outcome.heldConflict?.promptText).toMatch(/Gym/);
 
-      // The held action carries the recurrence so the orchestrator can replay it.
-      const action = outcome.heldConflict?.write.action;
-
+      // Authorized: the gate is skipped entirely and the series commits.
       expect(
-        action?.kind === 'create_recurring_event' && action.recurrence,
-      ).toMatchObject({ frequency: 'WEEKLY', byWeekday: [0, 1, 2, 3, 4] });
+        harness.taskService.findRecurringSeriesConflicts,
+      ).not.toHaveBeenCalled();
+      expect(harness.taskService.create).toHaveBeenCalledTimes(1);
+      expect(outcome.isError).toBeUndefined();
+      expect(outcome.content).toMatch(/created/i);
     });
 
     it('rejects a COUNT recurrence missing count with a recoverable error (no write)', async () => {
@@ -513,7 +553,7 @@ describe('ToolDispatcherService', () => {
       expect(harness.taskService.create).not.toHaveBeenCalled();
     });
 
-    it('holds a create_task that overlaps an existing task instead of writing', async () => {
+    it('CORE SAFETY: refuses a create_task that overlaps with a recoverable default-deny error and NO write (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
@@ -529,10 +569,89 @@ describe('ToolDispatcherService', () => {
         buildContext(),
       );
 
+      // No silent double-book: the overlap produces NO write and a recoverable
+      // is_error that restates the clash + the default-deny rule (no hold).
       expect(harness.taskService.create).not.toHaveBeenCalled();
-      expect(outcome.heldConflict).toBeDefined();
-      expect(outcome.heldConflict?.promptText).toMatch(/Lunch with Ana/);
-      expect(outcome.heldConflict?.write.action.kind).toBe('create_event');
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/overlaps an existing commitment/i);
+      expect(outcome.content).toMatch(/Lunch with Ana/);
+      expect(outcome.content).toMatch(/Do NOT book over it/i);
+      expect(outcome.content).toMatch(/ask_user/);
+    });
+
+    it('books over the overlap only when confirmOverlap is set — the user authorized it (ADR 0011)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other', title: 'Lunch with Ana' } as Task,
+      ]);
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_task', {
+          title: 'Dentist',
+          startAt: '2026-06-10T13:30:00.000Z',
+          endAt: '2026-06-10T14:30:00.000Z',
+          confirmOverlap: true,
+        }),
+        buildContext(),
+      );
+
+      // Authorized: the conflict check is skipped and the write commits.
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.create).toHaveBeenCalledTimes(1);
+      expect(outcome.isError).toBeUndefined();
+      expect(outcome.content).toMatch(/created/i);
+    });
+
+    it('CASE 5 — STANDING ALLOW: proceeds over an overlap WITHOUT asking and WITHOUT confirmOverlap (ADR 0011 + 0044)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other', title: 'Lunch with Ana' } as Task,
+      ]);
+
+      const outcome = await harness.dispatcher.dispatch(
+        // NO confirmOverlap — the standing ALLOW policy authorizes it on its own.
+        toolCall('create_task', {
+          title: 'Dentist',
+          startAt: '2026-06-10T13:30:00.000Z',
+          endAt: '2026-06-10T14:30:00.000Z',
+        }),
+        buildContextWithPolicy(ConflictPolicy.ALLOW),
+      );
+
+      // The gate is skipped entirely (no conflict probe) and the write commits.
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.create).toHaveBeenCalledTimes(1);
+      expect(outcome.isError).toBeUndefined();
+      expect(outcome.content).toMatch(/created/i);
+    });
+
+    it('CASE 5 — STANDING DENY: refuses an overlap even when confirmOverlap is set, NO write (ADR 0011 + 0044)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other', title: 'Lunch with Ana' } as Task,
+      ]);
+
+      const outcome = await harness.dispatcher.dispatch(
+        // confirmOverlap is set, but the standing DENY policy OVERRIDES it.
+        toolCall('create_task', {
+          title: 'Dentist',
+          startAt: '2026-06-10T13:30:00.000Z',
+          endAt: '2026-06-10T14:30:00.000Z',
+          confirmOverlap: true,
+        }),
+        buildContextWithPolicy(ConflictPolicy.DENY),
+      );
+
+      // The deny policy forces the check (despite confirmOverlap) and refuses; the
+      // restatement says the policy refuses overlaps and confirmOverlap is ignored.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledTimes(1);
+      expect(harness.taskService.create).not.toHaveBeenCalled();
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/Lunch with Ana/);
+      expect(outcome.content).toMatch(/standing policy refuses|do not book/i);
     });
   });
 
@@ -567,7 +686,6 @@ describe('ToolDispatcherService', () => {
 
       expect(outcome.committedCount).toBe(3);
       expect(outcome.attemptedCount).toBe(3);
-      expect(outcome.heldConflicts).toBeUndefined();
       expect(outcome.isError).toBeUndefined();
       // Per-item summary, in order.
       expect(outcome.content).toBe(
@@ -575,7 +693,7 @@ describe('ToolDispatcherService', () => {
       );
     });
 
-    it('commits the free items and returns the conflicting one as a held write', async () => {
+    it('commits the free items and REFUSES the conflicting one with a recoverable restatement (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (harness.taskService.create as jest.Mock).mockImplementation(
@@ -603,7 +721,8 @@ describe('ToolDispatcherService', () => {
         buildContext(),
       );
 
-      // Two free items committed; the conflicting one was NOT written.
+      // Two free items committed; the conflicting one was NOT written — one
+      // overlap never aborts the batch.
       expect(harness.taskService.create).toHaveBeenCalledTimes(2);
       expect(
         (harness.taskService.create as jest.Mock).mock.calls.map(
@@ -613,10 +732,11 @@ describe('ToolDispatcherService', () => {
 
       expect(outcome.committedCount).toBe(2);
       expect(outcome.attemptedCount).toBe(3);
-      expect(outcome.heldConflicts).toHaveLength(1);
-      expect(outcome.heldConflicts?.[0].write.action.kind).toBe('create_event');
-      expect(outcome.heldConflicts?.[0].promptText).toMatch(/Tennis/);
-      expect(outcome.content).toMatch(/2: held/);
+      // The refused item is reported in the per-item summary with its default-deny
+      // restatement — no hold channel.
+      expect(outcome.content).toMatch(/2: refused/);
+      expect(outcome.content).toMatch(/Tennis/);
+      expect(outcome.content).toMatch(/Do NOT book over it/i);
     });
 
     it('rejects an over-25 batch with a recoverable validation error (no write)', async () => {
@@ -906,13 +1026,17 @@ describe('ToolDispatcherService', () => {
       expect(harness.taskService.update).not.toHaveBeenCalled();
     });
 
-    it('applies an occurrence override for editScope "this"', async () => {
+    it('applies an occurrence override for editScope "this" when the move is clear', async () => {
       const harness = buildDispatcher();
 
+      // A timed master gives the moved occurrence a concrete window, so the gate
+      // runs `findOverlapping` (which returns clear here) before the override.
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
         recurrenceRuleId: 'rule-1',
         calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
       });
 
       const handleMap = new HandleMap();
@@ -930,11 +1054,180 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
+      // The gate consulted findOverlapping for the new occurrence window
+      // [10:00, 10:30) — carrying the 30-min series duration — excluding the
+      // series' own anchor, then (clear) committed the override.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledWith(
+        'user-1',
+        'cal-1',
+        new Date('2026-06-03T10:00:00.000Z'),
+        new Date('2026-06-03T10:30:00.000Z'),
+        'task-1',
+      );
       expect(harness.taskService.applyOccurrenceOverride).toHaveBeenCalledWith(
         'user-1',
         'task-1',
         new Date('2026-06-03T09:00:00.000Z'),
         { overrideStartAt: new Date('2026-06-03T10:00:00.000Z') },
+      );
+    });
+
+    it('REFUSES a "this"-scope occurrence move onto an overlap (no auth, no policy) and does NOT write', async () => {
+      // THE CORE no-double-book assertion: moving one occurrence onto an existing
+      // commitment without authorization must be refused with a recoverable
+      // is_error and must NOT call applyOccurrenceOverride.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other-1', title: 'Dentist' },
+      ]);
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          editScope: 'this',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/overlaps an existing commitment/i);
+      expect(outcome.content).toContain('Dentist');
+      // NO double-book: the override never ran.
+      expect(
+        harness.taskService.applyOccurrenceOverride,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('proceeds with a "this"-scope move onto an overlap when confirmOverlap is set', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other-1', title: 'Dentist' },
+      ]);
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          editScope: 'this',
+          confirmOverlap: true,
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(outcome.isError).toBeFalsy();
+      // Authorized: the gate is skipped (findOverlapping not even consulted) and
+      // the override commits.
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.applyOccurrenceOverride).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        { overrideStartAt: new Date('2026-06-03T10:00:00.000Z') },
+      );
+    });
+
+    it('REFUSES a "this"-scope move onto an overlap under a DENY policy even with confirmOverlap', async () => {
+      // A standing DENY overrides an in-message confirmOverlap: the gate runs and
+      // the move is refused with the deny restatement; no write.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other-1', title: 'Dentist' },
+      ]);
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          editScope: 'this',
+          confirmOverlap: true,
+        }),
+        buildContextWithPolicy(ConflictPolicy.DENY, handleMap),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/standing policy refuses overlaps/i);
+      expect(
+        harness.taskService.applyOccurrenceOverride,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does NOT conflict-check a "this"-scope pure rename (no time change) and proceeds', async () => {
+      // Proves we did not over-gate harmless edits: a rename carries no startAt /
+      // endAt, so the gate is skipped entirely and the override commits.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          title: 'Renamed occurrence',
+          editScope: 'this',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.applyOccurrenceOverride).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        { overrideTitle: 'Renamed occurrence' },
       );
     });
 
@@ -1153,7 +1446,7 @@ describe('ToolDispatcherService', () => {
       );
     });
 
-    it('holds an "all" recurring edit that introduces an overlap (Story 9)', async () => {
+    it('REFUSES an "all" recurring edit that introduces an overlap with a recoverable default-deny error (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
@@ -1184,7 +1477,7 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
-      // Held, not written — the conflict check ran with the proposed time.
+      // Refused, not written — the conflict check ran with the proposed time.
       expect(
         harness.taskService.findRecurringEditConflicts,
       ).toHaveBeenCalledWith('user-1', 'task-1', {
@@ -1192,20 +1485,12 @@ describe('ToolDispatcherService', () => {
         endAt: '2026-06-03T10:30:00.000Z',
       });
       expect(harness.taskService.update).not.toHaveBeenCalled();
-      expect(outcome.heldConflict).toBeDefined();
-      expect(outcome.heldConflict?.write.action.kind).toBe(
-        'update_recurring_event',
-      );
-
-      const action = outcome.heldConflict?.write.action;
-
-      expect(
-        action?.kind === 'update_recurring_event' && action.editScope,
-      ).toBe('all');
-      expect(outcome.heldConflict?.promptText).toMatch(/Lunch/);
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/Lunch/);
+      expect(outcome.content).toMatch(/Do NOT book over it/i);
     });
 
-    it('holds a "this_and_following" recurring edit that introduces an overlap (Story 9)', async () => {
+    it('REFUSES a "this_and_following" recurring edit that introduces an overlap (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
@@ -1236,20 +1521,51 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
-      // The split is NOT performed — the edit is held first.
+      // The split is NOT performed — the edit is refused first.
       expect(harness.taskService.splitSeries).not.toHaveBeenCalled();
-      expect(outcome.heldConflict?.write.action.kind).toBe(
-        'update_recurring_event',
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/Gym/);
+      expect(outcome.content).toMatch(/Do NOT book over it/i);
+    });
+
+    it('books a "this_and_following" recurring edit over the clash when confirmOverlap is set (ADR 0011)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+      });
+      (
+        harness.taskService.findRecurringEditConflicts as jest.Mock
+      ).mockResolvedValue({
+        conflictDates: [new Date('2026-06-10T10:00:00.000Z')],
+        conflictingTasks: [{ id: 'task-x', title: 'Gym' } as Task],
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          endAt: '2026-06-03T10:30:00.000Z',
+          editScope: 'this_and_following',
+          confirmOverlap: true,
+        }),
+        buildContext(handleMap),
       );
 
-      const action = outcome.heldConflict?.write.action;
-
+      // Authorized: the conflict check is skipped and the split runs.
       expect(
-        action?.kind === 'update_recurring_event' && action.editScope,
-      ).toBe('this_and_following');
-      expect(
-        action?.kind === 'update_recurring_event' && action.originalStart,
-      ).toBe(new Date('2026-06-03T09:00:00.000Z').toISOString());
+        harness.taskService.findRecurringEditConflicts,
+      ).not.toHaveBeenCalled();
+      expect(harness.taskService.splitSeries).toHaveBeenCalledTimes(1);
+      expect(outcome.isError).toBeUndefined();
     });
 
     it('commits a recurring "all" edit when the series stays conflict-free (Story 9)', async () => {
@@ -1281,10 +1597,10 @@ describe('ToolDispatcherService', () => {
         harness.taskService.findRecurringEditConflicts,
       ).toHaveBeenCalledTimes(1);
       expect(harness.taskService.update).toHaveBeenCalledTimes(1);
-      expect(outcome.heldConflict).toBeUndefined();
+      expect(outcome.isError).toBeUndefined();
     });
 
-    it('holds a one-off timed move that overlaps an existing task', async () => {
+    it('CORE SAFETY: refuses a one-off timed move that overlaps with a recoverable error and NO write (ADR 0011)', async () => {
       const harness = buildDispatcher();
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
@@ -1310,9 +1626,45 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
-      expect(outcome.heldConflict).toBeDefined();
-      expect(outcome.heldConflict?.write.action.kind).toBe('update_event');
+      // No silent double-book: the overlap produces NO write and a recoverable
+      // default-deny restatement.
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/overlaps an existing commitment/i);
+      expect(outcome.content).toMatch(/Lunch/);
       expect(harness.taskService.update).not.toHaveBeenCalled();
+    });
+
+    it('moves the one-off over the clash only when confirmOverlap is set (ADR 0011)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: null,
+        calendarId: 'cal-1',
+        startAt: null,
+        endAt: null,
+      });
+      (harness.taskService.findOverlapping as jest.Mock).mockResolvedValue([
+        { id: 'other', title: 'Lunch' } as Task,
+      ]);
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-10T13:00:00.000Z',
+          endAt: '2026-06-10T14:00:00.000Z',
+          confirmOverlap: true,
+        }),
+        buildContext(handleMap),
+      );
+
+      // Authorized: the conflict check is skipped and the move commits.
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.update).toHaveBeenCalledTimes(1);
+      expect(outcome.isError).toBeUndefined();
     });
   });
 
@@ -1381,7 +1733,11 @@ describe('ToolDispatcherService', () => {
       });
 
       const outcome = await harness.dispatcher.dispatch(
-        toolCall('delete_task', { handle: alias, editScope: 'this' }),
+        toolCall('delete_task', {
+          handle: alias,
+          editScope: 'this',
+          confirmDelete: true,
+        }),
         buildContext(handleMap),
       );
 
@@ -1439,6 +1795,7 @@ describe('ToolDispatcherService', () => {
         toolCall('delete_task', {
           handle: alias,
           editScope: 'this_and_following',
+          confirmDelete: true,
         }),
         buildContext(handleMap),
       );
@@ -1463,7 +1820,7 @@ describe('ToolDispatcherService', () => {
       const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
 
       const outcome = await harness.dispatcher.dispatch(
-        toolCall('delete_task', { handle: alias }),
+        toolCall('delete_task', { handle: alias, confirmDelete: true }),
         buildContext(handleMap),
       );
 
@@ -1472,6 +1829,72 @@ describe('ToolDispatcherService', () => {
         'task-1',
       );
       expect(outcome.content).toMatch(/deleted/i);
+    });
+
+    it('CASE 4 — DESTRUCTIVE REPLACE: refuses a one-off delete without confirmDelete and asks first, NO write (ADR 0011 + 0044)', async () => {
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      const outcome = await harness.dispatcher.dispatch(
+        // No confirmDelete: a destructive delete must ask first.
+        toolCall('delete_task', { handle: alias }),
+        buildContext(handleMap),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/destructive|ask the user|confirm/i);
+      expect(outcome.content).toMatch(/confirmDelete/);
+      // Nothing was destroyed.
+      expect(harness.taskService.remove).not.toHaveBeenCalled();
+      expect(
+        harness.taskService.applyOccurrenceOverride,
+      ).not.toHaveBeenCalled();
+      expect(harness.taskService.endSeriesAt).not.toHaveBeenCalled();
+    });
+
+    it('CASE 4 — DESTRUCTIVE REPLACE: a standing ALLOW policy does NOT authorize a delete — still asks first (ADR 0011 + 0044)', async () => {
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('delete_task', { handle: alias }),
+        // Even with the most permissive standing policy, a delete is irreversible.
+        buildContextWithPolicy(ConflictPolicy.ALLOW, handleMap),
+      );
+
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/confirmDelete/);
+      expect(harness.taskService.remove).not.toHaveBeenCalled();
+    });
+
+    it('DESTRUCTIVE REPLACE: a recurring delete without a scope still asks for scope first (before the delete-confirm gate)', async () => {
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('delete_task', { handle: alias }),
+        buildContext(handleMap),
+      );
+
+      // Scope question precedes the delete-confirm gate — the model must know the
+      // extent before confirming — but still NO destructive write.
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/repeating task/i);
+      expect(harness.taskService.remove).not.toHaveBeenCalled();
+      expect(harness.taskService.endSeriesAt).not.toHaveBeenCalled();
     });
   });
 

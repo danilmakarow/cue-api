@@ -3,7 +3,12 @@ import { DateTime } from 'luxon';
 import { ContextBuilderService } from './context-builder.service';
 import { HandleMap } from './tools/handle-map';
 import { PromptBlock } from '@/modules/ai/ai.types';
-import { Task, TaskGroup, User } from '@/modules/database/entities';
+import {
+  ConflictPolicy,
+  Task,
+  TaskGroup,
+  User,
+} from '@/modules/database/entities';
 import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
 
 const USER = { id: 'user-1', timezone: 'UTC', displayName: 'Tony' } as User;
@@ -63,6 +68,7 @@ const buildHarness = () => {
   };
   const userMemoryFactDatabaseService = {
     findAllByUserId: jest.fn().mockResolvedValue([]),
+    findConflictPolicy: jest.fn().mockResolvedValue(null),
   };
   const scheduleReader = {
     occurrencesInRange: jest.fn().mockResolvedValue([]),
@@ -80,7 +86,12 @@ const buildHarness = () => {
     taskGroupService as never,
   );
 
-  return { service, scheduleReader, taskGroupService };
+  return {
+    service,
+    scheduleReader,
+    taskGroupService,
+    userMemoryFactDatabaseService,
+  };
 };
 
 /** Joins every system block's content into one searchable string. */
@@ -232,5 +243,64 @@ describe('ContextBuilderService', () => {
     // Groups sit after breakpoint #1 (system prompt) and at/above breakpoint #2.
     expect(groupsIndex).toBeGreaterThan(0);
     expect(groupsIndex).toBeLessThan(lastBoundaryIndex);
+  });
+
+  it('surfaces a standing ALLOW conflict policy into the volatile block AND returns it on the prompt (ADR 0011 + 0044)', async () => {
+    const harness = buildHarness();
+
+    harness.userMemoryFactDatabaseService.findConflictPolicy.mockResolvedValue(
+      ConflictPolicy.ALLOW,
+    );
+
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'book dentist at 3:30',
+      handleMap: new HandleMap(),
+    });
+
+    // The model sees the firm allow directive in the volatile now-context …
+    expect(finalUserContent(prompt.messages)).toMatch(
+      /Standing conflict policy: ALLOW/,
+    );
+    // … and the same value rides on the prompt for the dispatcher's gate.
+    expect(prompt.conflictPolicy).toBe(ConflictPolicy.ALLOW);
+  });
+
+  it('surfaces a standing DENY conflict policy as a firm refuse directive', async () => {
+    const harness = buildHarness();
+
+    harness.userMemoryFactDatabaseService.findConflictPolicy.mockResolvedValue(
+      ConflictPolicy.DENY,
+    );
+
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'book dentist at 3:30',
+      handleMap: new HandleMap(),
+    });
+
+    expect(finalUserContent(prompt.messages)).toMatch(
+      /Standing conflict policy: DENY/,
+    );
+    expect(prompt.conflictPolicy).toBe(ConflictPolicy.DENY);
+  });
+
+  it('omits the conflict-policy line and returns null when no explicit policy is set (default-deny)', async () => {
+    const harness = buildHarness();
+
+    // findConflictPolicy defaults to null in the harness.
+    const prompt = await harness.service.build({
+      user: USER,
+      conversationId: 'conv-1',
+      currentMessageText: 'book dentist at 3:30',
+      handleMap: new HandleMap(),
+    });
+
+    expect(finalUserContent(prompt.messages)).not.toMatch(
+      /Standing conflict policy/,
+    );
+    expect(prompt.conflictPolicy).toBeNull();
   });
 });

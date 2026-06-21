@@ -25,21 +25,18 @@ export const DEDUPE_KEY_PREFIX = 'assistant:dedupe';
 /** Prefix for single-use link nonces, keyed by the nonce string. */
 export const LINK_NONCE_KEY_PREFIX = 'assistant:link';
 
-/** Prefix for held conflicting writes, keyed by the inline-keyboard callback id. */
-export const HELD_CONFLICT_KEY_PREFIX = 'assistant:held';
-
 /**
  * Prefix for the hot pointer to a suspended `ask_user` question, keyed by the
  * Cue user id. Its mere presence is the cheap `EXISTS` signal the inbound router
  * uses to send a free-text reply into the answer flow while a question is open;
  * its VALUE is the durable `pending_question` row id, so the free-text resolve
  * `GETDEL`s the key (atomic claim of the hot window) and then claims that exact
- * row in Postgres. Deliberately disjoint from {@link HELD_CONFLICT_KEY_PREFIX}
- * (`assistant:ask` vs `assistant:held`) so the two suspend/resume paths never
- * collide — see `docs/specs/assistant-layered-architecture.md`. Set by Story 5
- * when an `ask_user` turn suspends (TTL `ASSISTANT_ASK_USER_TTL_SECONDS`) and
- * cleared on claim; after it lapses a button answer still resumes from the
- * durable table while a typed message becomes a fresh turn.
+ * row in Postgres. Disjoint keyspace from the lock / status / debounce keys so
+ * the two suspend/resume paths never collide — see
+ * `docs/specs/assistant-layered-architecture.md`. Set by Story 5 when an
+ * `ask_user` turn suspends (TTL `ASSISTANT_ASK_USER_TTL_SECONDS`) and cleared on
+ * claim; after it lapses a button answer still resumes from the durable table
+ * while a typed message becomes a fresh turn.
  */
 export const PENDING_QUESTION_KEY_PREFIX = 'assistant:ask';
 
@@ -54,12 +51,6 @@ export const dedupeKey = (vendor: string, dedupeId: string): string =>
  */
 export const linkNonceKey = (nonce: string): string =>
   `${LINK_NONCE_KEY_PREFIX}:${nonce}`;
-
-/**
- * Builds the held-conflict key for a callback id.
- */
-export const heldConflictKey = (callbackId: string): string =>
-  `${HELD_CONFLICT_KEY_PREFIX}:${callbackId}`;
 
 /**
  * Builds the pending-question hot-pointer key for a Cue user id. Used by the
@@ -97,9 +88,9 @@ export const statusSessionKey = (
  * auto-expires it so a crashed holder never deadlocks. Release is token-checked
  * (Lua compare-and-del) so only the holder can unlock; a watchdog renews the TTL
  * (also token-checked) while work is in progress. Disjoint keyspace from
- * {@link HELD_CONFLICT_KEY_PREFIX} / {@link PENDING_QUESTION_KEY_PREFIX} /
- * {@link STATUS_SESSION_KEY_PREFIX} so the mutex never collides with suspend or
- * status state. Consumed by Story 14 (queue-after) and the ADR-0010 `ask_user`
+ * {@link PENDING_QUESTION_KEY_PREFIX} / {@link STATUS_SESSION_KEY_PREFIX} so the
+ * mutex never collides with suspend or status state. Consumed by Story 14
+ * (queue-after) and the ADR-0010 `ask_user`
  * resume double-resume race — see `docs/adr/0039-assistant-per-user-serialization-lock.md`.
  */
 export const USER_LOCK_KEY_PREFIX = 'assistant:lock';

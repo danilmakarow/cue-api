@@ -6,9 +6,9 @@ import {
 import { buildTool } from '../tool.contract';
 import { createTaskProperties } from './shared-json-schema';
 
-/** Model-facing description for `create_tasks` (byte-identical to original). */
+/** Model-facing description for `create_tasks`. */
 const CREATE_TASKS_PROMPT =
-  'Create MANY tasks in one call, applied in the given order — prefer this over repeated create_task when the user asks for several at once (e.g. "create all seven driving lessons"). Each item is a full create_task input (timed event, all-day event, or todo, optionally recurring or grouped). Non-conflicting items are created immediately; any non-recurring timed item that overlaps an existing one is held for the user to confirm — the rest still commit, so a single overlap never aborts the batch. Up to 25 items per call: split a larger list across several calls.';
+  'Create MANY tasks in one call, applied in the given order — prefer this over repeated create_task when the user asks for several at once (e.g. "create all seven driving lessons"). Each item is a full create_task input (timed event, all-day event, or todo, optionally recurring or grouped). Non-conflicting items are created immediately; any item that overlaps an existing commitment is REFUSED with a recoverable error restating the clash (the rest still commit, so one overlap never aborts the batch) — do NOT book over a clash unless the user explicitly authorized it; otherwise ask_user, then retry that item with confirmOverlap:true. Up to 25 items per call: split a larger list across several calls.';
 
 /**
  * `create_tasks` — batch create, fanning out over the host's per-item create

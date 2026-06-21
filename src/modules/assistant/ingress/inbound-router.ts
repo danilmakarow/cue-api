@@ -1,33 +1,22 @@
 /**
  * L2 inbound router (taxonomy) — the divergence gate. Promoted from the old
  * `webhook.consumer.routeForUser` command/callback/voice/text branching, it
- * classifies one normalized inbound update into EXACTLY ONE of four flows. The
- * consumer then dispatches: the two no-LLM paths (command, conflict-confirm)
- * keep their existing deterministic handlers; the two model paths (simple
- * message, answer) converge at the turn runner.
+ * classifies one normalized inbound update into EXACTLY ONE flow. The consumer
+ * then dispatches: the no-LLM paths (command, STOP-control) keep their
+ * deterministic handlers; the model paths (simple message, answer) converge at
+ * the turn runner. (The ADR-0006 conflict-confirm tap was removed with the
+ * deterministic hold — ADR 0011.)
  *
  * See `docs/specs/assistant-layered-architecture.md` → "The inbound flow
- * taxonomy (4 flows, one gate)".
+ * taxonomy (one gate)".
  */
 
-import { ConflictCallbackAction } from '../assistant.types';
 import { PendingInteractionStore } from '../session/pending-interaction.store';
 import { User } from '@/modules/database/entities';
 import {
   InboundKind,
   NormalizedInboundMessage,
 } from '@/modules/external-vendor/external-vendor.types';
-
-/**
- * Callback-data prefix (with trailing colon) that marks a deterministic
- * conflict-confirm/cancel tap (ADR 0006). Derived from {@link
- * ConflictCallbackAction} so it can never drift from what {@link
- * AssistantService.holdAndAsk} writes onto the inline keyboard.
- */
-export const CONFIRM_CALLBACK_PREFIX = `${ConflictCallbackAction.CONFIRM}:`;
-
-/** Callback-data prefix (with trailing colon) for a conflict CANCEL tap. */
-export const CANCEL_CALLBACK_PREFIX = `${ConflictCallbackAction.CANCEL}:`;
 
 /**
  * Callback-data prefix (with trailing colon) that marks an `ask_user` answer
@@ -59,17 +48,6 @@ export interface CommandFlow {
   kind: 'command';
   command: string;
   args: string[];
-}
-
-/**
- * A conflict-confirm/cancel button tap (ADR 0006) → executed deterministically
- * on tap, the model is NEVER re-invoked. The opaque callback id + data ride
- * through to the existing conflict handler unchanged.
- */
-export interface ConflictConfirmFlow {
-  kind: 'conflict_confirm';
-  callbackId: string;
-  callbackData: string;
 }
 
 /**
@@ -115,13 +93,12 @@ export interface SimpleMessageFlow {
 }
 
 /**
- * The five mutually-exclusive inbound flows. A discriminated union on `kind` so
+ * The four mutually-exclusive inbound flows. A discriminated union on `kind` so
  * the consumer's dispatch is exhaustive and the divergence gate is a single
  * `switch`.
  */
 export type InboundFlow =
   | CommandFlow
-  | ConflictConfirmFlow
   | StopControlFlow
   | AnswerFlow
   | SimpleMessageFlow;
@@ -130,23 +107,19 @@ export type InboundFlow =
  * Classifies one normalized inbound update into exactly one {@link InboundFlow}
  * for the given user. Order matters — it encodes the taxonomy precedence:
  *  1. Command (slash) → CommandFlow (no LLM).
- *  2. Callback whose data starts with `confirm:`/`cancel:` → ConflictConfirmFlow
- *     (ADR 0006, deterministic, NO model).
- *  3. Callback whose data starts with `stop:` → StopControlFlow (Story 14b,
+ *  2. Callback whose data starts with `stop:` → StopControlFlow (Story 14b,
  *     deterministic, NO model — arms the per-turn STOP flag).
- *  4. Callback whose data starts with `ask:` → AnswerFlow (button answer).
- *  5. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
- *  6. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
+ *  3. Callback whose data starts with `ask:` → AnswerFlow (button answer).
+ *  4. Text/voice AND a pending question exists → AnswerFlow (free-text answer).
+ *  5. Otherwise (text/voice, no pending) → SimpleMessageFlow (fresh turn).
  *
  * Voice updates are routed by their transcript: the consumer transcribes first
  * and passes the resulting text, so a voice note is classified exactly like a
  * typed message (simple vs free-text-answer). A callback that matches no known
  * prefix is treated as a simple/answer text fall-through using its raw data —
  * defensive, though every callback the assistant emits carries a known prefix.
- *
- * `pendingQuestionExists()` is a cheap Redis `EXISTS` (step 4 only). For this
- * wave it always resolves false (no question is ever created — Story 5 adds the
- * write side), so AnswerFlow-via-free-text never fires here.
+ * (The ADR-0006 `confirm:`/`cancel:` conflict tap was removed with the
+ * deterministic hold — ADR 0011.)
  */
 export const classifyFlow = async (
   normalized: NormalizedInboundMessage,
@@ -164,17 +137,6 @@ export const classifyFlow = async (
 
   if (normalized.kind === InboundKind.Callback && normalized.callbackId) {
     const callbackData = normalized.callbackData ?? '';
-
-    if (
-      callbackData.startsWith(CONFIRM_CALLBACK_PREFIX) ||
-      callbackData.startsWith(CANCEL_CALLBACK_PREFIX)
-    ) {
-      return {
-        kind: 'conflict_confirm',
-        callbackId: normalized.callbackId,
-        callbackData,
-      };
-    }
 
     if (callbackData.startsWith(STOP_CALLBACK_PREFIX)) {
       return {

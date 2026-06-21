@@ -5,9 +5,9 @@ import {
   recurrenceJsonSchema,
 } from './shared-json-schema';
 
-/** Model-facing description for `update_task` (byte-identical to original). */
+/** Model-facing description for `update_task`. */
 const UPDATE_TASK_PROMPT =
-  'Update a task or occurrence by its handle (move its time, rename it, change its group or recurrence). For a repeating task, pass editScope; if you omit it you will be asked which scope. Overlaps on a one-off move are handled by the confirmation flow.';
+  'Update a task or occurrence by its handle (move its time, rename it, change its group or recurrence). For a repeating task, pass editScope; if you omit it you will be asked which scope. If a timed move overlaps an existing commitment the write is REFUSED with a recoverable error restating the clash — do NOT move onto it unless the user explicitly authorized this; otherwise call ask_user. Only when the user authorized it, retry with confirmOverlap:true.';
 
 /**
  * `update_task` — moves / renames / regroups a task or occurrence by handle,
@@ -37,6 +37,11 @@ export const updateTaskTool = buildTool({
       group: { type: 'string', description: 'New group name.' },
       recurrence: recurrenceJsonSchema,
       editScope: editScopeJsonSchema,
+      confirmOverlap: {
+        type: 'boolean',
+        description:
+          'Set true ONLY when the user explicitly authorized moving onto an existing commitment. Leave unset and an overlapping move is refused (ask the user first).',
+      },
     },
     required: ['handle'],
   },

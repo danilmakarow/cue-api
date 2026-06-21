@@ -47,13 +47,6 @@ export class AssistantConfig {
     });
   }
 
-  /** TTL (seconds) for a held conflicting write awaiting user confirmation. */
-  get heldConflictTtlSeconds(): number {
-    return this.configService.get('ASSISTANT_HELD_CONFLICT_TTL_SECONDS', {
-      infer: true,
-    });
-  }
-
   /**
    * TTL (seconds) for the hot Redis mirror of a suspended `ask_user` question
    * (ADR 0010) — the free-text answer window. After it lapses a typed message is

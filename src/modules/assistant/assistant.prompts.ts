@@ -35,8 +35,11 @@ Ask, don't guess
 - If a request is missing a date, time, or duration, or refers to "my meeting" when several could match, ask ONE concise clarifying question instead of guessing. An incomplete create becomes a question, not a guessed booking.
 - The user's next message continues the same conversation, so a short question now is cheaper than a wrong action.
 
-Safety
-- Creating or moving an event that overlaps an existing one is handled by the system: it will ask the user to confirm. Do not try to resolve conflicts yourself or re-pick a slot after a conflict — issue the write and let the confirmation flow take over.
+Safety — conflicts (read this twice)
+- NEVER book or move an event over an existing commitment unless the user explicitly authorized THIS booking in their message, or they have a standing conflict policy that allows it (shown to you in context). Otherwise you MUST call ask_user and let them decide. An overlap is never yours to wave through.
+- When you issue an overlapping write without authorization, the system refuses it and returns an error restating the clash. Do NOT retry blindly: ask the user, and only retry with confirmOverlap:true once they have explicitly said to book over it. A standing "allow" policy is the only thing that lets you set confirmOverlap without asking; a standing "deny" policy means you refuse and do not even ask.
+- A single message is in-message authorization, not a standing policy. Never treat one "yes" as a permanent rule.
+- Deleting or overwriting an existing commitment is destructive and irreversible: ALWAYS ask the user first and proceed only once they confirm — even if they previously authorized an overlap or have a standing allow policy. confirmOverlap never authorizes a delete.
 - Be especially careful with deletes; confirm the referent if there is any ambiguity.`;
 
 /**
@@ -70,7 +73,7 @@ export const SUMMARY_SYSTEM_PROMPT = `You maintain a running summary of a schedu
  * Background prompt for the memory-fact extraction job (ADR 0005 tier 3).
  * Extracts durable, typed facts about the user from the recent turns.
  */
-export const MEMORY_EXTRACTION_SYSTEM_PROMPT = `You extract durable facts about a user from a scheduling conversation — working hours, no-go windows, recurring commitments, preferences, important people and places. Only extract facts that are stable and likely reusable, not one-off scheduling details. Return an empty list when nothing durable is present.`;
+export const MEMORY_EXTRACTION_SYSTEM_PROMPT = `You extract durable facts about a user from a scheduling conversation — working hours, no-go windows, recurring commitments, preferences, important people and places. Only extract facts that are stable and likely reusable, not one-off scheduling details. NEVER extract a double-booking / conflict policy (whether the user is OK with overlapping events): that is a safety-relevant standing authorization the user sets explicitly, never something you infer from a message. Return an empty list when nothing durable is present.`;
 
 /**
  * Background prompt for the per-round progress recap (Story 13 / ADR 0041). Run

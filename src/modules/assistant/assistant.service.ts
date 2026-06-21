@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { CommandHandlerService } from './commands/command-handler.service';
-import { ConflictResolverService } from './conflict/conflict-resolver.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
 import { ConversationStore } from './session/conversation.store';
 import { StopFlagStore } from './session/stop-flag.store';
@@ -23,15 +22,6 @@ export interface HandleCommandParams {
   correlationId?: string;
 }
 
-/** Parameters for resolving an inline-keyboard callback (button tap). */
-export interface HandleCallbackParams {
-  callbackId: string;
-  callbackData: string;
-  vendorChatId: string;
-  /** Correlation id threaded from the webhook; minted here if absent. */
-  correlationId?: string;
-}
-
 /** Parameters for handling a STOP-control button tap (Story 14b / ADR 0043). */
 export interface HandleStopControlParams {
   callbackId: string;
@@ -44,10 +34,11 @@ export interface HandleStopControlParams {
 /**
  * The assistant's deterministic, no-LLM command surface (ADR 0036). Since the
  * turn lifecycle moved down into {@link TurnRunnerService}, this is a thin facade
- * over the two paths that never run the tool loop: a slash command (run the
- * handler, reply, persist a synthetic summary line) and an ADR-0006 conflict
- * callback (delegated to the L8 {@link ConflictResolverService}). The model is
- * never re-invoked here — both paths resolve deterministically.
+ * over the deterministic paths that never run the tool loop: a slash command (run
+ * the handler, reply, persist a synthetic summary line) and a STOP-control tap
+ * (arm the per-turn STOP flag). The model is never re-invoked here. The former
+ * ADR-0006 conflict-confirm callback path was removed with the deterministic hold
+ * (ADR 0011 — conflicts are now resolved inside the tool loop).
  */
 @Injectable()
 export class AssistantService {
@@ -57,7 +48,6 @@ export class AssistantService {
     private readonly commandHandler: CommandHandlerService,
     private readonly conversationStore: ConversationStore,
     private readonly replyPresenter: ReplyPresenter,
-    private readonly conflictResolver: ConflictResolverService,
     private readonly stopFlags: StopFlagStore,
   ) {}
 
@@ -120,26 +110,6 @@ export class AssistantService {
       ConversationMessageContentType.COMMAND_RESULT,
       result.syntheticLine,
       null,
-    );
-  }
-
-  /**
-   * Resolves an inline-keyboard callback (button tap) deterministically — no
-   * LLM. Acknowledges the callback, loads and burns the held write, then
-   * executes or cancels it and replies (ADR 0006 layer 4).
-   */
-  async handleCallback(
-    user: User,
-    params: HandleCallbackParams,
-  ): Promise<void> {
-    const correlationId = params.correlationId ?? randomUUID();
-    const conversation = await this.getOrCreateConversation(user.id);
-
-    await this.conflictResolver.handleCallback(
-      user,
-      conversation,
-      params,
-      correlationId,
     );
   }
 

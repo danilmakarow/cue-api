@@ -2,11 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import { ZodError } from 'zod';
 
-import {
-  HeldConflictWrite,
-  ToolDispatchContext,
-  ToolDispatchOutcome,
-} from '../assistant.types';
+import { ToolDispatchContext, ToolDispatchOutcome } from '../assistant.types';
 import { formatTaskLine } from '../event-formatting';
 import { ScheduleReaderService } from '../schedule-reader.service';
 import { HandleMap, HandleTarget } from './handle-map';
@@ -29,7 +25,7 @@ import {
 import { ToolHandlerHost } from './tool.contract';
 import { ToolCall } from '@/modules/ai/ai.types';
 import { CalendarService } from '@/modules/calendar/calendar.service';
-import { Task } from '@/modules/database/entities';
+import { ConflictPolicy, Task } from '@/modules/database/entities';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 import {
   RecurringSeriesConflicts,
@@ -68,6 +64,85 @@ const ASK_EDIT_SCOPE_RESULT: ToolDispatchOutcome = {
 };
 
 /**
+ * The default-deny instruction appended to EVERY conflict tool-result (ADR 0011).
+ * Stated on the wire — not only in the system prompt — so the model is reminded,
+ * at the exact point of the clash, that it must NOT book over an existing
+ * commitment without explicit user authorization.
+ */
+const DEFAULT_DENY_INSTRUCTION =
+  'Do NOT book over it unless the user explicitly authorized this. If they did, retry this same call with confirmOverlap:true; otherwise call ask_user to get their decision first.';
+
+/**
+ * Recoverable result returned when the user has a standing `conflict_policy` of
+ * `DENY` (Story 15 / ADR 0011 + 0044) and a write clashes: it OVERRIDES any
+ * `confirmOverlap` the model set, so a deny policy can never be booked over. The
+ * model relays this and offers a non-overlapping alternative — it does NOT ask
+ * (the user's standing answer is already "no").
+ */
+const buildDenyPolicyResult = (conflicts: Task[]): ToolDispatchOutcome => {
+  const titles = conflicts.map((task) => `"${task.title}"`).join(', ');
+  const clause = titles ? ` (${titles})` : '';
+
+  return {
+    content: `That overlaps an existing commitment${clause} and the user's standing policy refuses overlaps. Do NOT book over it (confirmOverlap is ignored under this policy); offer a non-overlapping time instead.`,
+    isError: true,
+  };
+};
+
+/**
+ * Recoverable result returned when the model tries to DELETE/remove an existing
+ * commitment without explicit in-message confirmation (Story 15 / ADR 0011 +
+ * 0044). A delete is destructive and irreversible, so it ALWAYS asks first —
+ * neither `confirmOverlap` nor a standing allow-policy authorizes it; only an
+ * explicit `confirmDelete` (set after the user confirmed THIS delete) does.
+ */
+const ASK_BEFORE_DELETE_RESULT: ToolDispatchOutcome = {
+  content:
+    'Deleting is destructive and cannot be undone — ask the user to confirm removing this specific item first (call ask_user). Only once they confirm, retry with confirmDelete:true. confirmOverlap and a standing allow-policy do NOT authorize a delete.',
+  isError: true,
+};
+
+/**
+ * Builds the recoverable, default-deny conflict tool-result text (ADR 0011) for a
+ * one-off timed overlap: it RESTATES the specific clashing commitments by title
+ * and appends the default-deny instruction. Returned as an `isError` outcome (NOT
+ * thrown, NOT a hold), so the model recovers — asking the user or, when already
+ * authorized, retrying with `confirmOverlap`.
+ */
+const buildConflictResult = (conflicts: Task[]): ToolDispatchOutcome => {
+  const titles = conflicts.map((task) => `"${task.title}"`).join(', ');
+
+  return {
+    content: `That overlaps an existing commitment (${titles}). ${DEFAULT_DENY_INSTRUCTION}`,
+    isError: true,
+  };
+};
+
+/**
+ * Builds the recoverable, default-deny conflict tool-result text (ADR 0011) for a
+ * recurring SERIES whose occurrences overlap existing events: it reports the
+ * distinct clashing-date count + a few clashing titles and appends the
+ * default-deny instruction. Same recoverable `isError` posture as the one-off
+ * conflict — never a hold.
+ */
+const buildSeriesConflictResult = (
+  seriesConflicts: RecurringSeriesConflicts,
+): ToolDispatchOutcome => {
+  const dateCount = seriesConflicts.conflictDates.length;
+  const dateLabel = dateCount === 1 ? '1 date' : `${dateCount} dates`;
+  const titles = seriesConflicts.conflictingTasks
+    .map((task) => `"${task.title}"`)
+    .join(', ');
+
+  return {
+    content: `This repeating task overlaps existing commitments on ${dateLabel}${
+      titles ? ` (${titles})` : ''
+    }. ${DEFAULT_DENY_INSTRUCTION}`,
+    isError: true,
+  };
+};
+
+/**
  * Result of resolving a group name: a concrete id, or a recoverable
  * `ToolDispatchOutcome` the model relays (ambiguous / missing). The dispatcher
  * branches on which field is present.
@@ -80,22 +155,15 @@ interface GroupResolution {
 /** A validated, parsed single-create input (shared by `create_task[s]`). */
 type CreateTaskInput = ReturnType<typeof createTaskInputSchema.parse>;
 
-/** Held conflict produced by a single create, ready for the batch-hold path. */
-interface CreateHeld {
-  promptText: string;
-  write: HeldConflictWrite;
-}
-
 /**
  * Outcome of attempting one create (shared between `create_task` and the
  * `create_tasks` fan-out). Exactly one field is set: `created` (committed, with
- * its title), `held` (a non-recurring timed overlap parked for confirmation), or
- * `error` (a recoverable resolution failure — missing calendar / group). The
- * dispatcher branches on which is present.
+ * its title) or `error` (a recoverable outcome the model relays — a missing
+ * calendar / group, or an unauthorized overlap refused under default-deny, ADR
+ * 0011). The dispatcher branches on which is present.
  */
 interface CreateAttempt {
   created?: { title: string };
-  held?: CreateHeld;
   error?: ToolDispatchOutcome;
 }
 
@@ -103,11 +171,19 @@ interface CreateAttempt {
  * Translates a model {@link ToolCall} into a call on an existing feature service
  * (TaskService / TaskGroupService / CalendarService) and returns a normalized
  * {@link ToolDispatchOutcome}. It never touches repositories or entities
- * directly, never re-invokes the model, and for a conflicting one-off write
- * returns a `heldConflict` rather than executing — the orchestrator owns the
- * hold + the inline-keyboard ask (ADR 0006 layer 4). Mutations address tasks by
- * a per-turn handle the {@link HandleMap} resolves to a `(taskId, originalStart)`
- * coordinate; raw task ids never cross the model boundary.
+ * directly and never re-invokes the model. A write that would overlap an existing
+ * commitment is REFUSED under a strict default-deny posture (ADR 0011 + 0044):
+ * instead of executing, the dispatcher returns a recoverable `isError` tool result
+ * that restates the clash and the default-deny rule, so the model asks the user
+ * (or, when the user already authorized it, retries with `confirmOverlap`). The
+ * user's STANDING `conflict_policy` (threaded on the context) tilts the gate: an
+ * `ALLOW` policy proceeds over an overlap WITHOUT asking (as if `confirmOverlap`),
+ * a `DENY` policy refuses every overlap even when `confirmOverlap` is set. A
+ * DESTRUCTIVE delete (it removes an existing commitment) ALWAYS asks first — gated
+ * behind an explicit `confirmDelete`; neither `confirmOverlap` nor an allow-policy
+ * authorizes it. Mutations address tasks by a per-turn handle the
+ * {@link HandleMap} resolves to a `(taskId, originalStart)` coordinate; raw task
+ * ids never cross the model boundary.
  */
 @Injectable()
 export class ToolDispatcherService implements ToolHandlerHost {
@@ -122,6 +198,35 @@ export class ToolDispatcherService implements ToolHandlerHost {
     private readonly scheduleReader: ScheduleReaderService,
   ) {
     this.registry = toolRegistry;
+  }
+
+  /**
+   * True when a standing `DENY` conflict policy is in force (Story 15 / ADR 0011 +
+   * 0044): under it the overlap gate runs REGARDLESS of `confirmOverlap` and a
+   * clash is refused outright — the deny policy overrides any in-message
+   * authorization, so the model can never book over it.
+   */
+  private isOverlapDenied(context: ToolDispatchContext): boolean {
+    return context.conflictPolicy === ConflictPolicy.DENY;
+  }
+
+  /**
+   * True when a write may proceed over an overlap WITHOUT the default-deny gate
+   * refusing it (Story 15 / ADR 0011 + 0044): either the model set `confirmOverlap`
+   * (the user authorized THIS booking in their message) or the user has a standing
+   * `ALLOW` policy (they opted in once and for all). A `DENY` policy is handled
+   * earlier and never reaches an "authorized" verdict; absent any policy this
+   * falls back to the in-message flag alone (pure default-deny).
+   */
+  private isOverlapAuthorized(
+    confirmOverlap: boolean | undefined,
+    context: ToolDispatchContext,
+  ): boolean {
+    if (this.isOverlapDenied(context)) return false;
+
+    return (
+      confirmOverlap === true || context.conflictPolicy === ConflictPolicy.ALLOW
+    );
   }
 
   /**
@@ -501,11 +606,12 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
   /**
    * Handles `create_task`: resolves the calendar / group / timezone and creates a
-   * timed event, all-day event, or todo (optionally recurring). A non-recurring
-   * timed task that overlaps an existing one is held for the user to confirm
-   * (never executed on conflict). Recurring creates skip the overlap hold in v1.
-   * Delegates the per-item resolution + conflict logic to {@link attemptCreate},
-   * the same helper `create_tasks` fans out over, so the two never diverge.
+   * timed event, all-day event, or todo (optionally recurring). A timed task that
+   * overlaps an existing commitment is REFUSED under default-deny (ADR 0011) —
+   * {@link attemptCreate} returns a recoverable `isError` restating the clash —
+   * unless the model set `confirmOverlap` (the user authorized it). Delegates the
+   * per-item resolution + conflict logic to {@link attemptCreate}, the same helper
+   * `create_tasks` fans out over, so the two never diverge.
    */
   async handleCreateTask(
     input: Record<string, unknown>,
@@ -516,14 +622,6 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     if (attempt.error) return attempt.error;
 
-    if (attempt.held) {
-      return {
-        content:
-          'The task overlaps an existing one and is held for the user to confirm.',
-        heldConflict: attempt.held,
-      };
-    }
-
     return { content: `Created "${attempt.created?.title}".` };
   }
 
@@ -531,10 +629,10 @@ export class ToolDispatcherService implements ToolHandlerHost {
    * Handles `create_tasks`: fans out over the validated batch IN INPUT ORDER,
    * running the SAME per-item resolution + conflict logic as a single
    * `create_task` ({@link attemptCreate}). Non-conflicting items are created
-   * immediately; a non-recurring timed item that overlaps an existing one is
-   * collected as a held write (the rest still commit — a single overlap never
-   * aborts the batch). Returns ONE outcome: a per-item summary as `content`,
-   * every held item under `heldConflicts` for the existing batch-hold path, and
+   * immediately; an item that overlaps an existing commitment is REFUSED under
+   * default-deny (ADR 0011) and reported in the per-item summary with its
+   * recoverable restatement (the rest still commit — one overlap never aborts the
+   * batch). Returns ONE outcome: a per-item summary as `content` plus
    * `committedCount` / `attemptedCount` so the orchestrator's write accounting is
    * exact. An over-cap array is rejected upstream by Zod (`.max`) as a recoverable
    * validation error, never reaching here.
@@ -545,7 +643,6 @@ export class ToolDispatcherService implements ToolHandlerHost {
   ): Promise<ToolDispatchOutcome> {
     const parsed = createTasksInputSchema.parse(input);
     const summaries: string[] = [];
-    const heldConflicts: CreateHeld[] = [];
     let committedCount = 0;
 
     for (const [index, task] of parsed.tasks.entries()) {
@@ -553,13 +650,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
       const attempt = await this.attemptCreate(task, context);
 
       if (attempt.error) {
-        summaries.push(`${position}: failed (${attempt.error.content})`);
-        continue;
-      }
-
-      if (attempt.held) {
-        heldConflicts.push(attempt.held);
-        summaries.push(`${position}: held (${attempt.held.promptText})`);
+        summaries.push(`${position}: refused (${attempt.error.content})`);
         continue;
       }
 
@@ -569,27 +660,24 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     return {
       content: summaries.join('; '),
-      // Every item is a write attempt (committed, held, or errored) so the guard
-      // and the saved-changes count stay accurate; only non-held, non-errored
-      // items count as committed.
+      // Every item is a write attempt (committed or refused) so the guard and the
+      // saved-changes count stay accurate; only committed items count as committed.
       attemptedCount: parsed.tasks.length,
       committedCount,
-      ...(heldConflicts.length > 0 ? { heldConflicts } : {}),
     };
   }
 
   /**
    * Resolves the calendar / group / timezone for one create and either commits
-   * it or parks it as a held conflict — the single source of create logic shared
-   * by `create_task` and the `create_tasks` fan-out. A non-recurring timed task
-   * with a concrete window is conflict-checked and held on overlap (ADR 0006
-   * layer 4). A RECURRING timed create is conflict-checked across its whole
-   * proposed series (Story 9): the rule is expanded over a bounded horizon and
-   * the WHOLE series is held as ONE write if any occurrence overlaps an existing
-   * event — so a repeating task routes through the same hold a one-off does
-   * instead of committing silently. Non-conflicting recurring creates commit as
-   * before. Returns a {@link CreateAttempt} with exactly one of `error` / `held`
-   * / `created`.
+   * it or refuses it under default-deny — the single source of create logic shared
+   * by `create_task` and the `create_tasks` fan-out. A timed task with a concrete
+   * window is conflict-checked; an overlap is REFUSED with a recoverable `isError`
+   * restating the clash (ADR 0011) UNLESS the model set `confirmOverlap` (the user
+   * authorized booking over it). A RECURRING timed create is conflict-checked
+   * across its whole proposed series (Story 9): the rule is expanded over a bounded
+   * horizon and any occurrence overlap refuses the WHOLE series the same way.
+   * Non-conflicting (or explicitly authorized) creates commit. Returns a
+   * {@link CreateAttempt} with exactly one of `error` / `created`.
    */
   private async attemptCreate(
     parsed: CreateTaskInput,
@@ -623,55 +711,57 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const startAt = parsed.startAt ? new Date(parsed.startAt) : null;
     const endAt = parsed.endAt ? new Date(parsed.endAt) : null;
 
-    // A recurring, timed create is conflict-checked across the whole proposed
-    // series (Story 9): expand it bounded and hold on ANY occurrence overlap, so
-    // a repeating task can never silently book over existing events.
-    if (parsed.recurrence && startAt && endAt) {
-      const seriesConflicts =
-        await this.taskService.findRecurringSeriesConflicts(
+    // Default-deny conflict gate (ADR 0011 + 0044): a timed create is
+    // conflict-checked and REFUSED on overlap with a recoverable restatement —
+    // unless it is authorized (the model set `confirmOverlap` OR the user has a
+    // standing ALLOW policy), in which case the check is SKIPPED so the write
+    // commits. A standing DENY policy forces the check to run even when
+    // `confirmOverlap` is set and refuses with the deny restatement (the deny
+    // overrides the flag). The deny verdict is computed per-branch off the actual
+    // clashing tasks.
+    const denied = this.isOverlapDenied(context);
+
+    if (
+      !this.isOverlapAuthorized(parsed.confirmOverlap, context) &&
+      startAt &&
+      endAt
+    ) {
+      // A recurring create is checked across its whole proposed series; a one-off
+      // against the single window. Either way a clash refuses, never books.
+      if (parsed.recurrence) {
+        const seriesConflicts =
+          await this.taskService.findRecurringSeriesConflicts(
+            context.userId,
+            calendarId,
+            {
+              title: parsed.title,
+              startAt,
+              endAt,
+              timezone,
+              recurrence: this.toRecurrenceDto(parsed.recurrence),
+            },
+          );
+
+        if (seriesConflicts.conflictDates.length > 0) {
+          return denied
+            ? {
+                error: buildDenyPolicyResult(seriesConflicts.conflictingTasks),
+              }
+            : { error: buildSeriesConflictResult(seriesConflicts) };
+        }
+      } else {
+        const conflicts = await this.taskService.findOverlapping(
           context.userId,
           calendarId,
-          {
-            title: parsed.title,
-            startAt,
-            endAt,
-            timezone,
-            recurrence: this.toRecurrenceDto(parsed.recurrence),
-          },
+          startAt,
+          endAt,
         );
 
-      if (seriesConflicts.conflictDates.length > 0) {
-        return {
-          held: this.buildCreateRecurringHeld(
-            parsed,
-            calendarId,
-            timezone,
-            groupId ?? null,
-            seriesConflicts,
-            context,
-          ),
-        };
-      }
-    }
-
-    if (!parsed.recurrence && startAt && endAt) {
-      const conflicts = await this.taskService.findOverlapping(
-        context.userId,
-        calendarId,
-        startAt,
-        endAt,
-      );
-
-      if (conflicts.length > 0) {
-        return {
-          held: this.buildCreateHeld(
-            parsed,
-            calendarId,
-            timezone,
-            conflicts,
-            context,
-          ),
-        };
+        if (conflicts.length > 0) {
+          return denied
+            ? { error: buildDenyPolicyResult(conflicts) }
+            : { error: buildConflictResult(conflicts) };
+        }
       }
     }
 
@@ -694,106 +784,13 @@ export class ToolDispatcherService implements ToolHandlerHost {
   }
 
   /**
-   * Builds the held-conflict record for a conflicting create, carrying the
-   * fully-resolved write so the orchestrator can execute it verbatim on confirm.
-   * The held-action `kind` and shape are unchanged from the event surface so the
-   * orchestrator's existing executor keeps working, and the same record is used
-   * by the single-create `heldConflict` and the batch `heldConflicts` paths.
-   */
-  private buildCreateHeld(
-    parsed: CreateTaskInput,
-    calendarId: string,
-    timezone: string,
-    conflicts: Task[],
-    context: ToolDispatchContext,
-  ): CreateHeld {
-    const conflictTitles = conflicts.map((task) => task.title).join(', ');
-
-    return {
-      promptText: `That overlaps with ${conflictTitles}. Shall I book it anyway?`,
-      write: {
-        userId: context.userId,
-        vendorChatId: '',
-        action: {
-          kind: 'create_event',
-          calendarId,
-          title: parsed.title,
-          startAt: parsed.startAt as string,
-          endAt: parsed.endAt ?? null,
-          timezone,
-          notes: parsed.notes ?? null,
-        },
-      },
-    };
-  }
-
-  /**
-   * Builds the held-conflict record for a conflicting recurring CREATE (Story 9):
-   * the WHOLE proposed series is one held write whose `create_recurring_event`
-   * action carries the rule grammar + every resolved field, so the orchestrator
-   * recreates it verbatim on confirm (bypassing the check — the user chose "book
-   * the series anyway"). The prompt counts the distinct clashing dates so the user
-   * understands the scope.
-   */
-  private buildCreateRecurringHeld(
-    parsed: CreateTaskInput,
-    calendarId: string,
-    timezone: string,
-    groupId: string | null,
-    seriesConflicts: RecurringSeriesConflicts,
-    context: ToolDispatchContext,
-  ): CreateHeld {
-    return {
-      promptText: this.formatSeriesConflictPrompt(seriesConflicts),
-      write: {
-        userId: context.userId,
-        vendorChatId: '',
-        action: {
-          kind: 'create_recurring_event',
-          calendarId,
-          title: parsed.title,
-          startAt: parsed.startAt as string,
-          endAt: parsed.endAt as string,
-          timezone,
-          notes: parsed.notes ?? null,
-          groupId,
-          isAllDay: parsed.isAllDay ?? false,
-          requiresCompletion: parsed.requiresCompletion ?? true,
-          recurrence: this.toRecurrenceDto(
-            parsed.recurrence as RecurrenceInput,
-          ),
-        },
-      },
-    };
-  }
-
-  /**
-   * Builds the held-conflict prompt for a recurring series whose occurrences
-   * overlap existing events — shared by the recurring create and recurring edit
-   * holds. Reports the distinct clashing-date count and a few of the overlapping
-   * titles so the user can confirm or cancel the whole series.
-   */
-  private formatSeriesConflictPrompt(
-    seriesConflicts: RecurringSeriesConflicts,
-  ): string {
-    const dateCount = seriesConflicts.conflictDates.length;
-    const titles = seriesConflicts.conflictingTasks
-      .map((task) => task.title)
-      .join(', ');
-    const dateLabel = dateCount === 1 ? '1 date' : `${dateCount} dates`;
-
-    return `This repeating task overlaps existing events on ${dateLabel}${
-      titles ? ` (${titles})` : ''
-    }. Book the series anyway?`;
-  }
-
-  /**
    * Handles `update_task`: resolves the handle, then dispatches by recurrence and
    * edit scope. A recurring target requires `editScope` (asks otherwise);
    * `this` → occurrence override, `this_and_following` → series split, `all` →
-   * master update. A one-off ignores `editScope` and keeps the conflict hold for
-   * a timed move. A `this_and_following` / `all` recurring edit that changes the
-   * time or rule is series-conflict-checked and held on overlap (Story 9).
+   * master update. A one-off ignores `editScope` and runs the default-deny
+   * conflict gate (ADR 0011) on a timed move. A `this_and_following` / `all`
+   * recurring edit that changes the time or rule is series-conflict-checked and
+   * refused on overlap the same way (Story 9).
    */
   async handleUpdateTask(
     input: Record<string, unknown>,
@@ -812,7 +809,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
       : undefined;
 
     if (isRecurringInstance) {
-      return this.updateRecurring(context, target, parsed, recurrenceDto);
+      return this.updateRecurring(context, task, target, parsed, recurrenceDto);
     }
 
     return this.updateOneOff(context, task, parsed, recurrenceDto);
@@ -826,14 +823,16 @@ export class ToolDispatcherService implements ToolHandlerHost {
    *
    * A `this_and_following` or `all` edit that changes the time or rule is
    * conflict-checked across the effective post-edit series (Story 9): on any
-   * occurrence overlap it routes through the SAME ADR-0006 hold a one-off move
-   * does — held as ONE `update_recurring_event` write that replays the chosen
-   * scope verbatim on confirm — instead of silently booking over existing events.
-   * The `this` scope retargets a single occurrence and keeps its prior behaviour
-   * (it is a one-instance override, not a series write).
+   * occurrence overlap it is REFUSED under default-deny (ADR 0011) with a
+   * recoverable restatement — unless the model set `confirmOverlap` — instead of
+   * silently booking over existing events. The `this` scope retargets a single
+   * occurrence; a move that changes its time runs the SAME default-deny gate as a
+   * one-off move (ADR 0044) before overriding — so dropping one occurrence onto an
+   * existing commitment is refused, and a standing DENY overrides `confirmOverlap`.
    */
   private async updateRecurring(
     context: ToolDispatchContext,
+    task: Task,
     target: HandleTarget,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
     recurrenceDto: CreateRecurrenceRuleDto | undefined,
@@ -846,6 +845,15 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const originalStart = target.originalStart as Date;
 
     if (scope === 'this') {
+      const moveConflict = await this.occurrenceMoveConflict(
+        context,
+        task,
+        originalStart,
+        parsed,
+      );
+
+      if (moveConflict) return moveConflict;
+
       await this.taskService.applyOccurrenceOverride(
         userId,
         target.taskId,
@@ -880,16 +888,14 @@ export class ToolDispatcherService implements ToolHandlerHost {
         splitGroupId = resolution.groupId;
       }
 
-      const splitConflictHold = await this.recurringEditHold(
+      const splitConflict = await this.recurringEditConflict(
         context,
         target.taskId,
-        originalStart,
         parsed,
         recurrenceDto,
-        splitGroupId ?? null,
       );
 
-      if (splitConflictHold) return splitConflictHold;
+      if (splitConflict) return splitConflict;
 
       // The group is passed INTO the split so it is validated against the new
       // master's calendar and applied in the same insert — a cross-calendar
@@ -925,16 +931,14 @@ export class ToolDispatcherService implements ToolHandlerHost {
       groupId = resolution.groupId;
     }
 
-    const allConflictHold = await this.recurringEditHold(
+    const allConflict = await this.recurringEditConflict(
       context,
       target.taskId,
-      originalStart,
       parsed,
       recurrenceDto,
-      groupId ?? null,
     );
 
-    if (allConflictHold) return allConflictHold;
+    if (allConflict) return allConflict;
 
     const updated = await this.taskService.update(userId, target.taskId, {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
@@ -949,29 +953,32 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
   /**
    * Runs the recurring-edit conflict check for a `this_and_following` / `all`
-   * edit and, on overlap, returns the held `update_recurring_event` outcome that
-   * replays the chosen scope verbatim on confirm; returns null when the effective
-   * series is clear (the caller then writes normally). Centralizes the check so
-   * both scopes route through the identical ADR-0006 hold (Story 9). `groupId` is
-   * the already-resolved group (or null) so the confirm-time replay needs no
-   * re-resolution.
+   * edit and, on overlap, returns a recoverable default-deny `isError` outcome
+   * (ADR 0011) restating the series clash — so the model asks the user or (once
+   * authorized) retries with `confirmOverlap`. Returns null when the model already
+   * set `confirmOverlap`, when the effective series is clear, or when the scope is
+   * not series-shaped (the caller then writes normally). Centralizes the check so
+   * both scopes route through the identical default-deny gate (Story 9).
    */
-  private async recurringEditHold(
+  private async recurringEditConflict(
     context: ToolDispatchContext,
     taskId: string,
-    originalStart: Date,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
     recurrenceDto: CreateRecurrenceRuleDto | undefined,
-    groupId: string | null,
   ): Promise<ToolDispatchOutcome | null> {
     const scope = parsed.editScope;
 
-    // Only the two series-shaped scopes are held; `this` is a single-occurrence
+    // Authorized (in-message confirmOverlap OR a standing ALLOW policy) — skip the
+    // gate so the write commits. A standing DENY policy is NOT authorization: it
+    // falls through and the clash is refused below with the deny restatement.
+    if (this.isOverlapAuthorized(parsed.confirmOverlap, context)) return null;
+
+    // Only the two series-shaped scopes are checked; `this` is a single-occurrence
     // override handled by its own branch and never reaches here.
     if (scope !== 'all' && scope !== 'this_and_following') return null;
 
     // Explicitly clearing the end makes the series open-ended — a windowless
-    // series cannot overlap, so there is nothing to hold. (TaskService also
+    // series cannot overlap, so there is nothing to refuse. (TaskService also
     // short-circuits this, but bailing here avoids the needless anchor read.)
     if (parsed.endAt === null) return null;
 
@@ -990,35 +997,106 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     if (seriesConflicts.conflictDates.length === 0) return null;
 
-    return {
-      content:
-        'The recurring edit overlaps existing events and is held for the user to confirm.',
-      heldConflict: {
-        promptText: this.formatSeriesConflictPrompt(seriesConflicts),
-        write: {
-          userId: context.userId,
-          vendorChatId: '',
-          action: {
-            kind: 'update_recurring_event',
-            taskId,
-            editScope: scope,
-            originalStart: originalStart.toISOString(),
-            title: parsed.title ?? null,
-            startAt: parsed.startAt ?? null,
-            endAt: parsed.endAt ?? null,
-            groupId,
-            recurrence: recurrenceDto
-              ? this.toRecurrenceDto(parsed.recurrence as RecurrenceInput)
-              : null,
-          },
-        },
-      },
-    };
+    return this.isOverlapDenied(context)
+      ? buildDenyPolicyResult(seriesConflicts.conflictingTasks)
+      : buildSeriesConflictResult(seriesConflicts);
+  }
+
+  /**
+   * Runs the default-deny conflict gate (ADR 0011 + 0044) for a `this`-scope
+   * occurrence MOVE — the single-occurrence counterpart of {@link updateOneOff}'s
+   * gate — and on overlap returns a recoverable `isError` outcome (the deny
+   * restatement under a standing DENY policy, the plain conflict otherwise). It
+   * refuses dropping one occurrence onto an existing commitment without
+   * authorization, so a `this`-scope override can no longer silently double-book.
+   *
+   * Returns null (the caller then overrides as before) when the override does NOT
+   * change the occurrence's time (a pure rename / completion / notes-only edit
+   * needs no check), when the write is authorized (in-message `confirmOverlap` OR a
+   * standing ALLOW policy) — UNLESS a DENY policy forces the check — or when the
+   * effective occurrence window is not a concrete timed `[start, end)` (an
+   * end-less/all-day occurrence cannot overlap, mirroring `findOverlapping`). The
+   * series' own anchor is excluded from the scan so the occurrence never clashes
+   * with its own series (exactly as `updateOneOff` excludes the edited task).
+   */
+  private async occurrenceMoveConflict(
+    context: ToolDispatchContext,
+    task: Task,
+    originalStart: Date,
+    parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+  ): Promise<ToolDispatchOutcome | null> {
+    // A non-time override (rename / completion / notes) never needs a conflict
+    // check — only a real MOVE (a new start and/or end) can land on a commitment.
+    const movesTime =
+      parsed.startAt !== undefined || parsed.endAt !== undefined;
+
+    if (!movesTime) return null;
+
+    // Authorized (in-message confirmOverlap OR a standing ALLOW policy) — skip the
+    // gate so the move commits. A standing DENY is NOT authorization: it falls
+    // through and the clash is refused below with the deny restatement.
+    if (this.isOverlapAuthorized(parsed.confirmOverlap, context)) return null;
+
+    // Resolve the effective post-move occurrence window. The new start is the
+    // override start when set, else the occurrence's current start
+    // (`originalStart`). The new end is the override end when set; otherwise, when
+    // only the start moved, the occurrence keeps the series duration
+    // (master end − master start) applied to the new start.
+    const nextStart =
+      parsed.startAt !== undefined ? new Date(parsed.startAt) : originalStart;
+    const nextEnd = this.resolveOccurrenceMoveEnd(task, nextStart, parsed);
+
+    // No concrete timed window (end-less / all-day occurrence) ⇒ nothing can
+    // overlap, mirroring `findOverlapping`'s [start, end) contract — proceed.
+    if (!nextStart || !nextEnd) return null;
+
+    const conflicts = await this.taskService.findOverlapping(
+      context.userId,
+      task.calendarId,
+      nextStart,
+      nextEnd,
+      // Exclude the series' own anchor so the occurrence is not counted as
+      // clashing with its own series (the same self-exclusion `updateOneOff` uses).
+      task.id,
+    );
+
+    if (conflicts.length === 0) return null;
+
+    return this.isOverlapDenied(context)
+      ? buildDenyPolicyResult(conflicts)
+      : buildConflictResult(conflicts);
+  }
+
+  /**
+   * Resolves the effective END of a `this`-scope occurrence move: the override end
+   * when the model set `endAt` (a non-null new end), null when it explicitly
+   * cleared the end (end-less ⇒ uncheckable), otherwise — when only the start
+   * moved — the occurrence's prior duration (master `endAt − startAt`) re-applied to
+   * the NEW start (`nextStart`), so the window keeps its length as it slides.
+   * Returns null when the master is not timed (no duration to carry), which the
+   * caller treats as "no window to check".
+   */
+  private resolveOccurrenceMoveEnd(
+    task: Task,
+    nextStart: Date,
+    parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+  ): Date | null {
+    if (parsed.endAt !== undefined) {
+      return parsed.endAt ? new Date(parsed.endAt) : null;
+    }
+
+    if (!task.startAt || !task.endAt) return null;
+
+    const durationMs = task.endAt.getTime() - task.startAt.getTime();
+
+    return new Date(nextStart.getTime() + durationMs);
   }
 
   /**
    * Updates a one-off task (the `all` / single-row path): resolves an optional
-   * group rename, conflict-checks a timed move (holding on overlap), then writes.
+   * group rename, then runs the default-deny conflict gate (ADR 0011) on a timed
+   * move — REFUSING an overlap with a recoverable restatement unless the model set
+   * `confirmOverlap` (the user authorized it) — before writing.
    */
   private async updateOneOff(
     context: ToolDispatchContext,
@@ -1045,7 +1123,16 @@ export class ToolDispatcherService implements ToolHandlerHost {
           : null
         : task.endAt;
 
-    if (nextStartAt && nextEndAt) {
+    // Default-deny conflict gate (ADR 0011 + 0044): a timed move that overlaps an
+    // existing commitment is REFUSED with a recoverable restatement unless it is
+    // authorized (the model set `confirmOverlap` OR a standing ALLOW policy). A
+    // standing DENY policy forces the check even with `confirmOverlap` and refuses
+    // with the deny restatement.
+    if (
+      !this.isOverlapAuthorized(parsed.confirmOverlap, context) &&
+      nextStartAt &&
+      nextEndAt
+    ) {
       const conflicts = await this.taskService.findOverlapping(
         context.userId,
         task.calendarId,
@@ -1055,13 +1142,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       );
 
       if (conflicts.length > 0) {
-        return this.heldUpdateOutcome(
-          context.userId,
-          task.id,
-          nextStartAt,
-          nextEndAt,
-          conflicts,
-        );
+        return this.isOverlapDenied(context)
+          ? buildDenyPolicyResult(conflicts)
+          : buildConflictResult(conflicts);
       }
     }
 
@@ -1074,39 +1157,6 @@ export class ToolDispatcherService implements ToolHandlerHost {
     });
 
     return { content: `Updated "${updated.title}".` };
-  }
-
-  /**
-   * Builds the `heldConflict` for a conflicting one-off timed move, carrying the
-   * resolved update so the orchestrator executes it verbatim on confirm. Shape
-   * and `kind` are unchanged from the event surface.
-   */
-  private heldUpdateOutcome(
-    userId: string,
-    taskId: string,
-    nextStartAt: Date,
-    nextEndAt: Date,
-    conflicts: Task[],
-  ): ToolDispatchOutcome {
-    const conflictTitles = conflicts.map((task) => task.title).join(', ');
-
-    return {
-      content:
-        'The updated time overlaps an existing task and is held for the user to confirm.',
-      heldConflict: {
-        promptText: `That overlaps with ${conflictTitles}. Shall I move it anyway?`,
-        write: {
-          userId,
-          vendorChatId: '',
-          action: {
-            kind: 'update_event',
-            taskId,
-            startAt: nextStartAt.toISOString(),
-            endAt: nextEndAt.toISOString(),
-          },
-        },
-      },
-    };
   }
 
   /**
@@ -1149,6 +1199,14 @@ export class ToolDispatcherService implements ToolHandlerHost {
    * the day before, preserving past occurrences) rather than destroying the
    * whole series; a recurring task without a scope asks the model to choose; a
    * one-off (or `all`) is soft-deleted.
+   *
+   * Every path here DESTROYS an existing commitment, so it is gated behind an
+   * explicit `confirmDelete` (Story 15 / ADR 0011 + 0044, destructive replace): the
+   * scope question still fires first when the scope is ambiguous (the model must
+   * know what it is deleting before it can confirm), but once the scope is settled
+   * an absent `confirmDelete` REFUSES with a recoverable "ask the user first"
+   * instead of deleting. `confirmOverlap` and a standing allow-policy NEVER satisfy
+   * this — a destructive replace always asks, even with an allow policy.
    */
   async handleDeleteTask(
     input: Record<string, unknown>,
@@ -1162,6 +1220,19 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const task = await this.taskService.findById(context.userId, target.taskId);
     const isRecurringInstance =
       task.recurrenceRuleId !== null && target.originalStart !== null;
+
+    // Ask which scope FIRST when a repeating task is targeted without one — the
+    // model cannot meaningfully confirm a delete whose extent it has not pinned.
+    if (isRecurringInstance && !parsed.editScope) {
+      return ASK_EDIT_SCOPE_RESULT;
+    }
+
+    // Destructive-replace gate: with the scope settled, a delete is irreversible,
+    // so it ALWAYS asks first unless the user explicitly confirmed THIS delete
+    // (confirmDelete). No write happens otherwise.
+    if (!parsed.confirmDelete) {
+      return ASK_BEFORE_DELETE_RESULT;
+    }
 
     if (isRecurringInstance && parsed.editScope === 'this') {
       await this.taskService.applyOccurrenceOverride(
@@ -1182,10 +1253,6 @@ export class ToolDispatcherService implements ToolHandlerHost {
       );
 
       return { content: 'Removed this and the following occurrences.' };
-    }
-
-    if (isRecurringInstance && !parsed.editScope) {
-      return ASK_EDIT_SCOPE_RESULT;
     }
 
     await this.taskService.remove(context.userId, target.taskId);

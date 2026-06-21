@@ -161,9 +161,9 @@ export class WebhookConsumer extends WorkerHost {
 
   /**
    * Routes a normalized message for a linked user through the L2 inbound router
-   * (4-flow taxonomy) and dispatches the resulting flow: the two no-LLM paths
-   * (command, conflict-confirm) keep their existing deterministic handlers; the
-   * two model paths (simple message, answer) converge at the turn runner.
+   * (flow taxonomy) and dispatches the resulting flow: the no-LLM paths (command,
+   * STOP-control) keep their deterministic handlers; the two model paths (simple
+   * message, answer) converge at the turn runner.
    *
    * A voice note is transcribed BEFORE classification so it is routed by its
    * transcript exactly like a typed message (STT failure already replied and
@@ -210,17 +210,6 @@ export class WebhookConsumer extends WorkerHost {
       await this.assistantService.handleCommand(user, {
         command: flow.command,
         args: flow.args,
-        vendorChatId: normalized.vendorChatId,
-        correlationId,
-      });
-
-      return;
-    }
-
-    if (flow.kind === 'conflict_confirm') {
-      await this.assistantService.handleCallback(user, {
-        callbackId: flow.callbackId,
-        callbackData: flow.callbackData,
         vendorChatId: normalized.vendorChatId,
         correlationId,
       });

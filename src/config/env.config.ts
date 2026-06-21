@@ -84,7 +84,6 @@ export const environmentSchema = z
     // 0 is the kill-switch (reverts to detect-and-mask). Must stay strictly below
     // ASSISTANT_MAX_TOOL_ROUNDTRIPS so the round-trip ceiling is the outer bound.
     ASSISTANT_MAX_CORRECTIONS: z.coerce.number().int().min(0),
-    ASSISTANT_HELD_CONFLICT_TTL_SECONDS: z.coerce.number().int().positive(),
     // ask_user suspend/resume (ADR 0010). The hot Redis index TTL (the free-text
     // answer window); after it lapses a typed message starts a fresh turn while a
     // button still resumes from Postgres up to the retention horizon below.

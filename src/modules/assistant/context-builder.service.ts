@@ -9,6 +9,7 @@ import { HandleMap } from './tools/handle-map';
 import { toolRegistry } from './tools/tool-registry';
 import { PromptBlock, PromptRole, ToolSchema } from '@/modules/ai/ai.types';
 import {
+  ConflictPolicy,
   ConversationMessage,
   ConversationMessageRole,
   TaskGroup,
@@ -35,6 +36,16 @@ export interface BuiltPrompt {
   system: PromptBlock[];
   tools: ToolSchema[];
   messages: PromptBlock[];
+  /**
+   * The user's STANDING double-booking policy (Story 15 / ADR 0011 + 0044),
+   * resolved here from their EXPLICIT `conflict_policy` fact, so the orchestrator
+   * can thread it onto the {@link ToolDispatchContext} and the conflict gate can
+   * honour it without a round-trip. Null when no explicit policy is set (the gate
+   * then runs default-deny). It is ALSO restated to the model in the volatile
+   * now-context, so the model's judgement and the dispatcher's gate share one
+   * source of truth.
+   */
+  conflictPolicy: ConflictPolicy | null;
 }
 
 /** Inputs the builder needs for one user turn. */
@@ -91,6 +102,34 @@ export class ContextBuilderService {
     });
 
     return `User profile:\n${lines.join('\n')}`;
+  }
+
+  /**
+   * Renders the user's STANDING double-booking policy as a one-line instruction
+   * for the model (Story 15 / ADR 0011 + 0044), or null when none is set so the
+   * caller omits the line (the model then follows the system-prompt default-deny
+   * rule). `ALLOW` and `DENY` are stated as firm directives so the model's own
+   * judgement matches the dispatcher's gate exactly; an explicit `ASK` restates
+   * the default so a user who set "always ask" sees it honoured. Kept in the
+   * volatile now-context (not the cached prefix) because it is per-user and may
+   * change between turns.
+   */
+  private static renderConflictPolicy(
+    policy: ConflictPolicy | null,
+  ): string | null {
+    if (policy === ConflictPolicy.ALLOW) {
+      return 'Standing conflict policy: ALLOW. The user has authorized booking over overlaps once and for all — you may set confirmOverlap:true on a clashing write WITHOUT asking. This still does NOT authorize deleting or overwriting an existing commitment; a delete always asks first.';
+    }
+
+    if (policy === ConflictPolicy.DENY) {
+      return 'Standing conflict policy: DENY. The user never wants overlaps — refuse any clashing write and do not even ask; offer a non-overlapping slot instead. Never set confirmOverlap.';
+    }
+
+    if (policy === ConflictPolicy.ASK) {
+      return 'Standing conflict policy: ASK. Always ask the user before booking over any overlap (the default).';
+    }
+
+    return null;
   }
 
   /**
@@ -234,6 +273,10 @@ export class ContextBuilderService {
     const facts = await this.userMemoryFactDatabaseService.findAllByUserId(
       input.user.id,
     );
+    const conflictPolicy =
+      await this.userMemoryFactDatabaseService.findConflictPolicy(
+        input.user.id,
+      );
     const groups = await this.taskGroupService.findAllForUser(input.user.id);
     const summary = await this.conversationSummaryDatabaseService.findLatest(
       input.conversationId,
@@ -285,9 +328,13 @@ export class ContextBuilderService {
       },
     ];
 
+    const conflictPolicyLine =
+      ContextBuilderService.renderConflictPolicy(conflictPolicy);
+
     const finalUserContent = [
       nowContext,
       queryAware,
+      conflictPolicyLine,
       `New message: ${input.currentMessageText}`,
     ]
       .filter((section): section is string => section !== null)
@@ -300,6 +347,6 @@ export class ContextBuilderService {
 
     const tools = await toolRegistry.toSchemas();
 
-    return { system, tools, messages };
+    return { system, tools, messages, conflictPolicy };
   }
 }
