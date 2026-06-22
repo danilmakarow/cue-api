@@ -515,6 +515,27 @@ export class TaskService {
   }
 
   /**
+   * Returns the existing per-occurrence override row for `(taskId,
+   * originalStart)`, or null when the occurrence has never been overridden.
+   * Validates ownership first. The assistant's `this`-scope move gate reads this
+   * to recover the occurrence's CURRENT span (a prior length change) so a
+   * start-only move is conflict-checked — and persisted — against the true span
+   * rather than the master duration.
+   */
+  async findOccurrenceException(
+    userId: string,
+    taskId: string,
+    originalStart: Date,
+  ): Promise<TaskOccurrenceException | null> {
+    await this.findById(userId, taskId);
+
+    return this.taskOccurrenceExceptionService.findOverride(
+      taskId,
+      originalStart,
+    );
+  }
+
+  /**
    * Loads a single Task by id and asserts the given user owns its calendar.
    * Throws 404 when the task does not exist (or is soft-deleted), 403 when the
    * task belongs to another user's calendar.

@@ -154,27 +154,23 @@ export interface ToolStepRecord {
 export type CorrectionReason = 'claim_without_writes' | 'writes_errored';
 
 /**
- * The L4-facing port the tool loop (Story 13 / ADR 0041) uses to render progress
- * into the live status surface, WITHOUT the loop knowing about drafts / Redis /
- * the vendor (the loop stays L9-blind). The turn runner supplies a concrete
- * implementation that wraps the per-turn {@link StatusAnimation} (each method
- * routes through the one draft throttle); a turn with no live status passes a
- * no-op sink.
+ * The L4-facing port the tool loop (Story 13 / ADR 0041, narrowed by ADR 0052)
+ * uses to render progress into the live status surface, WITHOUT the loop knowing
+ * about drafts / Redis / the vendor (the loop stays L9-blind). The turn runner
+ * supplies a concrete implementation that wraps the per-turn
+ * {@link StatusAnimation} (the method routes through the one draft throttle); a
+ * turn with no live status passes a no-op sink.
  *
- * **Degrade-never-throw:** every method MUST swallow its own faults. The loop
- * calls them best-effort and never wraps the calls in try/catch — a status fault
- * must never disturb the turn's answer (the webhook queue is `attempts:1`).
+ * The model's ANSWER is deliberately NOT streamed into this surface (ADR 0052):
+ * the draft is status-only (cycling word + dots + per-round recap), and the
+ * answer lands solely as the real `sendMessage`, which Telegram renders by
+ * replacing the draft preview. So this port carries only the between-round recap.
+ *
+ * **Degrade-never-throw:** the method MUST swallow its own faults. The loop calls
+ * it best-effort and never wraps the call in try/catch — a status fault must never
+ * disturb the turn's answer (the webhook queue is `attempts:1`).
  */
 export interface TurnStreamSink {
-  /**
-   * Renders the latest full-text snapshot of the model's streaming answer into
-   * the status draft (final round only). Called with the accumulated snapshot per
-   * delta; the implementation batches through the draft throttle, so it must
-   * tolerate being called far faster than it can send (it coalesces). The draft
-   * is ephemeral — the real `sendMessage` finalize still persists the answer.
-   */
-  streamAnswer(snapshot: string): void;
-
   /**
    * Renders a one-sentence per-round recap ("what I'm doing now") into the status
    * draft between tool rounds, so the user sees progress. Best-effort and cheap;

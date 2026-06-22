@@ -347,19 +347,17 @@ export class TurnRunnerService {
 
   /**
    * Wraps a {@link StatusAnimation} as the loop-facing {@link TurnStreamSink}
-   * (Story 13 / ADR 0041) so the L4 loop can stream the final answer + render
+   * (Story 13 / ADR 0041, narrowed by ADR 0052) so the L4 loop can render
    * per-round recaps into the live draft WITHOUT knowing about the draft / Redis /
-   * vendor (the loop stays L9-blind). Each method fires-and-forgets the
-   * animation's async push (which routes through the one draft throttle and
-   * swallows its own fault), so the sink's contract — synchronous, degrade-never
-   * -throw — holds. Used only on a fresh model-driven turn; an `ask_user` resume
-   * passes no sink (its answer is short and the resume re-enters the loop).
+   * vendor (the loop stays L9-blind). The answer is NOT streamed into the draft
+   * (ADR 0052 — it lands as the real `sendMessage`), so the sink carries only the
+   * recap. The method fires-and-forgets the animation's async push (which routes
+   * through the one draft throttle and swallows its own fault), so the sink's
+   * contract — synchronous, degrade-never-throw — holds. Used only on a fresh
+   * model-driven turn; an `ask_user` resume passes no sink.
    */
   private streamSinkFor(status: StatusAnimation): TurnStreamSink {
     return {
-      streamAnswer: (snapshot: string): void => {
-        void status.streamAnswer(snapshot);
-      },
       showRecap: (recap: string): void => {
         void status.showRecap(recap);
       },

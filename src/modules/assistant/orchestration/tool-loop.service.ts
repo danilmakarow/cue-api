@@ -213,16 +213,15 @@ export class ToolLoopService {
 
         forcedToolChoice = undefined;
 
-        // Stream the round via the connector's `completeStream` (Story 13 / ADR
-        // 0041): each text delta renders into the live status draft through the
-        // sink (which batches via the central draft throttle — never per-token to
-        // the vendor). On a terminal round the streamed text IS the final answer,
-        // already animating in the draft; the real `sendMessage` finalize (L9)
-        // still persists it. `completeStream` MUST return, never throw — a stream
-        // fault reconciles to a non-streamed result inside the connector — so the
-        // loop's outcomes and the `attempts:1` posture are unchanged. With no sink
-        // (e.g. an `ask_user` resume) the onText handler is a no-op and the round
-        // behaves exactly as `complete` did.
+        // Drive the round via the connector's `completeStream` (Story 13 / ADR
+        // 0041). The model's answer is NO LONGER rendered into the draft (ADR
+        // 0052 — the draft is status-only; the answer lands as the real
+        // `sendMessage`, which Telegram renders by replacing the draft preview),
+        // so the `onText` handler is intentionally a no-op. We keep the STREAMING
+        // entry point (not `complete`) purely for its resilience: `completeStream`
+        // MUST return, never throw — a stream fault reconciles to a non-streamed
+        // result inside the connector — so the loop's outcomes and the `attempts:1`
+        // posture hold regardless of how the round resolves.
         const result = await this.ai.completeStream(
           {
             modelRole: AiModelRole.MAIN,
@@ -234,8 +233,9 @@ export class ToolLoopService {
             features: { promptCaching: true, contextEditing: true },
             traceId: correlationId,
           },
-          (_delta, snapshot) => {
-            streamSink?.streamAnswer(snapshot);
+          () => {
+            // Deltas are intentionally discarded — the draft surface shows status
+            // + recap only (ADR 0052); the answer is sent once, in full, by L9.
           },
         );
 

@@ -255,37 +255,6 @@ export class StatusAnimation {
   }
 
   /**
-   * Renders the latest streamed-answer snapshot into the draft (Story 13 / ADR
-   * 0041), on the final/answer round. STOPS the cycling-word + dots loading timers
-   * first (the streamed text supersedes the loading animation) and advances the
-   * session phase to `Streaming`, then pushes the snapshot through the SAME
-   * throttle — so per-token deltas coalesce under the central ~2–5/s cap and never
-   * hit the draft API in a tight loop. A no-op once finalized, on a non-draft
-   * (non-private) surface (no live draft to stream into), or for empty text.
-   * Degrades silently — a status fault never disturbs the turn's real reply.
-   */
-  async streamAnswer(snapshot: string): Promise<void> {
-    if (this.finalized || !this.isDraftSurface || snapshot.length === 0) {
-      return;
-    }
-
-    // The answer is now arriving — tear down the loading loop so the cycling word
-    // doesn't race the streamed text on the one shared draft.
-    this.clearTimers();
-
-    // The working phase (status + recap composite) is over: the streamed answer
-    // REPLACES the composite outright, so drop the retained parts to ensure no
-    // stale recap/status leaks back if a later frame ever re-rendered (Task 5).
-    this.composite = { statusLine: '' };
-
-    if (this.session?.phase !== StatusSessionPhase.Streaming) {
-      void this.advancePhaseSafe(StatusSessionPhase.Streaming);
-    }
-
-    await this.pushDraft(snapshot);
-  }
-
-  /**
    * Renders a one-sentence per-round recap into the live-status draft so the user
    * sees what the model is doing between tool rounds (Story 13 / ADR 0041, v2 Task
    * 5 / ADR 0050). On a draft surface it updates ONLY the composite's
@@ -293,11 +262,11 @@ export class StatusAnimation {
    * now") and re-renders the composite, so the recap lands BELOW the status line
    * as a quote — it NEVER clobbers the status word, and it does NOT re-arm /
    * restart the loading timers: the dots keep ticking on top (each tick re-renders
-   * the composite with the detail preserved) until {@link streamAnswer} replaces
-   * the whole composite with the final answer. Routes through the SAME throttle as
-   * every other frame; a no-op once finalized or for empty text; on a non-private
-   * surface it edits the static line. Best-effort + degrade-never-throw — a missed
-   * recap simply leaves the current frame.
+   * the composite with the detail preserved) until {@link finalize} tears the loop
+   * down (the answer is never streamed into the draft — ADR 0052). Routes through
+   * the SAME throttle as every other frame; a no-op once finalized or for empty
+   * text; on a non-private surface it edits the static line. Best-effort +
+   * degrade-never-throw — a missed recap simply leaves the current frame.
    */
   async showRecap(recap: string): Promise<void> {
     if (this.finalized || recap.length === 0) {
@@ -320,29 +289,23 @@ export class StatusAnimation {
 
   /**
    * Ends the animation on EVERY turn-exit path: clears both timers (no interval
-   * leak — ADR 0012 invariant), cancels the throttle's pending flush, COLLAPSES
-   * the streamed-answer draft preview, then clears the Redis StatusSession.
-   * Idempotent + never throws.
+   * leak — ADR 0012 invariant), cancels the throttle's pending flush, then clears
+   * the Redis StatusSession. Idempotent + never throws.
    *
-   * Why the collapse (FIX 1 / ADR 0049): the loop streams the full answer into
-   * the draft, and the turn ALSO sends the same answer as a real
-   * {@link ReplyPresenter.sendText} message. The real message lands first (the
-   * caller runs `finishTurn` before this `finally`), so if we left the streamed
-   * draft standing the user would briefly see the answer TWICE (the live draft +
-   * the real message) and a reopened chat would re-animate the orphan draft until
-   * its ~30 s TTL. So when a draft surface is active we push ONE final empty-text
-   * draft frame to retract the preview the moment the real message exists. It is
-   * sent UN-throttled (a direct `sendMessageDraft`, NOT via the throttle, which we
-   * just cancelled) so the collapse is not coalesced away. Empty-text drafts are
-   * supported (Bot API ≥ 10.0). Degrade-never-throw — a failed collapse is
-   * cosmetic and must never disturb the turn.
+   * No draft collapse (ADR 0052, superseding ADR 0049 FIX 1): the draft is now
+   * status-only — the answer is never streamed into it — so there is no streamed
+   * preview to retract. The real {@link ReplyPresenter.sendText} message (sent by
+   * `finishTurn` just before this `finally`) supersedes the draft preview on its
+   * own (Telegram replaces the ephemeral preview with the sent message), and any
+   * residual status frame expires with the draft's ~30 s TTL. The previous
+   * empty-text "collapse" was a MISUSE of the API — an empty-text draft renders a
+   * "Thinking…" placeholder rather than retracting, so it surfaced as a lingering
+   * blank bubble. Dropping it removes that artifact entirely.
    */
   async finalize(): Promise<void> {
     this.finalized = true;
     this.clearTimers();
     this.throttle.cancel();
-
-    await this.collapseDraft();
 
     try {
       await this.statusSessions.clear(
@@ -355,34 +318,13 @@ export class StatusAnimation {
   }
 
   /**
-   * Pushes ONE final empty-text draft frame to visually retract the streamed
-   * answer preview once the real reply has landed (FIX 1). Only runs on a draft
-   * surface that actually has a draft id; a non-private (static-line) or
-   * never-opened surface has no draft to collapse and is a silent no-op. Sent
-   * DIRECTLY (bypassing the just-cancelled throttle) so the retraction is not
-   * coalesced away, and wrapped so a vendor fault degrades silently.
-   */
-  private async collapseDraft(): Promise<void> {
-    const draftId = this.session?.draftId;
-
-    if (!this.isDraftSurface || draftId === undefined) {
-      return;
-    }
-
-    try {
-      await this.vendor.sendMessageDraft(this.target, { draftId, text: '' });
-    } catch (error) {
-      this.logSurfaceFault('collapse draft', error);
-    }
-  }
-
-  /**
    * Arms the dot-tick + word-swap loading timers for the animated draft surface,
    * driven by {@link startLoading} (the single arm point). Each tick updates ONLY
    * the composite's status line and re-renders the composite, so the dots keep
    * animating on top while any recap detail block below persists (v2 Task 5 / ADR
    * 0050) — {@link showRecap} no longer re-arms, since the timers are never torn
-   * down between rounds; only {@link streamAnswer}/{@link finalize} stop them. A
+   * down between rounds; only {@link finalize} stops them (the answer is never
+   * streamed into the draft — ADR 0052). A
    * no-op once finalized, on a non-private surface (single static line, no loop),
    * or when the timers are already armed (the ONE-setInterval-pair-per-turn
    * invariant, ADR 0012).
@@ -501,8 +443,8 @@ export class StatusAnimation {
    * composite's `<blockquote>` renders under `parse_mode=HTML` — v2 Task 5 / ADR
    * 0050). The throttle owns the ~2–5/s cap and swallows the individual send's
    * rejection, so a failed frame is non-fatal and the next coalesced frame
-   * supersedes it. `format` is omitted for plain frames (e.g. the streamed
-   * answer), keeping them plain-text.
+   * supersedes it. `format` is omitted for plain frames (e.g. the voice-listening
+   * line), keeping them plain-text.
    */
   private async pushDraft(
     text: string,
@@ -582,7 +524,7 @@ export class StatusAnimation {
 
   /**
    * Advances the StatusSession phase, swallowing a Redis fault (the phase label is
-   * advisory for Story 13's streaming; a missed advance never breaks the turn).
+   * advisory for the loading-status surface; a missed advance never breaks the turn).
    */
   private async advancePhaseSafe(phase: StatusSessionPhase): Promise<void> {
     try {

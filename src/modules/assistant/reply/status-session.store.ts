@@ -14,10 +14,12 @@ import { ChatType } from '@/modules/external-vendor/external-vendor.types';
 export enum StatusSessionPhase {
   /** Empty-text draft posted ("Thinking…"); awaiting the first real update. */
   Thinking = 'thinking',
-  /** Cycling a loading word / per-step recap (Story 12). */
+  /**
+   * Cycling a loading word + dots / per-round recap (Story 12). The terminal
+   * phase: the answer is NOT streamed into the draft (ADR 0052), so the surface
+   * stays in `Working` until the turn finalizes and the real reply supersedes it.
+   */
   Working = 'working',
-  /** Streaming the final answer into the draft (Story 13). */
-  Streaming = 'streaming',
 }
 
 /**
@@ -173,10 +175,10 @@ export class StatusSessionStore {
   }
 
   /**
-   * Advances the session's phase in place (e.g. Thinking → Working → Streaming),
-   * refreshing the TTL. No-op returning null when the session is gone. The phase
-   * label is what Stories 12/13 key their animation off; the transition is owned
-   * here so the lifecycle stays in one place.
+   * Advances the session's phase in place (Thinking → Working), refreshing the
+   * TTL. No-op returning null when the session is gone. The phase label is what
+   * Story 12's animation keys off; the transition is owned here so the lifecycle
+   * stays in one place.
    */
   async advancePhase(
     vendorChatId: string,

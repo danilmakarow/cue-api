@@ -57,6 +57,23 @@ export class TaskOccurrenceExceptionService {
   }
 
   /**
+   * Returns the single override row for the occurrence identified by
+   * `(taskId, originalStart)`, or null when none exists. Backs the assistant's
+   * `this`-scope move gate, which must know the occurrence's CURRENT overridden
+   * span (a prior length change) so a start-only move slides that true span
+   * rather than the master duration.
+   */
+  async findOverride(
+    taskId: string,
+    originalStart: Date,
+  ): Promise<TaskOccurrenceException | null> {
+    return this.taskOccurrenceExceptionDatabaseService.findOneBy({
+      taskId,
+      originalStartAt: originalStart,
+    });
+  }
+
+  /**
    * Upserts the override for a single occurrence identified by
    * `(taskId, originalStart)`: mutates the existing row when present, otherwise
    * creates one. Backed by the unique constraint, so concurrent writers

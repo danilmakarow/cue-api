@@ -75,6 +75,7 @@ const buildDispatcher = () => {
       .mockResolvedValue({ conflictDates: [], conflictingTasks: [] }),
     setCompleted: jest.fn().mockResolvedValue(undefined),
     setOccurrenceCompleted: jest.fn().mockResolvedValue(undefined),
+    findOccurrenceException: jest.fn().mockResolvedValue(null),
     applyOccurrenceOverride: jest.fn().mockResolvedValue(undefined),
     splitSeries: jest
       .fn()
@@ -1057,6 +1058,155 @@ describe('ToolDispatcherService', () => {
       // The gate consulted findOverlapping for the new occurrence window
       // [10:00, 10:30) — carrying the 30-min series duration — excluding the
       // series' own anchor, then (clear) committed the override.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledWith(
+        'user-1',
+        'cal-1',
+        new Date('2026-06-03T10:00:00.000Z'),
+        new Date('2026-06-03T10:30:00.000Z'),
+        'task-1',
+      );
+      expect(harness.taskService.applyOccurrenceOverride).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        { overrideStartAt: new Date('2026-06-03T10:00:00.000Z') },
+      );
+    });
+
+    it('conflict-checks a start-only "this" move against the occurrence\'s TRUE prior span, not the master duration', async () => {
+      // The under-detection edge: this occurrence was previously STRETCHED to 2h
+      // (override 14:00–16:00) while the series master is only 30m (09:00–09:30).
+      // A start-only move to 17:00 must be checked against the real 2h window
+      // [17:00, 19:00) — NOT the 30m [17:00, 17:30) the master duration implies —
+      // or a clash sitting in the 30-min..2h tail slips past the gate.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      (
+        harness.taskService.findOccurrenceException as jest.Mock
+      ).mockResolvedValue({
+        taskId: 'task-1',
+        originalStartAt: new Date('2026-06-03T09:00:00.000Z'),
+        overrideStartAt: new Date('2026-06-03T14:00:00.000Z'),
+        overrideEndAt: new Date('2026-06-03T16:00:00.000Z'),
+        overrideTitle: null,
+        isSkipped: false,
+        completedAt: null,
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T17:00:00.000Z',
+          editScope: 'this',
+        }),
+        buildContext(handleMap),
+      );
+
+      // Checked window carries the occurrence's TRUE 2h span from the new start.
+      expect(harness.taskService.findOverlapping).toHaveBeenCalledWith(
+        'user-1',
+        'cal-1',
+        new Date('2026-06-03T17:00:00.000Z'),
+        new Date('2026-06-03T19:00:00.000Z'),
+        'task-1',
+      );
+    });
+
+    it('persists a coherent (non-inverted) window for a start-only "this" move on a prior-stretched occurrence', async () => {
+      // The write counterpart: a bare `overrideStartAt` write would strand the
+      // prior `overrideEndAt` (16:00) paired with the new start (17:00) — an
+      // INVERTED window. The fix slides the end with the start to preserve the
+      // 2h span, persisting both overrideStartAt 17:00 AND overrideEndAt 19:00.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      (
+        harness.taskService.findOccurrenceException as jest.Mock
+      ).mockResolvedValue({
+        taskId: 'task-1',
+        originalStartAt: new Date('2026-06-03T09:00:00.000Z'),
+        overrideStartAt: new Date('2026-06-03T14:00:00.000Z'),
+        overrideEndAt: new Date('2026-06-03T16:00:00.000Z'),
+        overrideTitle: null,
+        isSkipped: false,
+        completedAt: null,
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T17:00:00.000Z',
+          editScope: 'this',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.applyOccurrenceOverride).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        {
+          overrideStartAt: new Date('2026-06-03T17:00:00.000Z'),
+          overrideEndAt: new Date('2026-06-03T19:00:00.000Z'),
+        },
+      );
+    });
+
+    it('leaves the common-path start-only "this" move unchanged when there is no prior override', async () => {
+      // Guardrail: with no existing exception the behaviour is byte-identical to
+      // before — the gate checks the master-duration window and the write sets
+      // only `overrideStartAt` (the read derives the end off the new start).
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceRuleId: 'rule-1',
+        calendarId: 'cal-1',
+        startAt: new Date('2026-06-03T09:00:00.000Z'),
+        endAt: new Date('2026-06-03T09:30:00.000Z'),
+      });
+      // findOccurrenceException defaults to null (no prior override).
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+          editScope: 'this',
+        }),
+        buildContext(handleMap),
+      );
+
       expect(harness.taskService.findOverlapping).toHaveBeenCalledWith(
         'user-1',
         'cal-1',

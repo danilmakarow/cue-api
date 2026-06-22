@@ -170,10 +170,11 @@ const buildHarness = () => {
     open: jest.fn().mockResolvedValue(undefined),
     showVoiceListening: jest.fn().mockResolvedValue(undefined),
     startLoading: jest.fn().mockResolvedValue(undefined),
-    // Story 13 (ADR 0041): the runner wraps the animation as the loop's stream
-    // sink; these are inert no-ops here so existing reply assertions are
-    // unaffected (streaming is covered in status-animator.service.spec.ts).
-    streamAnswer: jest.fn().mockResolvedValue(undefined),
+    // Story 13 (ADR 0041, narrowed by ADR 0052): the runner wraps the animation
+    // as the loop's stream sink; showRecap is an inert no-op here so existing reply
+    // assertions are unaffected (surface behaviour is covered in
+    // status-animator.service.spec.ts). The answer is no longer streamed into the
+    // draft (ADR 0052), so there is no streamAnswer.
     showRecap: jest.fn().mockResolvedValue(undefined),
     finalize: jest.fn().mockResolvedValue(undefined),
   };
@@ -300,13 +301,13 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: 'in-1',
     });
 
-    // The loop drove the model via the STREAMING entry point on every round.
+    // The loop drove the model via the STREAMING entry point on every round
+    // (kept for its never-throw resilience; the answer is no longer rendered into
+    // the draft — ADR 0052).
     expect(harness.ai.completeStream).toHaveBeenCalledTimes(2);
 
-    // The final round's answer streamed into the status draft via the sink.
-    expect(harness.statusAnimation.streamAnswer).toHaveBeenCalledWith(
-      'You have one event today.',
-    );
+    // The answer is NOT streamed into the draft (ADR 0052) — it lands only as the
+    // real persisted reply (asserted below).
 
     // The per-round recap (BACKGROUND model) was rendered into the draft.
     expect(harness.roundRecap.recapRound).toHaveBeenCalledTimes(1);

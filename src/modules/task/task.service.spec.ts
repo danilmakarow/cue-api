@@ -178,6 +178,9 @@ const buildGroupDatabaseService = () => ({
  */
 const buildExceptionService = () => ({
   findForTask: jest.fn().mockResolvedValue([] as TaskOccurrenceException[]),
+  findOverride: jest
+    .fn()
+    .mockResolvedValue(null as TaskOccurrenceException | null),
   upsertOverride: jest.fn().mockResolvedValue({} as TaskOccurrenceException),
 });
 
@@ -914,6 +917,46 @@ describe('TaskService recurring-edit scopes', () => {
       });
 
       expect(exceptionService.upsertOverride).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('findOccurrenceException', () => {
+    it('validates ownership then returns the delegated override row', async () => {
+      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const { service, taskDb, exceptionService } = buildService(task);
+      const originalStart = zoned('2026-06-02T09:00');
+      const row = { id: 'exc-1' } as TaskOccurrenceException;
+
+      exceptionService.findOverride.mockResolvedValue(row);
+
+      const result = await service.findOccurrenceException(
+        'user-1',
+        'task-1',
+        originalStart,
+      );
+
+      // Ownership is asserted via findById (the anchor load) before reading.
+      expect(taskDb.findOneBy).toHaveBeenCalledWith({ id: 'task-1' });
+      expect(exceptionService.findOverride).toHaveBeenCalledWith(
+        'task-1',
+        originalStart,
+      );
+      expect(result).toBe(row);
+    });
+
+    it('returns null when the occurrence has no override', async () => {
+      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const { service, exceptionService } = buildService(task);
+
+      exceptionService.findOverride.mockResolvedValue(null);
+
+      const result = await service.findOccurrenceException(
+        'user-1',
+        'task-1',
+        zoned('2026-06-02T09:00'),
+      );
+
+      expect(result).toBeNull();
     });
   });
 

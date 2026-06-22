@@ -48,6 +48,49 @@ describe('TaskOccurrenceExceptionService', () => {
     });
   });
 
+  describe('findOverride', () => {
+    it('reads the single override row keyed by (taskId, originalStart)', async () => {
+      const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
+      const originalStart = new Date('2026-06-03T09:00:00.000Z');
+      const row = { id: 'exc-1' } as TaskOccurrenceException;
+
+      databaseService.findOneBy.mockResolvedValue(row);
+
+      const service = new TaskOccurrenceExceptionService(
+        databaseService as never,
+        taskDatabaseService as never,
+      );
+
+      const result = await service.findOverride('task-1', originalStart);
+
+      expect(databaseService.findOneBy).toHaveBeenCalledWith({
+        taskId: 'task-1',
+        originalStartAt: originalStart,
+      });
+      expect(result).toBe(row);
+    });
+
+    it('returns null when the occurrence has never been overridden', async () => {
+      const databaseService = buildDatabaseService();
+      const taskDatabaseService = buildTaskDatabaseService();
+
+      databaseService.findOneBy.mockResolvedValue(null);
+
+      const service = new TaskOccurrenceExceptionService(
+        databaseService as never,
+        taskDatabaseService as never,
+      );
+
+      const result = await service.findOverride(
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+      );
+
+      expect(result).toBeNull();
+    });
+  });
+
   describe('upsertOverride — insert path', () => {
     it('creates a new exception when none exists for the coordinate', async () => {
       const databaseService = buildDatabaseService();

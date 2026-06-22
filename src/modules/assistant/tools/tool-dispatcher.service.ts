@@ -25,13 +25,18 @@ import {
 import { ToolHandlerHost } from './tool.contract';
 import { ToolCall } from '@/modules/ai/ai.types';
 import { CalendarService } from '@/modules/calendar/calendar.service';
-import { ConflictPolicy, Task } from '@/modules/database/entities';
+import {
+  ConflictPolicy,
+  Task,
+  TaskOccurrenceException,
+} from '@/modules/database/entities';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 import {
   RecurringSeriesConflicts,
   TaskService,
 } from '@/modules/task/task.service';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
+import { OccurrenceOverrideChanges } from '@/modules/task-occurrence-exception/task-occurrence-exception.service';
 
 /** Maximum free slots returned by `find_free_slots` to keep results compact. */
 const MAX_FREE_SLOTS = 5;
@@ -845,11 +850,23 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const originalStart = target.originalStart as Date;
 
     if (scope === 'this') {
+      // Read the occurrence's existing override (if any) ONCE. A prior length
+      // change means the occurrence's true span differs from the master's, so
+      // both the conflict gate and the persisted result must use that true span
+      // — not the master duration — or a start-only move silently under-detects
+      // a clash and strands the old end (resizing or even inverting the window).
+      const existingException = await this.taskService.findOccurrenceException(
+        userId,
+        target.taskId,
+        originalStart,
+      );
+
       const moveConflict = await this.occurrenceMoveConflict(
         context,
         task,
         originalStart,
         parsed,
+        existingException,
       );
 
       if (moveConflict) return moveConflict;
@@ -858,17 +875,12 @@ export class ToolDispatcherService implements ToolHandlerHost {
         userId,
         target.taskId,
         originalStart,
-        {
-          ...(parsed.title !== undefined
-            ? { overrideTitle: parsed.title }
-            : {}),
-          ...(parsed.startAt !== undefined
-            ? { overrideStartAt: new Date(parsed.startAt) }
-            : {}),
-          ...(parsed.endAt !== undefined
-            ? { overrideEndAt: parsed.endAt ? new Date(parsed.endAt) : null }
-            : {}),
-        },
+        this.buildOccurrenceOverrideChanges(
+          task,
+          originalStart,
+          parsed,
+          existingException,
+        ),
       );
 
       return { content: 'Updated this occurrence.' };
@@ -1024,6 +1036,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
     task: Task,
     originalStart: Date,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+    existingException: TaskOccurrenceException | null,
   ): Promise<ToolDispatchOutcome | null> {
     // A non-time override (rename / completion / notes) never needs a conflict
     // check — only a real MOVE (a new start and/or end) can land on a commitment.
@@ -1037,14 +1050,19 @@ export class ToolDispatcherService implements ToolHandlerHost {
     // through and the clash is refused below with the deny restatement.
     if (this.isOverlapAuthorized(parsed.confirmOverlap, context)) return null;
 
-    // Resolve the effective post-move occurrence window. The new start is the
-    // override start when set, else the occurrence's current start
-    // (`originalStart`). The new end is the override end when set; otherwise, when
-    // only the start moved, the occurrence keeps the series duration
-    // (master end − master start) applied to the new start.
+    // The occurrence's CURRENT effective window — what a read shows — already
+    // reflects any prior override (a moved start, a changed length). Resolve the
+    // post-move window from THAT, not the master: the new start is the override
+    // start when set, else the current effective start; when only the start
+    // moved, the occurrence keeps its current TRUE span as it slides.
+    const current = this.effectiveOccurrenceWindow(
+      task,
+      originalStart,
+      existingException,
+    );
     const nextStart =
-      parsed.startAt !== undefined ? new Date(parsed.startAt) : originalStart;
-    const nextEnd = this.resolveOccurrenceMoveEnd(task, nextStart, parsed);
+      parsed.startAt !== undefined ? new Date(parsed.startAt) : current.start;
+    const nextEnd = this.resolveOccurrenceMoveEnd(current, nextStart, parsed);
 
     // No concrete timed window (end-less / all-day occurrence) ⇒ nothing can
     // overlap, mirroring `findOverlapping`'s [start, end) contract — proceed.
@@ -1068,16 +1086,45 @@ export class ToolDispatcherService implements ToolHandlerHost {
   }
 
   /**
+   * Resolves an occurrence's effective CURRENT window `[start, end)` — what a
+   * read would show — from the master anchor plus any existing override row,
+   * mirroring `RecurrenceRuleService.buildOccurrence`: the start is the override
+   * start when set (else the original slot); the end is the override end when set
+   * (else the master duration applied to that start). `end` is null only when the
+   * series is end-less (no duration to carry) AND no end override exists — an
+   * uncheckable, un-slideable window.
+   */
+  private effectiveOccurrenceWindow(
+    task: Task,
+    originalStart: Date,
+    existingException: TaskOccurrenceException | null,
+  ): { start: Date; end: Date | null } {
+    const start = existingException?.overrideStartAt ?? originalStart;
+    const masterDurationMs =
+      task.startAt && task.endAt
+        ? task.endAt.getTime() - task.startAt.getTime()
+        : null;
+    const end =
+      existingException?.overrideEndAt ??
+      (masterDurationMs !== null
+        ? new Date(start.getTime() + masterDurationMs)
+        : null);
+
+    return { start, end };
+  }
+
+  /**
    * Resolves the effective END of a `this`-scope occurrence move: the override end
    * when the model set `endAt` (a non-null new end), null when it explicitly
    * cleared the end (end-less ⇒ uncheckable), otherwise — when only the start
-   * moved — the occurrence's prior duration (master `endAt − startAt`) re-applied to
-   * the NEW start (`nextStart`), so the window keeps its length as it slides.
-   * Returns null when the master is not timed (no duration to carry), which the
-   * caller treats as "no window to check".
+   * moved — the occurrence's CURRENT effective duration (`current.end −
+   * current.start`, which already reflects any prior length override) re-applied
+   * to the NEW start, so the window keeps its TRUE length as it slides. Returns
+   * null when the occurrence has no current end (end-less series ⇒ nothing to
+   * carry), which the caller treats as "no window to check".
    */
   private resolveOccurrenceMoveEnd(
-    task: Task,
+    current: { start: Date; end: Date | null },
     nextStart: Date,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
   ): Date | null {
@@ -1085,11 +1132,60 @@ export class ToolDispatcherService implements ToolHandlerHost {
       return parsed.endAt ? new Date(parsed.endAt) : null;
     }
 
-    if (!task.startAt || !task.endAt) return null;
+    if (!current.end) return null;
 
-    const durationMs = task.endAt.getTime() - task.startAt.getTime();
+    const durationMs = current.end.getTime() - current.start.getTime();
 
     return new Date(nextStart.getTime() + durationMs);
+  }
+
+  /**
+   * Builds the occurrence-override changes for a `this`-scope edit. Title and an
+   * explicit `endAt` (set or cleared) pass straight through. The fix the common
+   * path does NOT need: a start-ONLY move on an occurrence that already carries an
+   * end override ALSO rewrites `overrideEndAt` to `newStart + currentSpan`, so the
+   * persisted window keeps its true length instead of stranding the prior end
+   * paired with the new start (which silently resizes — or inverts, when the new
+   * start passes the old end — the occurrence). With no prior end override the
+   * end is omitted exactly as before: a read derives it from the master duration
+   * off the new start.
+   */
+  private buildOccurrenceOverrideChanges(
+    task: Task,
+    originalStart: Date,
+    parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+    existingException: TaskOccurrenceException | null,
+  ): OccurrenceOverrideChanges {
+    const changes: OccurrenceOverrideChanges = {
+      ...(parsed.title !== undefined ? { overrideTitle: parsed.title } : {}),
+      ...(parsed.startAt !== undefined
+        ? { overrideStartAt: new Date(parsed.startAt) }
+        : {}),
+      ...(parsed.endAt !== undefined
+        ? { overrideEndAt: parsed.endAt ? new Date(parsed.endAt) : null }
+        : {}),
+    };
+
+    const isStartOnlyMove =
+      parsed.startAt !== undefined && parsed.endAt === undefined;
+
+    if (isStartOnlyMove && existingException?.overrideEndAt) {
+      const current = this.effectiveOccurrenceWindow(
+        task,
+        originalStart,
+        existingException,
+      );
+
+      if (current.end) {
+        const durationMs = current.end.getTime() - current.start.getTime();
+
+        changes.overrideEndAt = new Date(
+          new Date(parsed.startAt as string).getTime() + durationMs,
+        );
+      }
+    }
+
+    return changes;
   }
 
   /**

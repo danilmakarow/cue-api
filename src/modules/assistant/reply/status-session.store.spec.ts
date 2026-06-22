@@ -149,15 +149,15 @@ describe('StatusSessionStore (live-status handle, ADR 0012)', () => {
     const advanced = await service.advancePhase(
       'chat-1',
       'turn-1',
-      StatusSessionPhase.Streaming,
+      StatusSessionPhase.Working,
     );
 
-    expect(advanced?.phase).toBe(StatusSessionPhase.Streaming);
+    expect(advanced?.phase).toBe(StatusSessionPhase.Working);
 
     // The persisted handle reflects the new phase.
     const reread = await service.get('chat-1', 'turn-1');
 
-    expect(reread?.phase).toBe(StatusSessionPhase.Streaming);
+    expect(reread?.phase).toBe(StatusSessionPhase.Working);
   });
 
   it('advancePhase on a missing session is a null no-op', async () => {

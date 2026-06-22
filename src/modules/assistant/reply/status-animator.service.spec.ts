@@ -437,9 +437,9 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
     expect(sessions.clear).toHaveBeenCalledWith('chat-1', 'turn-1');
   });
 
-  describe('draft collapse on finalize (FIX 1 — no lingering streamed duplicate)', () => {
-    it('pushes ONE final empty-text draft frame on finalize for a draft surface (retracts the streamed preview)', async () => {
-      const { service, vendor } = buildAnimator();
+  describe('finalize (ADR 0052 — no draft collapse)', () => {
+    it('pushes NO extra draft frame on finalize — the real reply supersedes the preview', async () => {
+      const { service, vendor, sessions } = buildAnimator();
 
       const animation = await service.begin({
         vendorChatId: 'chat-1',
@@ -448,27 +448,23 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
         languageCode: 'en',
       });
 
-      // Stream an answer into the draft (the duplicate the real message would echo).
-      await animation.streamAnswer('Booking the dentist');
-      await jest.advanceTimersByTimeAsync(1000);
+      // Run the loading animation so the draft surface is live with status frames.
+      await animation.startLoading();
+      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
 
       const beforeFinalize = vendor.sendMessageDraft.mock.calls.length;
 
       await animation.finalize();
+      await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs * 2);
 
-      // Finalize emitted exactly one more draft frame, and it is empty-text — the
-      // collapse that retracts the streamed preview once the real message lands.
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(
-        beforeFinalize + 1,
-      );
-
-      const collapseFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1];
-
-      expect(collapseFrame?.text).toBe('');
-      expect(collapseFrame?.draftId).toBeGreaterThan(0);
+      // No empty-text "collapse" frame (the old FIX 1 artifact that surfaced as a
+      // blank bubble) and no late ticks: finalize only tears down the timers and
+      // clears the session. The real `sendMessage` (L9) supersedes the preview.
+      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
+      expect(sessions.clear).toHaveBeenCalledWith('chat-1', 'turn-1');
     });
 
-    it('does NOT push a collapse frame for a non-private (static-line) surface', async () => {
+    it('never touches the draft API for a non-private (static-line) surface', async () => {
       const { service, vendor } = buildAnimator();
 
       const animation = await service.begin({
@@ -480,12 +476,11 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
 
       await animation.finalize();
 
-      // No draft surface ⇒ nothing to collapse; the draft API is never touched.
       expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
     });
 
-    it('degrades (never throws) when the collapse draft send fails', async () => {
-      const { service, vendor } = buildAnimator();
+    it('degrades (never throws) when clearing the session fails', async () => {
+      const { service, sessions } = buildAnimator();
 
       const animation = await service.begin({
         vendorChatId: 'chat-1',
@@ -494,83 +489,14 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
         languageCode: 'en',
       });
 
-      // The collapse send rejects — finalize must still resolve and clear.
-      vendor.sendMessageDraft.mockRejectedValue(new Error('telegram 500'));
+      // The session clear rejects — finalize must still resolve.
+      sessions.clear.mockRejectedValue(new Error('redis down'));
 
       await expect(animation.finalize()).resolves.toBeUndefined();
     });
   });
 
-  describe('streaming + recaps (Story 13 / ADR 0041)', () => {
-    it('streams the answer snapshot into the draft through the throttle and stops the loading loop', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      await animation.startLoading();
-
-      // The final round begins streaming — the latest snapshot is rendered (flush
-      // the throttle's trailing-coalesced frame so it reaches the surface).
-      await animation.streamAnswer('Booking the dentist');
-      await jest.advanceTimersByTimeAsync(1000);
-
-      const latest = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-      expect(latest).toBe('Booking the dentist');
-
-      // Streaming stopped the loading timers: no cycling-word frame supersedes
-      // the streamed snapshot on subsequent ticks.
-      const callsAfterStream = vendor.sendMessageDraft.mock.calls.length;
-
-      await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs * 2);
-
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(callsAfterStream);
-
-      await animation.finalize();
-    });
-
-    it('coalesces rapid stream snapshots through the one throttle (never per-token to the vendor)', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      const sendsBefore = vendor.sendMessageDraft.mock.calls.length;
-
-      // Fire many snapshots back-to-back (a per-token stream) WITHIN one throttle
-      // window, then flush. The throttle coalesces them so the vendor sees at most
-      // one send for the whole burst — never one per token.
-      await animation.streamAnswer('a');
-      await animation.streamAnswer('ab');
-      await animation.streamAnswer('abc');
-      await animation.streamAnswer('abcd');
-      await animation.streamAnswer('abcde');
-
-      // Flush the trailing-coalesced frame.
-      await jest.advanceTimersByTimeAsync(1000);
-
-      const burstSends =
-        vendor.sendMessageDraft.mock.calls.length - sendsBefore;
-
-      // Far fewer vendor sends than the 5 snapshots — the throttle is the chokepoint.
-      expect(burstSends).toBeGreaterThanOrEqual(1);
-      expect(burstSends).toBeLessThanOrEqual(2);
-
-      // The LATEST snapshot wins (coalescing keeps only the newest full-text frame).
-      expect(vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text).toBe('abcde');
-
-      await animation.finalize();
-    });
-
+  describe('recaps (Story 13 / ADR 0041, narrowed by ADR 0052)', () => {
     it('renders a per-round recap BELOW the status line as an HTML blockquote composite (not a replacement) and ignores an empty recap', async () => {
       const { service, vendor } = buildAnimator();
 
@@ -662,18 +588,24 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       );
       expect(tickAfterRecap?.format).toBe('html');
 
-      // finalize stops the loop (its own empty-text collapse frame is the last one)
-      // — no animation frames after teardown.
+      // finalize stops the loop — no animation frames after teardown, and (ADR
+      // 0052) NO empty-text collapse frame: the last draft frame remains the recap
+      // composite, not a blank bubble.
+      const beforeFinalize = vendor.sendMessageDraft.mock.calls.length;
+      const lastFrameText = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
+
       await animation.finalize();
 
-      const afterFinalize = vendor.sendMessageDraft.mock.calls.length;
-
-      // The very last frame finalize emitted is the empty-text collapse (FIX 1).
-      expect(vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text).toBe('');
+      // Finalize emitted no further draft frame (no collapse).
+      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
+      expect(vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text).toBe(
+        lastFrameText,
+      );
+      expect(lastFrameText).not.toBe('');
 
       await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs * 2);
 
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(afterFinalize);
+      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
     });
 
     it('HTML-escapes the recap text inside the blockquote (degrade-safe; no tag injection)', async () => {
@@ -702,55 +634,7 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       await animation.finalize();
     });
 
-    it('streamAnswer REPLACES the composite with the streamed answer (status + recap gone)', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-      await animation.showRecap('Checking Thursday afternoon');
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      // The final answer streams — it replaces the composite outright.
-      await animation.streamAnswer('Booking the dentist');
-      await jest.advanceTimersByTimeAsync(1000);
-
-      const streamed = vendor.sendMessageDraft.mock.calls.at(-1)?.[1];
-
-      expect(streamed?.text).toBe('Booking the dentist');
-      // The composite (status + recap blockquote) is gone — pure streamed text.
-      expect(streamed?.text).not.toContain('<blockquote>');
-
-      await animation.finalize();
-    });
-
-    it('does not stream into a non-private surface (drafts are private-only) and never throws', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-grp',
-        turnId: 'turn-1',
-        chatType: ChatType.Group,
-        languageCode: 'en',
-      });
-
-      await expect(
-        animation.streamAnswer('streamed answer'),
-      ).resolves.toBeUndefined();
-
-      // No draft on a non-private surface.
-      expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
-
-      await animation.finalize();
-    });
-
-    it('is a no-op once finalized (a late stream frame never re-posts)', async () => {
+    it('is a no-op once finalized (a late recap frame never re-posts)', async () => {
       const { service, vendor } = buildAnimator();
 
       const animation = await service.begin({
@@ -764,7 +648,6 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
 
       const afterFinalize = vendor.sendMessageDraft.mock.calls.length;
 
-      await animation.streamAnswer('too late');
       await animation.showRecap('also too late');
       await jest.advanceTimersByTimeAsync(1000);
 
