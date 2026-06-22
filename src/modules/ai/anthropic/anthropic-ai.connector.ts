@@ -734,7 +734,7 @@ export class AnthropicAiConnector extends AiConnector {
 
     const message = await stream.finalMessage();
 
-    return this.toCompletionResult(message);
+    return this.toCompletionResult(message as Anthropic.Messages.Message);
   }
 
   /**
