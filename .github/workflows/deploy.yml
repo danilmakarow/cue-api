@@ -56,7 +56,7 @@ jobs:
       ECR_REPO: cue-api
       INSTANCE_TAG: cue-api # EC2 Name tag the deploy targets
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Target tag = the manual input if given, else this commit's SHA. Passed via env (not inline
       # interpolation) so a dispatch input can't inject into the shell.
@@ -72,7 +72,7 @@ jobs:
           echo "Target image tag: ${TAG}"
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
