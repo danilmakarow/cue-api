@@ -110,8 +110,14 @@ describe('KeyboardActionService', () => {
   it("renders today's schedule from findOccurrencesInRange as a width-bounded ASCII calendar and records the button line", async () => {
     const harness = buildHarness();
 
+    // Pin the occurrence to TODAY at 09:00 UTC: the renderer only shows the
+    // current day's window (in the user tz), so a hardcoded calendar date makes
+    // the test pass only on that day. Deriving it from "now" keeps it green every
+    // day instead of silently breaking the deploy gate once the date moves on.
+    const todayAtNine = new Date();
+    todayAtNine.setUTCHours(9, 0, 0, 0);
     harness.scheduleReader.occurrencesInRange.mockResolvedValue([
-      timedOccurrence('Standup', new Date('2026-06-21T09:00:00.000Z')),
+      timedOccurrence('Standup', todayAtNine),
     ]);
 
     await harness.service.handleKeyboardAction(USER, {
