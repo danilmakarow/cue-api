@@ -115,6 +115,7 @@ describe('KeyboardActionService', () => {
     // the test pass only on that day. Deriving it from "now" keeps it green every
     // day instead of silently breaking the deploy gate once the date moves on.
     const todayAtNine = new Date();
+
     todayAtNine.setUTCHours(9, 0, 0, 0);
     harness.scheduleReader.occurrencesInRange.mockResolvedValue([
       timedOccurrence('Standup', todayAtNine),

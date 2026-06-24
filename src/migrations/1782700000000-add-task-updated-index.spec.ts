@@ -53,9 +53,9 @@ describe('AddTaskUpdatedIndex1782700000000', () => {
     expect(
       upStatements.some((sql) => sql.includes('IDX_task_recurring_anchor')),
     ).toBe(false);
-    expect(
-      upStatements.some((sql) => sql.includes('recurrenceRuleId')),
-    ).toBe(false);
+    expect(upStatements.some((sql) => sql.includes('recurrenceRuleId'))).toBe(
+      false,
+    );
   });
 
   it('down drops only the composite index it owns (reversible)', async () => {
