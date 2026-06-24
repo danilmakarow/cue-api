@@ -7,9 +7,8 @@
  * Selection follows the user's MESSAGE first (v2 Task 4 / ADR 0051): the
  * message's own language drives the loading words, with the Telegram
  * `language_code` as the fallback and `en` as the final default. We support ONLY
- * `ru` / `uk` / `en`; everything else collapses to `en`. The animating trailing
- * dots are appended by the animator, not here — these are the bare evocative
- * words.
+ * `ru` / `uk` / `en`; everything else collapses to `en`. The animator (ADR 0059)
+ * rotates these bare words through the ephemeral `sendMessageDraft` surface.
  */
 
 /** The three locales the status vocabulary is authored for. */
@@ -19,38 +18,39 @@ export type StatusLocale = 'en' | 'uk' | 'ru';
 export const DEFAULT_STATUS_LOCALE: StatusLocale = 'en';
 
 /**
- * The terminal-style braille spinner frames (R1 / ADR 0057) cycled on the status
- * surface to animate the loading line in place. The classic 10-frame set; index
- * `frame mod 10` selects the current glyph. Authored here (next to the loading
- * vocabulary) so the rendering helper stays pure and dependency-free.
+ * The localized "voice is being transcribed" variants, shown on the status draft
+ * while STT runs (before the loading-word rotation begins, ADR 0059). Several
+ * natural phrasings per locale so a follow-up voice note does not always greet the
+ * user with the exact same line; {@link voiceListeningPhrase} picks one.
  */
-export const SPINNER_FRAMES = [
-  '⠋',
-  '⠙',
-  '⠹',
-  '⠸',
-  '⠼',
-  '⠴',
-  '⠦',
-  '⠧',
-  '⠇',
-  '⠏',
-] as const;
-
-/**
- * The localized "voice is being transcribed" line, shown on the status surface
- * while STT runs (before the normal loading animation begins).
- */
-const VOICE_LISTENING: Record<StatusLocale, string> = {
-  en: 'Listening to your beautiful voice',
-  uk: 'Слухаю ваш чудовий голос',
-  ru: 'Слушаю ваш прекрасный голос',
+const VOICE_LISTENING: Record<StatusLocale, readonly string[]> = {
+  en: [
+    'Listening to your beautiful voice',
+    'Lending you my ear',
+    'All ears',
+    'Tuning in to your voice',
+  ],
+  uk: [
+    'Вчуваюся у ваш голос',
+    'Ловлю ваш шепіт',
+    'Слухаю мов босорканя',
+    'Дослухаюсь до вашого слова',
+    'Прихиляю вухо до вас',
+  ],
+  ru: [
+    'Слушаю вас',
+    'Обратилась в слух',
+    'Ловлю каждое слово',
+    'Вся внимание',
+    'Внимаю каждому слову',
+  ],
 };
 
 /**
  * The cycling loading words per locale (Appendix A). The animator swaps the word
- * every ~5 s, never repeating the immediately-previous one. Bare words — the
- * animator appends the trailing dots.
+ * every ~5 s, never repeating the immediately-previous one. Bare words with NO
+ * trailing punctuation — Telegram's draft surface renders them as-is and adds its
+ * own shimmer, so the animator appends nothing.
  */
 const LOADING_WORDS: Record<StatusLocale, readonly string[]> = {
   en: [
@@ -86,68 +86,44 @@ const LOADING_WORDS: Record<StatusLocale, readonly string[]> = {
     'Manifesting',
   ],
   uk: [
-    'Думаю',
-    'Готую',
-    'Заварюю',
-    'Планую',
-    'Міркую',
-    'Чаклую',
-    'Рахую',
-    'Мрію',
-    'Плету',
-    'Складаю',
-    'Креслю',
-    'Майструю',
-    'Зважую',
-    'Вигадую',
-    'Кумекаю',
-    'Метикую',
-    'Збираю',
-    'Налаштовую',
-    'Компоную',
-    'Розплутую',
-    'Шукаю',
-    'Прикидаю',
-    'Обмірковую',
     'Ворожу',
-    'Фантазую',
-    'Мудрую',
-    'Накидаю',
-    'Узгоджую',
-    'Творю',
-    'Готуюся',
+    'Чаклую',
+    'Мольфарую',
+    'Чарую',
+    'Заклинаю',
+    'Варю зілля',
+    'Ворожу на воску',
+    'Виливаю на воску',
+    'Кладу замову',
+    'Шепчу замову',
+    'Примовляю',
+    'Шепчу примовку',
+    'Шепчу до зілля',
+    'Виливаю переполох',
+    'Розкладаю карти',
+    'Гадаю по руці',
+    'Зрікаю хворобу',
+    'Знаю шептати',
   ],
   ru: [
-    'Думаю',
-    'Готовлю',
-    'Завариваю',
-    'Планирую',
-    'Кумекаю',
     'Колдую',
-    'Считаю',
-    'Мечтаю',
-    'Плету',
-    'Собираю',
-    'Черчу',
-    'Мастерю',
-    'Взвешиваю',
-    'Придумываю',
-    'Соображаю',
-    'Прикидываю',
-    'Размышляю',
-    'Настраиваю',
-    'Компоную',
-    'Распутываю',
-    'Ищу',
     'Ворожу',
-    'Фантазирую',
-    'Мудрю',
-    'Набрасываю',
-    'Согласую',
-    'Творю',
+    'Завариваю',
+    'Кудесничаю',
+    'Химичу',
+    'Шаманю',
     'Стряпаю',
     'Замышляю',
-    'Химичу',
+    'Соображаю',
+    'Прикидываю',
+    'Кумекаю',
+    'Мудрю',
+    'Колдую над ответом',
+    'Помешиваю варево',
+    'Шепчу заклинание',
+    'Сверяюсь со звёздами',
+    'Заглядываю в котелок',
+    'Творю чудеса',
   ],
 };
 
@@ -269,10 +245,23 @@ export const resolveVoiceStatusLocale = (
 };
 
 /**
- * Returns the localized voice-listening line for a resolved locale.
+ * Picks a localized voice-listening line for a resolved locale (ADR 0059). Chooses
+ * at random among the locale's several natural variants via the injected `random`
+ * (0 ≤ r < 1), so tests can pin a deterministic variant; the value is clamped to a
+ * valid index so a `random()` of exactly 1 never overruns the array.
  */
-export const voiceListeningPhrase = (locale: StatusLocale): string =>
-  VOICE_LISTENING[locale];
+export const voiceListeningPhrase = (
+  locale: StatusLocale,
+  random: () => number = Math.random,
+): string => {
+  const variants = VOICE_LISTENING[locale];
+  const index = Math.min(
+    variants.length - 1,
+    Math.floor(random() * variants.length),
+  );
+
+  return variants[index];
+};
 
 /**
  * Picks the next loading word for a locale, never returning the immediately
@@ -298,23 +287,4 @@ export const nextLoadingWord = (
   const index = Math.min(pool.length - 1, Math.floor(random() * pool.length));
 
   return pool[index];
-};
-
-/**
- * Builds the animated loading line for a given spinner tick (R1 / ADR 0057):
- * prepends the current {@link SPINNER_FRAMES} glyph to the (already-localized)
- * loading `word`. Pure + dependency-free like {@link nextLoadingWord} so the
- * frame cadence is unit-testable; the caller animates ONE captured word across
- * ticks rather than re-picking. NO trailing ellipsis — the rotating spinner
- * frame replaces the old static dots, which fought Telegram's own indicator.
- * `frameIndex` is wrapped modulo the frame count, so any monotonically growing
- * tick counter is a valid input.
- */
-export const spinnerLoadingLine = (
-  word: string,
-  frameIndex: number,
-): string => {
-  const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
-
-  return `${frame} ${word}`;
 };

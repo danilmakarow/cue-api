@@ -1,7 +1,10 @@
 import { getQueueToken } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 
-import { CapturedSend } from './e2e/capturing-vendor.connector';
+import {
+  CapturedSend,
+  CapturingVendorConnector,
+} from './e2e/capturing-vendor.connector';
 import { E2eHarness, SeededFixtures } from './e2e/harness';
 import { completion, toolCall } from './e2e/scripted-ai.connector';
 import { AiStopReason } from '@/modules/ai/ai.types';
@@ -78,7 +81,7 @@ describe('Debounce queue-after under REAL BullMQ (FIX 1)', () => {
     await harness.reset();
   });
 
-  /** Reads the text off a captured reply (the morph `editMessageText`, ADR 0053). */
+  /** Reads the text off a captured reply (the private finalised-answer send, ADR 0059). */
   const replyTextOf = (send: CapturedSend): string =>
     (send.payload as { text: string }).text;
 
@@ -143,12 +146,14 @@ describe('Debounce queue-after under REAL BullMQ (FIX 1)', () => {
     await userLock.releaseHandle(lockHandle);
 
     // The queued-after turn's confirmation — driven ONLY by the queue-after re-poll
-    // (no second webhook was posted).
-    const reply = await harness.vendor.nextSend();
+    // (no second webhook was posted). The chat is PRIVATE, so under ADR 0059 the
+    // finalised answer is a FRESH sendMessage that supersedes the draft; the morph
+    // -only nextSend() never fires on it, so it is awaited via the predicate seam.
+    const reply = await harness.vendor.nextReply(
+      CapturingVendorConnector.isPrivateAnswer,
+    );
 
-    // ADR 0053: the continued turn morphs its loading line into the answer via
-    // editMessageText (not a fresh sendMessage).
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/second task/i);
 
     // The write committed — the queued-after turn really ran after the lock freed.

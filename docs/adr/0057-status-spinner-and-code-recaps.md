@@ -1,6 +1,6 @@
 # 0057 — status-spinner-and-code-recaps
 
-- **Status**: Accepted
+- **Status**: Superseded by [0059](0059-revert-to-telegram-sendmessagedraft-streaming.md) (the ASCII spinner and `<pre>` code-block status rendering are removed; native draft shimmer replaces the hand-rolled animation)
 - **Date**: 2026-06-24
 - **Deciders**: Danil, assistant
 

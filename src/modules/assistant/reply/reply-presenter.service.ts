@@ -55,10 +55,13 @@ export class ReplyPresenter {
    * gets the answer rather than silence. Returns the vendor message id of the
    * delivered message, or null when even the plain retry failed.
    *
-   * When `editMessageId` is given (ADR 0053), the reply MORPHS that message — the
-   * turn's one live status message is edited in place into the final answer, so
-   * the user only ever sees a single message (no second bubble). See
-   * {@link morphInto} for the edit + fallback chain.
+   * `editMessageId` is the surface seam between the two status strategies (ADR
+   * 0059). A PRIVATE turn drives an ephemeral draft and has NO real status message,
+   * so the turn runner passes a null id here and the answer is a FRESH `sendMessage`
+   * (the draft self-expires and Telegram replaces the preview with the delivered
+   * message). A NON-PRIVATE turn keeps the ADR 0053 fallback — a real status message
+   * whose id is passed here so the reply MORPHS it in place. See {@link morphInto}
+   * for the edit + fallback chain.
    */
   async sendText(
     vendorChatId: string,
@@ -207,12 +210,15 @@ export class ReplyPresenter {
   /**
    * Sends an `ask_user` question: a plain text message when there are no options,
    * else an inline keyboard with one button per option (callback data
-   * `ask:<pendingQuestionId>:<optId>`). Each path swallows a send failure with a
+   * `ask:<pendingQuestionId>:<optId>`). A draft cannot carry inline buttons, so a
+   * PRIVATE turn passes a null `editMessageId` and the question is a FRESH real
+   * `sendMessage` / `sendActions` (ADR 0059); a NON-PRIVATE turn keeps the ADR 0053
+   * morph onto its real status message. Each path swallows a send failure with a
    * log (mirroring {@link sendText}) and returns the outbound vendor message id
    * (or null) so the persisted assistant message can reference it AND the orch can
    * capture it for the answered-question morph (R3 / ADR 0058). The fresh-keyboard
-   * fallback now ALSO returns its `sendActions` message id (was null) so Feature 1
-   * works on BOTH the morph and fresh-keyboard paths.
+   * fallback ALSO returns its `sendActions` message id so Feature 1 works on BOTH
+   * the morph and fresh-keyboard paths.
    */
   async sendQuestion(
     vendorChatId: string,

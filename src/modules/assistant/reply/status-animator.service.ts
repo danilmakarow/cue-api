@@ -1,11 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { detectMessageLanguage } from './detect-message-language';
+import { DraftThrottle } from './draft-throttle';
 import { escapeHtml } from './markdown-to-telegram-html';
 import {
   nextLoadingWord,
   resolveVoiceStatusLocale,
-  spinnerLoadingLine,
   StatusLocale,
   voiceListeningPhrase,
 } from './status-phrases';
@@ -24,15 +24,41 @@ import {
   SendTarget,
 } from '@/modules/external-vendor/external-vendor.types';
 
+/** FNV-1a 32-bit offset basis — the standard hash seed. */
+const FNV_OFFSET_BASIS = 0x811c9dc5;
+
+/** FNV-1a 32-bit prime multiplier. */
+const FNV_PRIME = 0x01000193;
+
 /**
- * Minimum gap (ms) between two STREAMED answer edits (R3 / ADR 0058). Token
- * snapshots arrive far faster than Telegram's edit flood-control tolerates, so we
- * coalesce them and push at most one edit per this window (~1/sec), always
- * flushing the latest pending snapshot at {@link StatusAnimation.settle}. Reverses
- * ADR 0053's calm-single-edit intent for the answer surface while keeping the
- * one-message / no-draft guarantee.
+ * Strips any trailing punctuation (comma, period, ellipsis — `…` or `...`) and
+ * surrounding whitespace from a recap before it is escaped into the bare draft
+ * text (ADR 0059). Telegram renders the draft bare and adds its own shimmer,
+ * so a model-authored recap that ends in a comma/period/ellipsis would otherwise
+ * read as a stray dangling mark; this normalizes it to a clean bare line.
  */
-const STREAM_EDIT_MIN_INTERVAL_MS = 1000;
+const stripTrailingPunctuation = (text: string): string =>
+  text.replace(/[.,…\s]+$/u, '');
+
+/**
+ * Derives a stable, deterministic NON-ZERO 32-bit draft id from a turn key (the
+ * `turnId` / correlation id) via FNV-1a (ADR 0059). Telegram requires a non-zero
+ * integer draft id and animates the diffs when the SAME id is reused across a
+ * turn's `sendMessageDraft` calls; deriving it from the turn key means a re-opened
+ * (idempotent) surface computes the identical id without persisting it first. A
+ * hash that lands on 0 is bumped to 1 so the non-zero contract always holds.
+ */
+const deriveDraftId = (turnKey: string): number => {
+  let hash = FNV_OFFSET_BASIS;
+
+  for (let index = 0; index < turnKey.length; index += 1) {
+    hash ^= turnKey.charCodeAt(index);
+    // `Math.imul` keeps the multiply in 32-bit space; `>>> 0` coerces to unsigned.
+    hash = Math.imul(hash, FNV_PRIME) >>> 0;
+  }
+
+  return hash === 0 ? 1 : hash;
+};
 
 /**
  * Inputs to open a live-status surface for one turn. `turnId` keys the Redis
@@ -71,67 +97,83 @@ export interface StatusAnimationInput {
 }
 
 /**
- * A live per-turn status handle (ADR 0053, superseding the draft approach of ADRs
- * 0012/0041/0050/0052). Owns the ONE real message for the turn: posts a loading
- * line on {@link open}, edits it with per-round recaps via {@link showRecap}, and
- * exposes its id ({@link messageId}) so the turn's final reply can edit — "morph"
- * — the SAME message into the answer. The user therefore only ever sees ONE
- * message that changes in place: no ephemeral draft (which could not be deleted
- * and lingered as a ~30 s ghost).
+ * A live per-turn status handle (ADR 0059, reversing ADR 0053's morph + ADR 0057's
+ * ASCII spinner back to native Telegram message drafts). The surface depends on the
+ * chat kind:
  *
- * R1 / ADR 0057 re-introduces a SINGLE, well-behaved animation: an ASCII braille
- * spinner that ticks the captured loading word in place (the loading line AND
- * recaps are rendered as an HTML `<pre>` code block). Unlike the old dot/word
- * animation it does NOT fight Telegram's own indicator — it edits the real
- * message at a ~1 s cadence (never sub-second, to dodge 429 flood-control) and is
- * STOPPED before the reply morphs the answer.
+ * - **PRIVATE chats** drive a single EPHEMERAL Telegram draft (`sendMessageDraft`)
+ *   keyed by a stable non-zero {@link draftId} derived from the turn id. A draft is
+ *   a ~30 s client-side preview that Telegram animates natively when re-called with
+ *   the same id, carries NO buttons, and CANNOT be deleted — it self-expires. The
+ *   lifecycle is: THINKING (a rotating loading word as PLAIN text, each rotation a
+ *   draft re-send that also keeps the draft alive) → optional VOICE pre-STT
+ *   ("Listening" plain line) → WORKING (ONLY the BARE recap text, no word above
+ *   it; until the first recap the bare rotating word) → ANSWERING (the streamed
+ *   answer snapshot as plain HTML, throttled via
+ *   {@link DraftThrottle}). The turn is FINALISED by a fresh real `sendMessage`
+ *   performed by the {@link ReplyPresenter}; the draft then self-expires. So
+ *   {@link messageId} is ALWAYS null for a private turn — there is no real status
+ *   message to morph; the reply sends fresh.
  *
- * Lifecycle: {@link open} → {@link showVoiceListening} (optional, pre-STT) →
- * {@link startLoading} (arms the spinner) → {@link showRecap} (between rounds;
- * stops the spinner) → the reply morphs the message (in the turn runner via the
- * presenter) → {@link finalize} (stops the spinner + clears the Redis session) in
- * the caller's `finally`. The spinner is ALSO stopped at the top of
- * {@link settle} so it is dead before the morph edits the answer. Every
- * vendor/Redis call is wrapped so a fault DEGRADES the status surface and never
- * throws into the turn (the webhook queue is `attempts:1`); if the status message
- * never lands the turn still answers by sending a fresh reply message instead of
- * morphing.
+ * - **NON-PRIVATE chats** keep the ADR 0053 fallback: ONE real message posted on
+ *   {@link open}, edited with per-round recaps, and finally MORPHED into the answer
+ *   by the reply (so {@link messageId} returns the real id). Drafts are private-chat
+ *   only on the Bot API, so groups degrade to the in-place edit surface.
+ *
+ * Lifecycle (both surfaces): {@link open} → {@link showVoiceListening} (optional,
+ * pre-STT) → {@link startLoading} (arms the loading-word rotation, private only) →
+ * {@link showRecap} (between rounds) → {@link streamAnswer} (answer tokens) → the
+ * reply sends/morphs the answer (in the turn runner via the presenter) →
+ * {@link finalize} in the caller's `finally`. {@link settle} drains in-flight work
+ * before the reply. Every vendor/Redis call is wrapped so a fault DEGRADES the
+ * status surface and never throws into the turn (the webhook queue is `attempts:1`).
  */
 export class StatusAnimation {
   private readonly logger = new Logger(StatusAnimation.name);
 
   private readonly target: SendTarget;
 
+  private readonly isPrivate: boolean;
+
+  private readonly draftId: number;
+
+  // Coalescing rate limiter for the private-chat draft updates (ADR 0059 / ADR
+  // 0012). Streamed-answer snapshots arrive far faster than Telegram's draft
+  // re-call tolerance, so each draft send routes through this central cap (~2–5/s,
+  // clamped). Constructed with the configured cap. Unused on the non-private edit
+  // fallback but harmless there.
+  private readonly draftThrottle: DraftThrottle;
+
   private session: StatusSession | null = null;
 
   private finalized = false;
 
-  // Serializes status edits (recap / voice line / spinner frame) so they apply in
-  // dispatch order AND can be drained via {@link settle} before the reply morphs
-  // the same message — closing the race where a late in-flight edit lands after,
-  // and reverts, the final answer (ADR 0053).
+  // Serializes status updates (recap / voice line / loading-word rotation /
+  // streamed answer) so they apply in dispatch order AND can be drained via
+  // {@link settle} before the reply sends/morphs the answer — closing the race
+  // where a late in-flight update lands after, and reverts, the final answer.
   private pendingEdit: Promise<void> = Promise.resolve();
 
-  // The ASCII spinner (R1 / ADR 0057). `spinnerTimer` is a `setInterval` handle
-  // (unref'd so it never holds the process open), `spinnerFrame` the monotonically
-  // growing tick counter, and `currentWord` the ONE loading word captured at
-  // arm time so each tick animates the same word rather than re-picking.
-  private spinnerTimer: NodeJS.Timeout | null = null;
-
-  private spinnerFrame = 0;
+  // The loading-word rotation (ADR 0059). `wordTimer` is a `setInterval` handle
+  // (unref'd so it never holds the process open), and `currentWord` the loading
+  // word currently shown — each tick picks a fresh word (never the previous one)
+  // and re-sends the draft (which doubles as the ~30 s draft keepalive).
+  private wordTimer: NodeJS.Timeout | null = null;
 
   private currentWord: string | null = null;
 
-  // Answer token streaming (R3 / ADR 0058). `lastStreamEditAt` is the
-  // `Date.now()` of the last streamed edit actually pushed, used to THROTTLE
-  // edits to <= ~1/sec (dodging Telegram edit flood-control); `pendingStreamText`
-  // holds the latest coalesced snapshot not yet pushed (a throttled-away frame),
-  // flushed by the next un-throttled call AND by {@link settle} so the latest
-  // streamed text always reaches the chain before the reply morph. `streaming`
-  // flips true on the first token so the spinner is stopped exactly once.
-  private lastStreamEditAt = 0;
+  // The latest recap (ADR 0059): once set, the WORKING-phase draft shows ONLY this
+  // recap as BARE, UNFORMATTED text (no `<blockquote>`, no loading word above it).
+  // Null until the first recap; cleared once the answer starts streaming.
+  private latestRecap: string | null = null;
 
-  private pendingStreamText: string | null = null;
+  // Answer token streaming (ADR 0059). `latestSnapshot` holds the most recent FULL
+  // answer text (never nulled until finalize) so {@link settle} can always re-send
+  // the final state directly, bypassing the throttle's in-window coalescing — a
+  // snapshot held only inside the throttle's pending job would otherwise be dropped
+  // at drain time. `streaming` flips true on the first token so the loading-word
+  // rotation is stopped exactly once (the answer is now the surface).
+  private latestSnapshot: string | null = null;
 
   private streaming = false;
 
@@ -140,47 +182,60 @@ export class StatusAnimation {
     private readonly statusSessions: StatusSessionStore,
     private readonly input: StatusAnimationInput,
     private readonly locale: StatusLocale,
-    private readonly spinnerIntervalMs: number,
+    private readonly wordIntervalMs: number,
+    draftUpdatesPerSecond: number,
   ) {
-    this.target = { vendorChatId: input.vendorChatId };
+    const chatType = input.chatType ?? ChatType.Private;
+
+    this.target = { vendorChatId: input.vendorChatId, chatType };
+    this.isPrivate = chatType === ChatType.Private;
+    this.draftId = deriveDraftId(input.turnId);
+    this.draftThrottle = new DraftThrottle(draftUpdatesPerSecond);
   }
 
   /**
-   * The real message id of this turn's status message, or null when none was
-   * posted (the initial send failed). The reply path reads this to edit (morph)
-   * the same message into the answer; a null means it sends a fresh message.
+   * The real message id of this turn's status message, or null. NON-PRIVATE turns
+   * return the id of the one real status message so the reply MORPHS it (ADR 0053
+   * fallback). PRIVATE turns ALWAYS return null — the draft is ephemeral and has no
+   * real message, so the reply sends a FRESH final `sendMessage` (ADR 0059).
    */
   get messageId(): string | null {
+    if (this.isPrivate) {
+      return null;
+    }
+
     return this.session?.vendorMessageId ?? null;
   }
 
   /**
-   * Drains any in-flight status edit (the serialized recap / voice-line edits) so
-   * the caller can MORPH the same message into the final reply without a late
-   * recap edit landing after — and reverting — the answer (ADR 0053). The turn
-   * runner awaits this after the loop, before the reply. Never throws: the edit
-   * chain swallows its own faults.
+   * Drains any in-flight status update (the serialized recap / voice-line / draft
+   * edits) so the caller can send/morph the final reply without a late update
+   * landing after — and reverting — the answer. The turn runner awaits this after
+   * the loop, before the reply. Never throws: the update chain swallows its own
+   * faults.
    */
   async settle(): Promise<void> {
-    // Stop the spinner FIRST so no further frame is queued onto the chain while
-    // we drain it — the spinner MUST be dead before the reply morphs the answer
-    // (R1 / ADR 0057), otherwise a late frame would revert it.
-    this.stopSpinner();
+    // Stop the loading-word rotation FIRST so no further word is queued onto the
+    // chain while we drain it — the rotation MUST be dead before the reply sends
+    // the answer, otherwise a late word would overwrite the draft preview.
+    this.stopWordRotation();
 
-    // Flush the latest coalesced streamed snapshot (R3 / ADR 0058) so the most
-    // recent answer text reaches the chain before the reply morph supersedes it;
-    // a throttled-away frame would otherwise be dropped silently.
-    this.flushStream();
+    // Cancel the throttle (drop any pending trailing flush + its timer) and re-send
+    // the LATEST full snapshot DIRECTLY onto the chain (ADR 0059), bypassing the
+    // throttle's in-window coalescing — a snapshot held only inside the throttle's
+    // pending job would otherwise be dropped silently when we stop draining here.
+    this.draftThrottle.cancel();
+    this.flushLatestSnapshot();
 
     await this.pendingEdit;
   }
 
   /**
-   * Opens the (idempotent) Redis StatusSession and posts the ONE real status
-   * message — the first loading line — capturing its id so later recap edits and
-   * the final reply morph target it. An idempotent re-open (lost NX race / replay)
-   * that already carries a message id reuses it rather than posting a second.
-   * Degrades silently on any fault.
+   * Opens the (idempotent) Redis StatusSession and shows the first THINKING
+   * surface. PRIVATE: seeds the derived draft id and sends the initial loading
+   * -word draft (plain text). NON-PRIVATE: posts the ONE real status message
+   * (ADR 0053 fallback) and captures its id. An idempotent re-open (lost NX race /
+   * replay) reuses the existing surface. Degrades silently on any fault.
    */
   async open(): Promise<void> {
     try {
@@ -189,9 +244,17 @@ export class StatusAnimation {
         turnId: this.input.turnId,
         chatType: this.input.chatType ?? ChatType.Private,
         locale: this.locale,
+        seedDraftId: this.isPrivate ? this.draftId : undefined,
       });
     } catch (error) {
       this.logSurfaceFault('open status session', error);
+
+      return;
+    }
+
+    if (this.isPrivate) {
+      this.currentWord = nextLoadingWord(this.locale, undefined);
+      await this.sendDraft(this.currentWord);
 
       return;
     }
@@ -200,27 +263,37 @@ export class StatusAnimation {
       return;
     }
 
-    await this.postInitialMessage(this.loadingLine());
+    await this.postInitialMessage(this.toPreBlock(this.loadingLine()));
   }
 
   /**
    * Shows the localized "listening to your voice" line while a voice note is
-   * transcribed, plus a `record_voice` presence hint. Edits the one status
-   * message, rendering the line as an HTML `<pre>` code block to match the spinner
-   * and recap surface (R1 / ADR 0057). Degrades silently.
+   * transcribed, plus a `record_voice` presence hint. PRIVATE: re-sends the draft
+   * with the plain listening line (NOT a blockquote, NOT a `<pre>`, ADR 0059).
+   * NON-PRIVATE: edits the one real message, wrapping the line in a `<pre>` block
+   * to match its edit surface. Degrades silently.
    */
   async showVoiceListening(): Promise<void> {
     void this.fireChatAction(ChatAction.RecordVoice);
 
-    await this.editStatus(this.toPreBlock(voiceListeningPhrase(this.locale)));
+    const line = voiceListeningPhrase(this.locale);
+
+    if (this.isPrivate) {
+      await this.pushDraft(line);
+
+      return;
+    }
+
+    await this.editStatus(this.toPreBlock(line));
   }
 
   /**
    * Advances the StatusSession to `Working`, fires a one-shot `typing` presence
-   * hint, then ARMS the ASCII spinner (R1 / ADR 0057): the loading line already
-   * landed in {@link open}; the spinner animates that SAME captured word in place
-   * until a recap, the settle, or finalize stops it. Idempotent — a no-op once
-   * finalized.
+   * hint, then ARMS the loading-word rotation (PRIVATE only, ADR 0059): a timer
+   * swaps the draft to a fresh loading word every {@link wordIntervalMs} ms, each
+   * swap also keeping the draft alive (resets Telegram's ~30 s TTL). NON-PRIVATE
+   * has no rotation — its loading line already landed in {@link open}. Idempotent —
+   * a no-op once finalized.
    */
   async startLoading(): Promise<void> {
     if (this.finalized) {
@@ -232,21 +305,30 @@ export class StatusAnimation {
     await this.advancePhaseSafe(StatusSessionPhase.Working);
     void this.fireChatAction(ChatAction.Typing);
 
-    this.startSpinner();
+    if (this.isPrivate) {
+      this.startWordRotation();
+    }
   }
 
   /**
-   * Renders a one-sentence per-round recap by editing the one status message (ADR
-   * 0053) so the user sees progress between tool rounds. STOPS the spinner first
-   * (R1 / ADR 0057) so the recap is not immediately overwritten by the next
-   * spinner frame, and renders the (already-localized, R2) recap as an HTML
-   * `<pre>` code block. A no-op once finalized or for empty text; best-effort +
-   * degrade-never-throw — a missed recap leaves the current line.
+   * Renders a one-sentence per-round recap so the user sees progress between tool
+   * rounds. PRIVATE (ADR 0059): records it as the LATEST recap and re-sends the
+   * draft as ONLY the BARE recap text — no `<blockquote>`, no loading word above it —
+   * with its trailing punctuation stripped before escaping (Telegram renders the
+   * draft bare). NON-PRIVATE: stops nothing and edits the one real message with a
+   * `<pre>` recap (ADR 0053 fallback). A no-op once finalized or for empty text;
+   * best-effort + degrade-never-throw — a missed recap leaves the current surface.
    */
   async showRecap(recap: string): Promise<void> {
-    this.stopSpinner();
-
     if (this.finalized || recap.length === 0) {
+      return;
+    }
+
+    if (this.isPrivate) {
+      this.latestRecap = recap;
+      // Re-send the draft as ONLY the bare escaped recap text (no word line).
+      await this.pushDraft(this.workingDraftText());
+
       return;
     }
 
@@ -254,15 +336,13 @@ export class StatusAnimation {
   }
 
   /**
-   * Streams the model's accumulated ANSWER text into the one status message as it
-   * is written (R3 / ADR 0058). On the FIRST token it stops R1's spinner (so no
-   * late frame reverts the streamed text), then THROTTLES edits to
-   * {@link STREAM_EDIT_MIN_INTERVAL_MS} (~1/sec, dodging Telegram edit flood
-   * -control) via a `Date.now()` timestamp: an in-window snapshot is COALESCED into
-   * {@link pendingStreamText} (latest wins) and flushed by the next un-throttled
-   * call or by {@link settle}. The partial answer is rendered as HTML-escaped PLAIN
-   * text (NOT a `<pre>` block) — the FINAL formatted answer is delivered separately
-   * by the L9 reply morph as the last edit on the same message, so the two
+   * Streams the model's accumulated ANSWER text into the live surface as it is
+   * written (ADR 0059). On the FIRST token it stops the loading-word rotation (the
+   * answer is now the surface; the loading word + recap text are dropped),
+   * then routes every snapshot through the {@link DraftThrottle} (PRIVATE) or the
+   * ~1/sec coalescing edit (NON-PRIVATE). The partial answer is rendered as
+   * HTML-escaped PLAIN text — the FINAL formatted answer is delivered separately by
+   * the reply (a fresh send for private, a morph for non-private), so the two
    * reconcile. A no-op once finalized or for empty text.
    */
   streamAnswer(snapshot: string): void {
@@ -270,44 +350,66 @@ export class StatusAnimation {
       return;
     }
 
-    this.pendingStreamText = snapshot;
+    this.latestSnapshot = snapshot;
 
-    // First token: stop the spinner exactly once so it can never revert the
-    // streamed text (reuse R1's idempotent stop), and ALWAYS flush this initial
-    // snapshot — the user must see the answer begin immediately rather than wait
-    // a full throttle window (and `lastStreamEditAt` may legitimately equal
-    // `Date.now()` at turn start, which would otherwise throttle the first edge).
+    // First token: stop the loading-word rotation exactly once so it can never
+    // overwrite the streamed text. The recap is dropped — the answer is
+    // now the surface.
     if (!this.streaming) {
       this.streaming = true;
-      this.stopSpinner();
-      this.lastStreamEditAt = Date.now();
-      this.flushStream();
-
-      return;
+      this.latestRecap = null;
+      this.stopWordRotation();
     }
 
-    const now = Date.now();
-
-    // Throttle: hold the snapshot (coalesced — latest wins) until the window opens.
-    if (now - this.lastStreamEditAt < STREAM_EDIT_MIN_INTERVAL_MS) {
-      return;
-    }
-
-    this.lastStreamEditAt = now;
-    this.flushStream();
+    // Route through the throttle so rapid snapshots coalesce; the leading edge
+    // shows the answer's first frame immediately and the rest are capped.
+    this.queueSnapshot(snapshot);
   }
 
   /**
-   * Ends the status lifecycle: marks finalized and clears the Redis StatusSession.
-   * The status MESSAGE is intentionally left untouched — by now the turn's reply
-   * has edited (morphed) it into the final answer (ADR 0053), so there is nothing
-   * to retract or delete. Idempotent + never throws; MUST be called in the
-   * caller's `finally` on every turn-exit path.
+   * Settles the live draft to a final frame holding exactly `text` (PRIVATE only),
+   * the Bot-API equivalent of a `clear_draft` — the Bot API has NO `clear_draft`
+   * flag (it is an MTProto-client-only call bots cannot make), so we instead push
+   * ONE last draft frame whose text IS the message that is about to be sent for
+   * real, so Telegram replaces the stale draft preview with that message. Used by
+   * the `ask_user` question path: unlike the answer (which streamed its full text
+   * into the draft already), the question was never written into the draft, so it
+   * would otherwise leave a lingering "ghost" preview. Stops the word rotation,
+   * cancels the {@link DraftThrottle}, and sends one awaited `sendMessageDraft` with
+   * the escaped text (same draft id, bypassing the throttle). A no-op for
+   * NON-PRIVATE turns (the morph path already replaces their one real message) and
+   * once finalized. Degrade-never-throw. NOTE: the visual replacement of the draft
+   * preview by the real message MUST be confirmed on-device.
+   */
+  async settleDraftTo(text: string): Promise<void> {
+    if (!this.isPrivate || this.finalized) {
+      return;
+    }
+
+    // Kill the rotation + any pending throttled flush so nothing re-pushes a
+    // loading word over this final frame, then send it directly (awaited).
+    this.stopWordRotation();
+    this.draftThrottle.cancel();
+
+    this.pendingEdit = this.pendingEdit.then(() =>
+      this.sendDraft(escapeHtml(text)),
+    );
+
+    await this.pendingEdit;
+  }
+
+  /**
+   * Ends the status lifecycle: stops the loading-word rotation, cancels the draft
+   * throttle (so no trailing flush leaks a timer), marks finalized, and clears the
+   * Redis StatusSession. The draft is intentionally left untouched — it is
+   * ephemeral and self-expires once the reply's fresh `sendMessage` lands (PRIVATE),
+   * and the non-private message has by now been morphed into the answer
+   * (NON-PRIVATE) — so there is nothing to retract or delete. Idempotent + never
+   * throws; MUST be called in the caller's `finally` on every turn-exit path.
    */
   async finalize(): Promise<void> {
-    // Stop the spinner FIRST so no queued frame survives finalize and re-posts
-    // over the morphed answer (R1 / ADR 0057).
-    this.stopSpinner();
+    this.stopWordRotation();
+    this.draftThrottle.cancel();
     this.finalized = true;
 
     try {
@@ -321,23 +423,41 @@ export class StatusAnimation {
   }
 
   /**
-   * The initial loading line: CAPTURES the first locale word into
-   * {@link currentWord} (so the spinner later animates the SAME word the user
-   * already sees) and renders it as the first spinner frame inside an HTML `<pre>`
-   * code block (R1 / ADR 0057). The static ellipsis is gone — the rotating spinner
-   * frame replaces it.
+   * The initial loading line for the NON-PRIVATE fallback: captures the first
+   * locale word into {@link currentWord} and returns it bare (ADR 0053 surface
+   * renders it inside a `<pre>` block). PRIVATE turns do not use this — they send
+   * the bare word as a plain draft in {@link open}.
    */
   private loadingLine(): string {
     this.currentWord = nextLoadingWord(this.locale, undefined);
 
-    return this.toPreBlock(spinnerLoadingLine(this.currentWord, 0));
+    return this.currentWord;
   }
 
   /**
-   * Posts the ONE real status message (as HTML so the `<pre>` loading line renders
-   * as a monospace code block) and captures its id into the session, so recap
-   * edits and the reply morph can target it. A no-op once finalized or if a
-   * message id is already captured (idempotent re-open). Degrade-never-throw.
+   * Builds the WORKING-phase private draft text (ADR 0059). When a recap exists the
+   * draft is ONLY that recap as BARE, UNFORMATTED text — NO `<blockquote>`, NO `<pre>`,
+   * NO loading word above it — so the user reads the single latest progress line clean
+   * (its trailing punctuation is stripped, then it is HTML-escaped — the draft is sent
+   * as {@link OutboundFormat.Html}, so a literal `<`/`>`/`&` must be escaped to render
+   * correctly — but with NO wrapping tags). Until the first recap it is just the bare
+   * rotating loading word, which the rotation timer keeps re-pushing so the draft stays
+   * within Telegram's ~30 s TTL (once a recap lands the rotation re-pushes the bare
+   * recap frame instead of a word).
+   */
+  private workingDraftText(): string {
+    if (this.latestRecap === null) {
+      return this.currentWord ?? '';
+    }
+
+    return escapeHtml(stripTrailingPunctuation(this.latestRecap));
+  }
+
+  /**
+   * Posts the ONE real status message for the NON-PRIVATE fallback (as HTML so the
+   * `<pre>` loading line renders) and captures its id into the session, so recap
+   * edits and the reply morph can target it. A no-op once finalized or if a message
+   * id is already captured (idempotent re-open). Degrade-never-throw.
    */
   private async postInitialMessage(text: string): Promise<void> {
     if (this.finalized || !this.session || this.session.vendorMessageId) {
@@ -359,98 +479,160 @@ export class StatusAnimation {
   }
 
   /**
-   * Wraps status text in an HTML `<pre>` code block (R1 / ADR 0057) after escaping
-   * it so the monospace surface renders the spinner / recap / voice line and never
-   * injects a tag Telegram rejects. Uses the EXPORTED {@link escapeHtml} so the
-   * escape rule is shared with the reply converter.
+   * Wraps status text in an HTML `<pre>` code block (NON-PRIVATE fallback, ADR
+   * 0053) after escaping it, so the monospace surface renders the recap / voice
+   * line and never injects a tag Telegram rejects.
    */
   private toPreBlock(text: string): string {
     return `<pre>${escapeHtml(text)}</pre>`;
   }
 
   /**
-   * Arms the ASCII spinner (R1 / ADR 0057): a `setInterval` that advances the
-   * frame and pushes the captured word's next frame through the (serialized)
-   * {@link editStatus} chain. Skipped when no status message landed (a null
-   * {@link messageId} — the initial send failed) so it never edits a phantom, and
-   * idempotent (a prior timer is cleared first). The timer is `.unref()`'d so it
-   * never holds the process open on its own (mirroring the user-lock watchdog).
+   * Arms the loading-word rotation (PRIVATE only, ADR 0059): a `setInterval` that
+   * picks a FRESH loading word (never the immediately-previous one) and re-sends
+   * the draft — which also keeps the ~30 s ephemeral draft alive. Idempotent (a
+   * prior timer is cleared first). The timer is `.unref()`'d so it never holds the
+   * process open on its own (mirroring the user-lock watchdog). A no-op once the
+   * answer is streaming (the surface is the answer, not a loading word).
    */
-  private startSpinner(): void {
-    this.stopSpinner();
+  private startWordRotation(): void {
+    this.stopWordRotation();
 
-    if (this.messageId === null) {
+    if (this.streaming) {
       return;
     }
 
-    // The captured word from the initial open; fall back to a fresh pick if open
-    // degraded before capturing one (e.g. a re-opened surface with no word yet).
     if (this.currentWord === null) {
       this.currentWord = nextLoadingWord(this.locale, undefined);
     }
 
-    this.spinnerTimer = setInterval(() => {
-      this.tickSpinner();
-    }, this.spinnerIntervalMs);
+    this.wordTimer = setInterval(() => {
+      this.tickWord();
+    }, this.wordIntervalMs);
 
-    this.spinnerTimer.unref?.();
+    this.wordTimer.unref?.();
   }
 
   /**
-   * Advances the spinner one frame and pushes the new line through the serialized
-   * edit chain (fire-and-forget — the chain swallows its own faults). A no-op once
-   * the spinner has been stopped or no word is captured.
+   * Rotates the loading word one step and re-sends the draft (fire-and-forget — the
+   * chain swallows its own faults). Picks a fresh word excluding the current one,
+   * preserves the latest bare recap (the WORKING surface), and serves as the
+   * draft keepalive. A no-op once the rotation has been stopped.
    */
-  private tickSpinner(): void {
-    if (this.spinnerTimer === null || this.currentWord === null) {
+  private tickWord(): void {
+    if (this.wordTimer === null) {
       return;
     }
 
-    this.spinnerFrame += 1;
-    void this.editStatus(
-      this.toPreBlock(spinnerLoadingLine(this.currentWord, this.spinnerFrame)),
+    this.currentWord = nextLoadingWord(
+      this.locale,
+      this.currentWord ?? undefined,
     );
+    void this.pushDraft(this.workingDraftText());
   }
 
   /**
-   * Stops the spinner: clears the interval and nulls the handle so {@link settle},
-   * {@link finalize}, and {@link showRecap} can guarantee no further frame is
-   * queued (R1 / ADR 0057). Idempotent — safe to call when no timer is armed.
+   * Stops the loading-word rotation: clears the interval and nulls the handle so
+   * {@link settle}, {@link finalize}, and the first answer token can guarantee no
+   * further word is queued. Idempotent — safe to call when no timer is armed.
    */
-  private stopSpinner(): void {
-    if (this.spinnerTimer === null) {
+  private stopWordRotation(): void {
+    if (this.wordTimer === null) {
       return;
     }
 
-    clearInterval(this.spinnerTimer);
-    this.spinnerTimer = null;
+    clearInterval(this.wordTimer);
+    this.wordTimer = null;
   }
 
   /**
-   * Pushes the latest coalesced streamed answer snapshot (R3 / ADR 0058) onto the
-   * serialized edit chain, HTML-escaped as PLAIN text (no `<pre>` wrap — the
-   * partial answer reads as prose until the final morph reformats it), then clears
-   * the pending buffer so it is flushed exactly once. A no-op when nothing is
-   * pending. Fire-and-forget — the chain swallows its own fault.
+   * Queues a live streamed answer snapshot onto the surface (ADR 0059), HTML
+   * -escaped as PLAIN text (no `<pre>`/`<blockquote>` wrap — the partial answer
+   * reads as prose until the reply reformats it). PRIVATE routes through the
+   * throttled draft surface (rapid snapshots coalesce to the cap); NON-PRIVATE
+   * through the serialized edit surface. Fire-and-forget — the chain swallows its
+   * own fault. {@link settle} re-sends the final state directly via
+   * {@link flushLatestSnapshot}, bypassing the throttle.
    */
-  private flushStream(): void {
-    if (this.pendingStreamText === null) {
+  private queueSnapshot(snapshot: string): void {
+    const escaped = escapeHtml(snapshot);
+
+    if (this.isPrivate) {
+      void this.pushDraft(escaped);
+
       return;
     }
 
-    const snapshot = this.pendingStreamText;
-
-    this.pendingStreamText = null;
-    void this.editStatus(escapeHtml(snapshot));
+    void this.editStatus(escaped);
   }
 
   /**
-   * Edits the one status message in place, SERIALIZED behind any prior edit via
-   * {@link pendingEdit} so frames (spinner / recap / voice line / streamed answer)
-   * apply in dispatch order and {@link settle} can drain them before the reply
-   * morph. The status surface is always pre-wrapped/escaped HTML, so the edit
-   * carries {@link OutboundFormat.Html}. Returns the chain tail so the
-   * (fire-and-forget) caller may await it.
+   * Re-sends the LATEST full answer snapshot DIRECTLY onto the serialized chain at
+   * {@link settle} time (ADR 0059) — escaped plain text, BYPASSING the throttle's
+   * in-window coalescing (the throttle was just cancelled) so the final answer text
+   * always reaches the surface before the reply supersedes it. PRIVATE sends the
+   * draft directly; NON-PRIVATE edits the message. A no-op when nothing streamed.
+   */
+  private flushLatestSnapshot(): void {
+    if (this.latestSnapshot === null) {
+      return;
+    }
+
+    const escaped = escapeHtml(this.latestSnapshot);
+
+    if (this.isPrivate) {
+      this.pendingEdit = this.pendingEdit.then(() => this.sendDraft(escaped));
+
+      return;
+    }
+
+    void this.editStatus(escaped);
+  }
+
+  /**
+   * Queues a PRIVATE draft update onto the serialized {@link pendingEdit} chain
+   * (ADR 0059) so updates apply in dispatch order and {@link settle} can drain
+   * them. The actual `sendMessageDraft` send is routed through the central
+   * {@link DraftThrottle} so the per-second draft re-call cap is honoured. Returns
+   * the chain tail so a caller may await it.
+   */
+  private pushDraft(text: string): Promise<void> {
+    this.pendingEdit = this.pendingEdit.then(() =>
+      this.draftThrottle.submit(() => this.sendDraft(text)),
+    );
+
+    return this.pendingEdit;
+  }
+
+  /**
+   * Performs one `sendMessageDraft` send (ADR 0059) with the stable non-zero draft
+   * id, as HTML so an escaped recap / escaped answer renders. A no-op once
+   * finalized (checked at EXECUTION time, so a queued update that runs after
+   * finalize never re-sends a draft over the delivered answer). Degrade-never
+   * -throw — a draft fault degrades the surface, never the turn.
+   */
+  private async sendDraft(text: string): Promise<void> {
+    if (this.finalized) {
+      return;
+    }
+
+    try {
+      await this.vendor.sendMessageDraft(this.target, {
+        draftId: this.draftId,
+        text,
+        format: OutboundFormat.Html,
+      });
+    } catch (error) {
+      this.logSurfaceFault('send status draft', error);
+    }
+  }
+
+  /**
+   * Edits the one NON-PRIVATE status message in place (ADR 0053 fallback),
+   * SERIALIZED behind any prior edit via {@link pendingEdit} so updates apply in
+   * dispatch order and {@link settle} can drain them. The surface is pre-wrapped /
+   * escaped HTML, so the edit carries {@link OutboundFormat.Html}. Returns the chain
+   * tail so a fire-and-forget caller may await it.
    */
   private editStatus(text: string): Promise<void> {
     this.pendingEdit = this.pendingEdit.then(() => this.runStatusEdit(text));
@@ -459,12 +641,11 @@ export class StatusAnimation {
   }
 
   /**
-   * Performs one status edit (as HTML so the `<pre>` code block renders). A no-op
-   * once finalized (checked at EXECUTION time, so a queued frame that runs after
-   * finalize never re-posts) or when no status message was posted (the initial
-   * send failed) — the turn still answers via a fresh reply message. A benign
-   * "message is not modified" 400 (an identical repeated spinner frame) is treated
-   * as success by the connector. Degrade-never-throw.
+   * Performs one NON-PRIVATE status edit (as HTML). A no-op once finalized (checked
+   * at EXECUTION time, so a queued update that runs after finalize never re-posts)
+   * or when no status message was posted (the initial send failed) — the turn still
+   * answers via a fresh reply message. A benign "message is not modified" 400 is
+   * treated as success by the connector. Degrade-never-throw.
    */
   private async runStatusEdit(text: string): Promise<void> {
     const vendorMessageId = this.session?.vendorMessageId;
@@ -486,7 +667,7 @@ export class StatusAnimation {
 
   /**
    * Fires a presence hint (typing / recording), swallowing any fault — it is a
-   * cosmetic extra on top of the status message.
+   * cosmetic extra on top of the status surface.
    */
   private async fireChatAction(action: ChatAction): Promise<void> {
     try {
@@ -526,12 +707,13 @@ export class StatusAnimation {
 }
 
 /**
- * L9 live-status animator (ADR 0053). Factory for per-turn {@link StatusAnimation}
- * handles — the only assistant-side owner of the one per-turn status message (the
- * real reply morph still flows through {@link ReplyPresenter}, which edits that
- * same message). It resolves the locale from the inbound signals, injects the
- * (sole) vendor connector + StatusSessionStore, and hands back a handle the turn
- * lifecycle drives. Every produced handle is degrade-never-throw.
+ * L9 live-status animator (ADR 0059, reversing 0053/0057). Factory for per-turn
+ * {@link StatusAnimation} handles — the only assistant-side owner of the per-turn
+ * status surface (a native Telegram draft in private chats, the one-message edit
+ * fallback in groups). The real final reply still flows through
+ * {@link ReplyPresenter}. It resolves the locale from the inbound signals, injects
+ * the (sole) vendor connector + StatusSessionStore + config knobs, and hands back a
+ * handle the turn lifecycle drives. Every produced handle is degrade-never-throw.
  */
 @Injectable()
 export class StatusAnimatorService {
@@ -544,10 +726,10 @@ export class StatusAnimatorService {
 
   /**
    * Begins a live-status surface for a turn and returns its handle. Opens the
-   * (idempotent) StatusSession and posts the initial loading message before
-   * returning, injecting the spinner tick interval (R1 / ADR 0057) from config.
-   * The caller drives voice/loading and MUST {@link StatusAnimation.finalize} in a
-   * `finally`.
+   * (idempotent) StatusSession and shows the initial THINKING surface before
+   * returning, injecting the loading-word rotation interval and the draft-update
+   * cap from config (ADR 0059). The caller drives voice/loading and MUST
+   * {@link StatusAnimation.finalize} in a `finally`.
    */
   async begin(input: StatusAnimationInput): Promise<StatusAnimation> {
     const animation = new StatusAnimation(
@@ -555,7 +737,8 @@ export class StatusAnimatorService {
       this.statusSessions,
       input,
       this.resolveLocale(input),
-      this.config.statusSpinnerIntervalMs,
+      this.config.statusWordIntervalMs,
+      this.config.draftUpdatesPerSecond,
     );
 
     await animation.open();

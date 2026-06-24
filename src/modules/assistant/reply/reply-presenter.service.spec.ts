@@ -73,6 +73,63 @@ describe('ReplyPresenter.sendText (ADR 0049 Markdown→HTML + plain fallback)', 
   });
 });
 
+describe('ReplyPresenter — private draft world (ADR 0059: no morph, fresh sends)', () => {
+  it('sendText with a NULL editMessageId is a FRESH sendMessage (the draft self-expires), never an edit', async () => {
+    const { presenter, vendor } = buildPresenter();
+
+    // A private turn has no real status message — the runner passes null, so the
+    // final answer is a fresh send, not a morph of any draft.
+    const id = await presenter.sendText(
+      'chat-1',
+      'all set',
+      'cid-priv-1',
+      null,
+    );
+
+    expect(id).toBe('555');
+    expect(vendor.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vendor.editMessageText).not.toHaveBeenCalled();
+    expect(vendor.deleteMessage).not.toHaveBeenCalled();
+
+    const [target, message] = vendor.sendMessage.mock.calls[0];
+
+    expect(target).toEqual({ vendorChatId: 'chat-1' });
+    expect(message).toEqual({ text: 'all set', format: OutboundFormat.Html });
+  });
+
+  it('sendQuestion with options + a NULL editMessageId is a FRESH sendActions keyboard (drafts carry no buttons)', async () => {
+    const { presenter, vendor } = buildPresenter();
+    const options = [
+      { id: 'a', label: 'Yes' },
+      { id: 'b', label: 'No' },
+    ];
+
+    const id = await presenter.sendQuestion(
+      'chat-1',
+      'Pick one?',
+      options,
+      'pq-1',
+      'cid-priv-2',
+      null,
+    );
+
+    // No morph attempted (no draft to morph); a fresh keyboard carries the question.
+    expect(vendor.editMessageText).not.toHaveBeenCalled();
+    expect(vendor.sendActions).toHaveBeenCalledTimes(1);
+    expect(id).toBe('777');
+
+    const [, actions] = vendor.sendActions.mock.calls[0];
+
+    expect(actions.text).toBe('Pick one?');
+    expect(actions.buttons).toEqual([
+      [
+        { label: 'Yes', callbackData: 'ask:pq-1:a' },
+        { label: 'No', callbackData: 'ask:pq-1:b' },
+      ],
+    ]);
+  });
+});
+
 describe('ReplyPresenter.sendText morph (ADR 0053 one-message-per-turn)', () => {
   it('EDITS the live status message in place as HTML and returns that message id (no second bubble)', async () => {
     const { presenter, vendor } = buildPresenter();

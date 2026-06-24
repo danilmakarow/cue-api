@@ -15,6 +15,8 @@
 
 **v2 builds additively on those layers.** Stories 10–18 add the conversational UX — an instant living status message, native response streaming, message debounce/coalescing + STOP, AI-judged conflicts, reply-keyboard navigation, daily reports, and per-user personality. Each lands as a new method/layer onto the existing L0–L11 model, **not** a rewrite. The single fact that reshaped the whole UX: Telegram's `sendMessageDraft` is a purpose-built ephemeral streaming primitive that is *both* the live-status surface and the response-streaming surface.
 
+> **Surface-design update (2026-06-24, [ADR 0059](../adr/0059-revert-to-telegram-sendmessagedraft-streaming.md)).** This plan's draft surface was briefly abandoned for a "morph one real message" model ([ADR 0053](../adr/0053-telegram-status-message-morph.md)) with an ASCII spinner + `<pre>` recaps ([ADR 0057](../adr/0057-status-spinner-and-code-recaps.md)); both are now **superseded**. The live-status surface **reverts to native `sendMessageDraft` streaming** per ADR 0059: a rotating loading word (also the draft keepalive) → a `<blockquote>` latest-recap → the answer streamed token-by-token into the draft (revived `DraftThrottle`, ~4 updates/sec) → finalised by a real `sendMessage`. The `editMessageText` morph survives **only** as the non-private-chat fallback. The Story 10/12/13 `sendMessageDraft` facts below remain authoritative.
+
 ---
 
 ## Verified Telegram streaming facts

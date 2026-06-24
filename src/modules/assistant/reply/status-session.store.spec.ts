@@ -103,6 +103,29 @@ describe('StatusSessionStore (live-status handle, ADR 0053)', () => {
     expect(session.phase).toBe(StatusSessionPhase.Thinking);
   });
 
+  it('open persists a non-zero draftId for a private/draft turn (ADR 0059)', async () => {
+    const { service } = buildStore();
+
+    const session = await service.open({
+      vendorChatId: 'chat-3',
+      turnId: 'turn-3',
+      chatType: ChatType.Private,
+      locale: 'en',
+      seedDraftId: 1234567,
+    });
+
+    // The private/draft surface carries the stable non-zero draft id, and has NO
+    // real status message id (the draft self-expires; the final send is fresh).
+    expect(session.draftId).toBe(1234567);
+    expect(session.draftId).not.toBe(0);
+    expect(session.vendorMessageId).toBeUndefined();
+
+    // It survives a re-read (round-trips through the persisted JSON).
+    const reread = await service.get('chat-3', 'turn-3');
+
+    expect(reread?.draftId).toBe(1234567);
+  });
+
   it('IDEMPOTENCY: opening twice for the SAME turn does NOT orphan a second handle', async () => {
     const { service, store } = buildStore();
 

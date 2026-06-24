@@ -1,6 +1,6 @@
 # 0053 — telegram-status-message-morph
 
-- **Status**: Accepted
+- **Status**: Superseded by [0059](0059-revert-to-telegram-sendmessagedraft-streaming.md) (the live-status surface reverts to native `sendMessageDraft` streaming; this morph path is retained only as the non-private-chat fallback)
 - **Date**: 2026-06-23
 - **Deciders**: Danil, assistant
 

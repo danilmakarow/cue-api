@@ -82,13 +82,25 @@ export class AssistantConfig {
   }
 
   /**
-   * Tick interval (ms) for the status-surface ASCII spinner (R1 / ADR 0057): how
-   * often the braille frame advances on the one live status message. Kept ~1000
-   * (never sub-second) so the repeated `editMessageText` calls stay clear of
-   * Telegram flood-control (429).
+   * Rotation interval (ms) for the THINKING draft's loading word (ADR 0059): how
+   * often the ephemeral `sendMessageDraft` swaps to a fresh loading word. Each
+   * rotation also keeps the draft alive (resets Telegram's ~30 s draft TTL), so it
+   * stays comfortably below 30 s (~5000 by default).
    */
-  get statusSpinnerIntervalMs(): number {
-    return this.configService.get('ASSISTANT_STATUS_SPINNER_INTERVAL_MS', {
+  get statusWordIntervalMs(): number {
+    return this.configService.get('ASSISTANT_STATUS_WORD_INTERVAL_MS', {
+      infer: true,
+    });
+  }
+
+  /**
+   * Draft-update rate cap (updates/second, ADR 0059 / ADR 0012): the per-second
+   * ceiling the central L9 {@link import('./reply/draft-throttle').DraftThrottle}
+   * coalesces streamed-answer draft updates to (clamped into the ~2–5/s band),
+   * dodging Telegram's undocumented `sendMessageDraft` re-call flood-control.
+   */
+  get draftUpdatesPerSecond(): number {
+    return this.configService.get('ASSISTANT_DRAFT_UPDATES_PER_SECOND', {
       infer: true,
     });
   }

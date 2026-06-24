@@ -102,13 +102,13 @@ export class WebhookConsumer extends WorkerHost {
   }
 
   /**
-   * Opens the live-status surface for a voice turn and shows the localized
-   * "Listening to your beautiful voice" line BEFORE STT runs (Story 12 / ADR
-   * 0012). Keyed by `correlationId` (the per-turn id) so it is the SAME idempotent
-   * StatusSession the turn-runner re-opens after transcription — the voice notice
-   * then transitions into the cycling-word loading animation. Degrades
-   * never-throw; the returned handle is finalized by the caller only on the STT
-   * failure path (a successful turn hands finalize to the turn-runner).
+   * Opens the live-status surface for a voice turn and shows a localized, plain
+   * "listening…" line (one of several variants, ADR 0059) BEFORE STT runs. Keyed by
+   * `correlationId` (the per-turn id) so it is the SAME idempotent StatusSession the
+   * turn-runner re-opens after transcription — the voice notice then transitions
+   * into the rotating-word loading draft. Degrades never-throw; the returned handle
+   * is finalized by the caller only on the STT failure path (a successful turn hands
+   * finalize to the turn-runner).
    *
    * The pre-STT line has no transcript or STT language yet, so its locale comes
    * from the `language_code` and — when that is unsupported/absent — the user's
@@ -200,13 +200,13 @@ export class WebhookConsumer extends WorkerHost {
     let voiceStatus: StatusAnimation | undefined;
 
     if (normalized.kind === InboundKind.Voice) {
-      // Show the localized "Listening to your beautiful voice" line on the SAME
-      // (idempotent, keyed by correlationId) status surface the turn-runner will
-      // re-use, so the voice notice transitions seamlessly into the loading
-      // animation once STT returns. The PRE-STT line uses `language_code`/en (no
-      // text yet); the POST-STT loading words switch to the spoken language once
-      // the turn re-opens this surface with `sttLanguage` + the transcript (v2
-      // Task 4 / ADR 0051). Begin/voice-state degrade never-throw.
+      // Show a localized, plain "listening…" line (one of several variants, ADR
+      // 0059) on the SAME (idempotent, keyed by correlationId) status surface the
+      // turn-runner will re-use, so the voice notice transitions seamlessly into the
+      // rotating-word loading draft once STT returns. The PRE-STT line uses
+      // `language_code`/en (no text yet); the POST-STT loading words switch to the
+      // spoken language once the turn re-opens this surface with `sttLanguage` + the
+      // transcript (v2 Task 4 / ADR 0051). Begin/voice-state degrade never-throw.
       voiceStatus = await this.beginVoiceStatus(
         user.id,
         normalized,

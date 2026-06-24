@@ -96,12 +96,16 @@ export const environmentSchema = z
     // Redis pointer to the animated status surface (draft id / message id). Short —
     // it only needs to outlive one in-flight turn; cleared on finalize.
     ASSISTANT_STATUS_SESSION_TTL_SECONDS: z.coerce.number().int().positive(),
-    // Status-surface spinner tick interval (ms, R1 / ADR 0057): how often the
-    // ASCII braille spinner frame advances on the one live status message. Kept
-    // around ~1000 (never sub-second) to stay clear of Telegram editMessageText
-    // flood-control (429); a benign "message is not modified" 400 from an identical
-    // frame is treated as success by the connector.
-    ASSISTANT_STATUS_SPINNER_INTERVAL_MS: z.coerce.number().int().positive(),
+    // Loading-word rotation interval (ms, ADR 0059): how often the THINKING draft
+    // swaps to a fresh loading word via `sendMessageDraft`. Each rotation doubles
+    // as the draft keepalive that resets Telegram's ~30 s ephemeral-draft TTL, so
+    // keep it comfortably below 30 s (~5000 by default).
+    ASSISTANT_STATUS_WORD_INTERVAL_MS: z.coerce.number().int().positive(),
+    // Draft-update rate cap (updates/second, ADR 0059 / ADR 0012). The central L9
+    // DraftThrottle coalesces streamed-answer draft updates to at most this many
+    // `sendMessageDraft` calls per second (clamped into the ~2–5/s band), dodging
+    // Telegram's undocumented draft re-call flood-control.
+    ASSISTANT_DRAFT_UPDATES_PER_SECOND: z.coerce.number().int().positive(),
     // Per-user serialization lock (StatusSession ADR 0012 sibling; Story 11). The
     // mutex's auto-expiry TTL (ms) — the deadlock backstop if a holder crashes
     // without releasing — and the watchdog renew interval (ms) that extends it

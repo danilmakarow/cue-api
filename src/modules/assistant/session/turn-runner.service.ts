@@ -272,7 +272,7 @@ export class TurnRunnerService {
     vendorChatId: string,
     suspension: AskSuspension,
     correlationId: string,
-    statusMessageId: string | null,
+    status: StatusAnimation,
   ): Promise<void> {
     const pending = await this.pendingInteraction.createPendingQuestion(
       user.id,
@@ -289,13 +289,20 @@ export class TurnRunnerService {
       },
     );
 
+    // Clear the lingering draft "ghost" before the real question lands (Bot-API
+    // equivalent of clear_draft — there is no native flag): a PRIVATE turn never
+    // wrote the question into its draft (unlike the streamed answer), so we settle
+    // the draft TO the question text first, then send the fresh question + buttons.
+    // A no-op on a NON-PRIVATE turn — its morph path already replaces the message.
+    await status.settleDraftTo(suspension.question);
+
     const vendorMessageId = await this.replyPresenter.sendQuestion(
       vendorChatId,
       suspension.question,
       suspension.optionLabels,
       pending.id,
       correlationId,
-      statusMessageId,
+      status.messageId,
     );
 
     // Capture the question message's id onto the pending row (R3 / ADR 0058) so a
@@ -332,14 +339,18 @@ export class TurnRunnerService {
   }
 
   /**
-   * Opens the live-status surface for a turn (ADR 0053): posts the one real
-   * "loading" message and advances it to Working, keyed by the correlation id so
-   * it shares the surface with any voice notice already shown for this turn. That
-   * one message is later edited with per-round recaps and finally morphed into the
-   * reply. Degrades never-throw — a status fault returns a handle whose
-   * {@link StatusAnimation.messageId} is null and the reply just sends a fresh
-   * message. The `correlationId` doubles as the per-turn `turnId` for the
-   * idempotent StatusSession.
+   * Opens the live-status surface for a turn (ADR 0059) and advances it to Working,
+   * keyed by the correlation id so it shares the surface with any voice notice
+   * already shown for this turn. PRIVATE chats drive an ephemeral native draft
+   * (rotating loading word → bare recap text → streamed answer) and the final
+   * reply is a FRESH send (the draft self-expires); NON-PRIVATE chats keep the ADR
+   * 0053 fallback — one real message edited with recaps and morphed into the reply.
+   * The surface choice is internal to the animation: the runner just threads
+   * {@link StatusAnimation.messageId} to the presenter (null for a private/draft
+   * turn ⇒ a fresh send; the real id for a group ⇒ a morph). Degrades never-throw —
+   * a status fault leaves a null `messageId` so the reply sends fresh. The
+   * `correlationId` doubles as the per-turn `turnId` for the idempotent
+   * StatusSession.
    */
   private async beginStatus(
     correlationId: string,
@@ -502,7 +513,7 @@ export class TurnRunnerService {
         params.vendorChatId,
         result,
         correlationId,
-        status.messageId,
+        status,
       );
     } finally {
       await status.finalize();
@@ -528,9 +539,10 @@ export class TurnRunnerService {
     vendorChatId: string,
     result: ToolLoopResult,
     correlationId: string,
-    statusMessageId: string | null,
+    status: StatusAnimation,
   ): Promise<void> {
     const { outcome, rounds, committedWrites, attemptedWrites } = result;
+    const statusMessageId = status.messageId;
 
     // Persist the tool-loop audit trail regardless of how the turn ended.
     await this.persistToolRounds(conversation.id, rounds);
@@ -542,7 +554,7 @@ export class TurnRunnerService {
         vendorChatId,
         outcome.suspension,
         correlationId,
-        statusMessageId,
+        status,
       );
 
       return;
@@ -750,7 +762,7 @@ export class TurnRunnerService {
         params.vendorChatId,
         result,
         correlationId,
-        status.messageId,
+        status,
       );
     } finally {
       await status.finalize();

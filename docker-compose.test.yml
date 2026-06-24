@@ -1,0 +1,44 @@
+# Dedicated Postgres + Redis stack for the e2e harness (test/e2e/global-setup.ts).
+# Kept SEPARATE from docker-compose.dev.yml on purpose: its own Compose PROJECT NAME
+# (cue-api-test), container names, and volumes. The harness teardown runs `down -v`,
+# so this isolation guarantees it can only ever wipe TEST data — never the developer's
+# local dev database (cue-api_postgres_data). Ports/credentials are sourced from
+# .env.test (the same file the app connects through), so published ports match.
+name: cue-api-test
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cue-pg-test
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cue-redis-test
+    # Ephemeral on purpose: the harness flushes between tests and `down -v` wipes the
+    # stack each run, so persistence is wasted I/O — disable RDB + AOF, no data volume.
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+    driver: local

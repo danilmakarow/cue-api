@@ -1,8 +1,12 @@
-import { CapturedSend } from './e2e/capturing-vendor.connector';
+import {
+  CapturedSend,
+  CapturingVendorConnector,
+} from './e2e/capturing-vendor.connector';
 import { E2eHarness, SeededFixtures } from './e2e/harness';
 import { completion, toolCall } from './e2e/scripted-ai.connector';
 import { AiModelRole, AiStopReason } from '@/modules/ai/ai.types';
 import { ConflictPolicy } from '@/modules/database/entities';
+import { OutboundActions } from '@/modules/external-vendor/external-vendor.types';
 import { TaskService } from '@/modules/task/task.service';
 
 /**
@@ -12,8 +16,18 @@ import { TaskService } from '@/modules/task/task.service';
  * controller enqueue → in-process consumer → orchestrator → tool dispatch →
  * captured vendor reply, with the DB asserted on for the actual writes. Only the
  * two leaf connectors are faked: the vendor (captured, real ingress) and the AI
- * (deterministic scripted completions). The turn is awaited on the vendor-send
- * seam — the deterministic terminal signal of a finished turn.
+ * (deterministic scripted completions).
+ *
+ * The harness drives PRIVATE chats by default (`buildTextUpdate` omits `chat.type`),
+ * so under ADR 0059 the live surface is an ephemeral native draft and the TERMINAL
+ * reply is a FRESH real `sendMessage` (the finalised answer) or `sendActions` (an
+ * `ask_user` question) — NOT an `editMessageText` morph. The finalised answer is a
+ * framing `sendMessage` the morph-only `nextSend()` never fires on, so a turn that
+ * ends in an answer is awaited via `vendor.nextReply(CapturingVendorConnector
+ * .isPrivateAnswer)`; an `ask_user` question is a substantive fresh `sendActions`,
+ * still awaited via `nextSend()`. The answered-question morph (`markQuestionAnswered`,
+ * R3 / ADR 0058) remains an `editMessageText` regardless of chat kind — it edits the
+ * original question message.
  */
 describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
   let harness: E2eHarness;
@@ -37,12 +51,23 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
   });
 
   /**
-   * Reads the text off a captured reply. Under ADR 0053 the substantive reply is
-   * an `editMessageText` (the morph) whose payload still carries a `.text`; the
-   * text is HTML-converted but plain words survive, so `/.../i` patterns match.
+   * Reads the text off a captured reply. The terminal reply payload carries a
+   * `.text` on every path — a private finalised-answer `sendMessage`, a private
+   * `ask_user` `sendActions`, or a non-private answer/ask morph `editMessageText` —
+   * and the text is HTML-converted but plain words survive, so `/.../i` patterns
+   * match across all of them.
    */
   const replyTextOf = (send: CapturedSend): string =>
     (send.payload as { text: string }).text;
+
+  /**
+   * Awaits the PRIVATE-path finalised answer: the fresh real `sendMessage`
+   * (`format === Html`) that supersedes the self-expiring draft (ADR 0059). The
+   * morph-only `nextSend()` records this as framing and never resolves on it, so the
+   * answer is awaited via the predicate seam instead.
+   */
+  const nextAnswer = (): Promise<CapturedSend> =>
+    harness.vendor.nextReply(CapturingVendorConnector.isPrivateAnswer);
 
   it('creates a task from a webhook and confirms it (simple create_task)', async () => {
     // Round 1: the model calls create_task. Round 2: it confirms in plain text.
@@ -61,9 +86,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, 'add buy milk'),
     );
 
-    const reply = await harness.vendor.nextSend();
+    // Private path (ADR 0059): the finalised answer is a FRESH real sendMessage that
+    // supersedes the draft — not an editMessageText morph.
+    const reply = await nextAnswer();
 
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
     expect(reply.target).toEqual({ vendorChatId: fixtures.chatId });
     expect(replyTextOf(reply)).toMatch(/buy milk/i);
 
@@ -98,9 +125,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, 'create three lessons'),
     );
 
-    const reply = await harness.vendor.nextSend();
+    const reply = await nextAnswer();
 
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/three|3/i);
 
     const tasks = await harness.listTasks(fixtures.calendar.id);
@@ -137,9 +164,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, 'add a dentist appointment'),
     );
 
-    const reply = await harness.vendor.nextSend();
+    // The finalised answer (private path) is a fresh sendMessage carrying the REAL
+    // confirmation, not the false-success mask.
+    const reply = await nextAnswer();
 
-    // The final reply is the REAL confirmation, not the false-success mask.
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/dentist/i);
     expect(replyTextOf(reply)).not.toMatch(/don't think that actually saved/i);
 
@@ -220,14 +249,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     // The clash surfaced as an ask_user inline-keyboard question (the model's
     // choice), NOT a deterministic hold keyboard — there is no held Redis key.
-    // Under ADR 0053 the question MORPHS the loading line via editMessageText
-    // carrying the inline keyboard, instead of a fresh sendActions.
-    expect(ask.method).toBe('editMessageText');
+    // Under ADR 0059 the PRIVATE path posts the question as a FRESH sendActions
+    // (inline keyboard) — a draft cannot carry buttons — not an editMessageText morph.
+    expect(ask.method).toBe('sendActions');
 
-    const actions = ask.payload as {
-      text: string;
-      buttons: Array<Array<{ label: string; callbackData: string }>>;
-    };
+    const actions = ask.payload as OutboundActions;
 
     expect(actions.text).toMatch(/clash|over it/i);
 
@@ -285,9 +311,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       ),
     );
 
-    const reply = await harness.vendor.nextSend();
+    const reply = await nextAnswer();
 
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/booked|done/i);
 
     // The authorized overlap landed: now two tasks, no pending question, no hold.
@@ -346,9 +372,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const ask = await harness.vendor.nextSend();
 
-    // ADR 0053: the ask_user question morphs the loading line via editMessageText
-    // carrying the inline keyboard (not a fresh sendActions).
-    expect(ask.method).toBe('editMessageText');
+    // ADR 0059 (private path): the ask_user question is a FRESH sendActions inline
+    // keyboard — a draft cannot carry buttons — not an editMessageText morph.
+    expect(ask.method).toBe('sendActions');
 
     // The destructive-replace refusal was fed back to the model in-loop.
     const auditRows = await harness.listToolAuditRows();
@@ -401,10 +427,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, 'book dentist at 3:30'),
     );
 
-    const reply = await harness.vendor.nextSend();
+    const reply = await nextAnswer();
 
-    // It committed without asking: a morphed reply, two tasks, no pending question.
-    expect(reply.method).toBe('editMessageText');
+    // It committed without asking: a fresh finalised-answer send, two tasks, no
+    // pending question.
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/booked|done/i);
     expect(await harness.countTasks(fixtures.calendar.id)).toBe(2);
     expect(await harness.listPendingQuestions()).toHaveLength(0);
@@ -447,9 +474,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, 'book dentist at 3:30'),
     );
 
-    const reply = await harness.vendor.nextSend();
+    const reply = await nextAnswer();
 
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
 
     // The deny-policy refusal reached the model in-loop.
     const auditRows = await harness.listToolAuditRows();
@@ -488,14 +515,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const ask = await harness.vendor.nextSend();
 
-    // ADR 0053: the question morphs the loading line via editMessageText carrying
-    // the inline keyboard, not a fresh sendActions / plain reply.
-    expect(ask.method).toBe('editMessageText');
+    // ADR 0059 (private path): the question is a FRESH sendActions inline keyboard
+    // (a draft cannot carry buttons), not an editMessageText morph or plain reply.
+    expect(ask.method).toBe('sendActions');
 
-    const actions = ask.payload as {
-      text: string;
-      buttons: Array<Array<{ label: string; callbackData: string }>>;
-    };
+    const actions = ask.payload as OutboundActions;
 
     expect(actions.text).toBe('Which day should I book it?');
     expect(actions.buttons[0][0].label).toBe('Friday');
@@ -544,22 +568,19 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     // The callback path acknowledges, morphs the original question (R3 / ADR 0058
     // — strips the buttons + appends "User selected: Friday"), then sends the
-    // continued reply. Drain to the resume's TERMINAL ANSWER morph specifically:
-    // skip the ack, the answered-question morph (clearButtons — its text ALSO
-    // contains "Friday"), and any `<pre>` recap/loading frame, so we only assert on
-    // the real confirmation AND so the resumed model rounds have been captured
-    // before the request assertions below (otherwise we race the in-flight turn).
-    let resumeReply = await harness.vendor.nextSend();
+    // continued reply. The resume's TERMINAL ANSWER on the private path is a FRESH
+    // finalised-answer sendMessage (the draft self-expires) — NOT the answered
+    // -question morph (an editMessageText carrying clearButtons whose text ALSO
+    // contains "Friday"). Await the finalised answer carrying the real confirmation,
+    // which guarantees the resumed model rounds have been captured before the request
+    // assertions below (otherwise we race the in-flight turn).
+    const resumeReply = await harness.vendor.nextReply(
+      (send) =>
+        CapturingVendorConnector.isPrivateAnswer(send) &&
+        /booked your slot/i.test(replyTextOf(send)),
+    );
 
-    while (
-      resumeReply.method !== 'editMessageText' ||
-      (resumeReply.payload as { clearButtons?: boolean }).clearButtons ===
-        true ||
-      !/booked your slot/i.test(replyTextOf(resumeReply))
-    ) {
-      resumeReply = await harness.vendor.nextSend();
-    }
-
+    expect(resumeReply.method).toBe('sendMessage');
     expect(replyTextOf(resumeReply)).toMatch(/friday/i);
 
     // The model WAS re-invoked on resume: the resume turn's first request carried
@@ -610,9 +631,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildTextUpdate(fixtures.chatId, "what's on tomorrow?"),
     );
 
-    const reply = await harness.vendor.nextSend();
+    const reply = await nextAnswer();
 
-    expect(reply.method).toBe('editMessageText');
+    expect(reply.method).toBe('sendMessage');
     expect(replyTextOf(reply)).toMatch(/nothing scheduled/i);
 
     // Read-only narration is genuine: the loop must NOT have forced a re-drive,

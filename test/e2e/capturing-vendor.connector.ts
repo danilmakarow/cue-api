@@ -54,6 +54,15 @@ const createDeferred = (): Deferred => {
   return { promise, resolve };
 };
 
+/** A predicate over a captured send — the matcher a {@link PredicateWaiter} fires on. */
+export type CapturedSendPredicate = (send: CapturedSend) => boolean;
+
+/** A parked predicate await: the matcher plus the resolver to fire when it matches. */
+interface PredicateWaiter {
+  predicate: CapturedSendPredicate;
+  resolve: (send: CapturedSend) => void;
+}
+
 /**
  * A capturing {@link TelegramVendorConnector} for the real-pipeline e2e harness.
  *
@@ -67,16 +76,37 @@ const createDeferred = (): Deferred => {
  * to the single `TelegramVendorConnector` provider, overriding that one provider
  * with this value points every ingress and egress path at this instance.
  *
- * Terminal-signal rule (ADR 0053 "morph"): a turn no longer ends in a fresh
- * `sendMessage`. It posts ONE real status message (`sendMessage`, the loading
- * line), edits it with PLAIN per-round recaps (`editMessageText`, no format),
- * then MORPHS it ONE last time into the answer / ask via `editMessageText`
- * carrying `format === Html` or `buttons`. So a `nextSend()` waiter resolves
- * ONLY on a SUBSTANTIVE reply: `sendActions`, `sendMessageWithKeyboard`,
- * `acknowledgeCallback`, or an `editMessageText` with `format === Html` or
- * `buttons`. A bare `sendMessage` (loading line), a PLAIN `editMessageText`
- * (recap / voice line), a `sendMessageDraft`, and a `deleteMessage` (fallback
- * cleanup) are all RECORDED for inspection but do NOT resolve `nextSend()`.
+ * Terminal-signal rule — TWO worlds (ADR 0059 reverted the live surface from the
+ * "morph one real message" model back to native drafts, but KEPT the morph as the
+ * non-private fallback):
+ *
+ *  - PRIVATE chats (the harness default — `buildTextUpdate` omits `chat.type`, so
+ *    ingress normalizes {@link ChatType.Private}): the live surface is an ephemeral
+ *    `sendMessageDraft` (thinking word → bare recap text → streamed answer),
+ *    and the TERMINAL reply is a FRESH real `sendMessage` (the finalised answer) or
+ *    a fresh `sendActions` (an `ask_user` question with inline buttons). There is NO
+ *    `editMessageText` morph and no draft clear — the draft self-expires.
+ *  - NON-PRIVATE chats (group / supergroup, e.g. via a `chat.type` override): the
+ *    retained ADR 0053 fallback — ONE real status `sendMessage` (the loading line)
+ *    edited with `<pre>` per-round recaps, then MORPHED one last time into the
+ *    answer / ask via `editMessageText` carrying `format === Html` or `buttons`.
+ *
+ * Two await strategies serve these two worlds:
+ *
+ *  - {@link nextSend} resolves on a SUBSTANTIVE MORPH reply: `sendActions`,
+ *    `sendMessageWithKeyboard`, `acknowledgeCallback`, or an `editMessageText` with
+ *    `format === Html` or `buttons` (and NOT a `<pre>` status frame). A bare framing
+ *    `sendMessage` (loading line OR the private finalised answer), a `<pre>`
+ *    `editMessageText` recap, a `sendMessageDraft`, and a `deleteMessage` are
+ *    RECORDED for inspection but do NOT resolve it. This stays the seam for the
+ *    non-private morph path and for the substantive-fresh-send paths (`ask_user`
+ *    keyboard, reply-keyboard, callback ack).
+ *  - {@link nextReply} resolves on the next captured send matching a caller-supplied
+ *    predicate, scanning the WHOLE capture log first (so a send that arrived before
+ *    the await is never missed) and parking otherwise. This is the PRIVATE-path seam:
+ *    the finalised answer is a framing `sendMessage` that `nextSend()` never fires
+ *    on, so a private test awaits it via `nextReply(isPrivateAnswer)` (or a custom
+ *    text predicate). See {@link isPrivateAnswer}.
  */
 export class CapturingVendorConnector extends TelegramVendorConnector {
   private readonly captured: CapturedSend[] = [];
@@ -86,6 +116,16 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
 
   /** Resolver waiting for the next send, when a `nextSend()` outran the worker. */
   private waiter: Deferred | null = null;
+
+  /**
+   * Indices into {@link captured} already consumed by a {@link nextReply} await, so
+   * a matched reply is never returned twice. A `nextReply()` sweep skips these and a
+   * just-matched send is added here, mirroring the FIFO consumption of `nextSend()`.
+   */
+  private readonly consumedReplyIndices = new Set<number>();
+
+  /** Parked predicate awaits ({@link nextReply}), resolved as matching sends arrive. */
+  private readonly predicateWaiters: PredicateWaiter[] = [];
 
   /**
    * Monotonic source for synthetic vendor message ids. The persisted
@@ -109,6 +149,21 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
     return /^\s*<pre>[\s\S]*<\/pre>\s*$/.test(text);
   }
 
+  /**
+   * Whether a captured send is the PRIVATE-path finalised answer (ADR 0059): a
+   * FRESH real `sendMessage` carrying `format === Html` (the model's HTML-converted
+   * answer), as opposed to the bare-text loading-line / plain-fallback `sendMessage`.
+   * The private terminal answer is a fresh send (not a morph), so `nextSend()` never
+   * fires on it — a private test awaits it via `nextReply(CapturingVendorConnector.
+   * isPrivateAnswer)`. Static so specs can pass it as a predicate without an instance.
+   */
+  static isPrivateAnswer(send: CapturedSend): boolean {
+    return (
+      send.method === 'sendMessage' &&
+      (send.payload as OutboundMessage | null)?.format === OutboundFormat.Html
+    );
+  }
+
   constructor(externalVendorConfig: ExternalVendorConfig) {
     super(externalVendorConfig);
   }
@@ -125,12 +180,39 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
-   * Records a SUBSTANTIVE (turn-terminal) outbound send and either hands it to a
-   * parked `nextSend()` waiter or buffers it for the next `nextSend()` call (so a
-   * send that arrives before the test awaits is never lost).
+   * Appends a send to the capture log and offers it to any parked
+   * {@link nextReply} predicate await it satisfies. Both terminal sends
+   * ({@link record}) and framing sends ({@link recordFraming}) — and the draft
+   * frames — route through here, so a predicate await can match ANY captured send
+   * (e.g. the private finalised answer `sendMessage`, which is framing) regardless
+   * of the morph-only `nextSend()` classification. The first parked waiter whose
+   * predicate matches (FIFO) wins and is removed; non-matching waiters stay parked.
+   */
+  private capture(send: CapturedSend): void {
+    const sendIndex = this.captured.push(send) - 1;
+
+    const matchedIndex = this.predicateWaiters.findIndex((waiter) =>
+      waiter.predicate(send),
+    );
+
+    if (matchedIndex !== -1) {
+      const [matched] = this.predicateWaiters.splice(matchedIndex, 1);
+
+      // This send is now consumed by the predicate await; mark its index so a later
+      // nextReply() sweep never re-offers it.
+      this.consumedReplyIndices.add(sendIndex);
+      matched.resolve(send);
+    }
+  }
+
+  /**
+   * Records a SUBSTANTIVE (turn-terminal MORPH) outbound send and either hands it to
+   * a parked `nextSend()` waiter or buffers it for the next `nextSend()` call (so a
+   * send that arrives before the test awaits is never lost). Also offered to any
+   * {@link nextReply} predicate await via {@link capture}.
    */
   private record(send: CapturedSend): void {
-    this.captured.push(send);
+    this.capture(send);
 
     if (this.waiter) {
       const { resolve } = this.waiter;
@@ -145,13 +227,15 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
-   * Records a NON-terminal framing send (the loading-line `sendMessage`, a plain
-   * recap / voice `editMessageText`, a draft, or a fallback `deleteMessage`) into
-   * `captured` for inspection ONLY — it never resolves a `nextSend()` waiter,
-   * because the substantive reply now arrives as a later morph `editMessageText`.
+   * Records a send that is NOT a morph terminal signal (the loading-line
+   * `sendMessage`, the PRIVATE finalised-answer `sendMessage`, a `<pre>` recap
+   * `editMessageText`, a draft, or a fallback `deleteMessage`) into `captured` for
+   * inspection — it never resolves a `nextSend()` waiter. It IS offered to
+   * {@link nextReply} predicate awaits via {@link capture}, so the private terminal
+   * answer (framing here, but the real reply) can still be awaited deterministically.
    */
   private recordFraming(send: CapturedSend): void {
-    this.captured.push(send);
+    this.capture(send);
   }
 
   /**
@@ -174,31 +258,66 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
     return this.waiter.promise;
   }
 
+  /**
+   * Resolves with the next captured send (of ANY method) matching `predicate`,
+   * sweeping the WHOLE capture log first — so a send that already arrived before the
+   * await is matched immediately — and parking until one arrives otherwise. This is
+   * the PRIVATE-path await seam (ADR 0059): the finalised answer is a fresh framing
+   * `sendMessage` that {@link nextSend} never fires on, so a private test awaits the
+   * real reply here, e.g. `nextReply(CapturingVendorConnector.isPrivateAnswer)` for
+   * the finalised answer or `nextReply((send) => send.method === 'sendActions')` for
+   * a fresh `ask_user` keyboard. Each matched send is consumed once (FIFO), so
+   * successive `nextReply()` calls walk distinct sends. Bounded by jest's
+   * `testTimeout`, surfacing a stuck turn as a timeout rather than a hang.
+   */
+  nextReply(predicate: CapturedSendPredicate): Promise<CapturedSend> {
+    for (let index = 0; index < this.captured.length; index += 1) {
+      if (this.consumedReplyIndices.has(index)) {
+        continue;
+      }
+
+      const send = this.captured[index];
+
+      if (predicate(send)) {
+        this.consumedReplyIndices.add(index);
+
+        return Promise.resolve(send);
+      }
+    }
+
+    return new Promise<CapturedSend>((resolve) => {
+      this.predicateWaiters.push({ predicate, resolve });
+    });
+  }
+
   /** Every send recorded so far, in order (for multi-send assertions). */
   get sends(): readonly CapturedSend[] {
     return this.captured;
   }
 
   /**
-   * Clears the capture log and any buffered/pending sends between tests so one
-   * scenario's replies never leak into the next.
+   * Clears the capture log and any buffered/pending/parked sends between tests so
+   * one scenario's replies never leak into the next.
    */
   reset(): void {
     this.captured.length = 0;
     this.pending.length = 0;
     this.waiter = null;
+    this.consumedReplyIndices.clear();
+    this.predicateWaiters.length = 0;
   }
 
   /**
-   * Captures a `sendMessage` instead of calling Telegram. Under ADR 0053 this is
-   * the NON-terminal per-turn status loading line (e.g. `Crunching…`) whose id is
-   * captured so later recaps + the final answer can morph it via
-   * `editMessageText`; it is therefore framing, NOT a terminal turn signal, so it
-   * is recorded but does NOT resolve a `nextSend()` waiter. (The rare genuine
-   * fallback `sendMessage` — when an edit throws — is likewise non-terminal; its
-   * paired morph still arrives as the substantive `editMessageText`.) Returns a
-   * synthetic numeric message ref so the orchestrator's persistence path runs
-   * unchanged.
+   * Captures a `sendMessage` instead of calling Telegram. This method now carries
+   * TWO non-morph-terminal roles, both recorded as FRAMING (so neither resolves a
+   * `nextSend()` waiter): (1) the NON-PRIVATE per-turn status loading line whose id
+   * later recaps + the final answer morph via `editMessageText` (ADR 0053), and (2)
+   * the PRIVATE-path FINALISED ANSWER — a fresh real `sendMessage` carrying
+   * `format === Html` that replaces the self-expiring draft preview (ADR 0059).
+   * Because the private answer is the REAL terminal reply yet arrives as framing, a
+   * private test awaits it via {@link nextReply} ({@link isPrivateAnswer}) rather
+   * than `nextSend()`. Returns a synthetic numeric message ref so the orchestrator's
+   * persistence path runs unchanged.
    */
   async sendMessage(
     target: SendTarget,
@@ -296,18 +415,18 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
 
   /**
    * Captures an ephemeral status draft (`sendMessageDraft`) instead of calling
-   * Telegram — covers the live-status loading frames, the streamed-answer
-   * preview, AND the empty-text collapse frame pushed on finalize (FIX 1 / ADR
-   * 0049). A draft is NOT a terminal turn signal (the real reply is), so it is
-   * logged into `captured` for inspection but does NOT resolve a `nextSend()`
-   * waiter — a test still awaits the substantive `sendMessage`. Returns nothing,
+   * Telegram — the PRIVATE-chat live surface (ADR 0059): the rotating loading word,
+   * the bare per-round recap text, and the streamed-answer preview frames. A
+   * draft is NOT a terminal turn signal (the fresh `sendMessage` answer is), so it
+   * is logged into `captured` for inspection and offered to {@link nextReply}
+   * predicate awaits but does NOT resolve a `nextSend()` waiter. Returns nothing,
    * matching the real connector.
    */
   async sendMessageDraft(
     target: SendTarget,
     draft: MessageDraft,
   ): Promise<void> {
-    this.captured.push({ method: 'sendMessageDraft', target, payload: draft });
+    this.recordFraming({ method: 'sendMessageDraft', target, payload: draft });
   }
 
   /**

@@ -6,12 +6,16 @@ import { E2E_ENV_FILE } from './load-env';
 /** Repo root, derived from this file's location (test/e2e → ../../). */
 const REPO_ROOT = resolve(__dirname, '../../');
 
-/** The dev compose file that provides Postgres + Redis with healthchecks. */
-const COMPOSE_FILE = 'docker-compose.dev.yml';
+/**
+ * The DEDICATED e2e compose file — a separate Compose project (cue-api-test) with
+ * its own containers and volumes, isolated from `docker-compose.dev.yml`, so the
+ * teardown's `down -v` can never wipe the developer's dev database.
+ */
+const COMPOSE_FILE = 'docker-compose.test.yml';
 
 /**
- * Jest globalSetup: brings up the local Postgres + Redis containers from
- * `docker-compose.dev.yml`, sourcing ports/credentials from `.env.test` so the
+ * Jest globalSetup: brings up the dedicated test Postgres + Redis containers from
+ * `docker-compose.test.yml`, sourcing ports/credentials from `.env.test` so the
  * published host ports match what the app connects to. `--wait` blocks until
  * both healthchecks pass, so the very first `app.init()` finds a live DB/Redis.
  * Set `E2E_SKIP_DOCKER=1` to run against already-running infra (faster local

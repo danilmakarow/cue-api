@@ -3,6 +3,11 @@ import { TurnAuditStore } from './turn-audit.store';
 import { TurnRunnerService } from './turn-runner.service';
 import { ToolLoopService } from '../orchestration/tool-loop.service';
 import { ReplyPresenter } from '../reply/reply-presenter.service';
+import { StatusAnimatorService } from '../reply/status-animator.service';
+import {
+  StatusSession,
+  StatusSessionPhase,
+} from '../reply/status-session.store';
 import {
   AiStopReason,
   CompletionResult,
@@ -14,7 +19,10 @@ import {
   ConversationMessageContentType,
   User,
 } from '@/modules/database/entities';
-import { OutboundFormat } from '@/modules/external-vendor/external-vendor.types';
+import {
+  ChatType,
+  OutboundFormat,
+} from '@/modules/external-vendor/external-vendor.types';
 
 /**
  * Builds a bare CompletionResult with zeroed usage, overlaid with the given
@@ -92,6 +100,11 @@ const buildHarness = () => {
     // status.messageId routes the answer through editMessageText (not a fresh
     // sendMessage), so the mock must expose it.
     editMessageText: jest.fn().mockResolvedValue(undefined),
+    // ADR 0059: the private-chat draft surface. Inert for the stubbed-animation
+    // suites; only the real-StatusAnimation private ask_user test below exercises
+    // these (the clear_draft-equivalent settle frame + the loading-word draft).
+    sendMessageDraft: jest.fn().mockResolvedValue(undefined),
+    sendChatAction: jest.fn().mockResolvedValue(undefined),
   };
   const alert = { capture: jest.fn() };
   const redis = { set: jest.fn().mockResolvedValue('OK'), getdel: jest.fn() };
@@ -188,6 +201,12 @@ const buildHarness = () => {
     // ADR 0053: the runner drains in-flight recap edits via settle() before the
     // reply morph; inert no-op here.
     settle: jest.fn().mockResolvedValue(undefined),
+    // ADR 0059: before the real ask_user question lands, the runner settles the
+    // draft TO the question text (the Bot-API clear_draft equivalent). On this
+    // non-private stub (messageId set) the real animation no-ops; the spy lets the
+    // ask suites assert it was called with the question text + ordered before the
+    // fresh question send.
+    settleDraftTo: jest.fn().mockResolvedValue(undefined),
     // R3 (ADR 0058): the runner wraps the animation's streamAnswer as the loop
     // sink's onToken; inert spy so existing reply assertions are unaffected (the
     // throttling/stop behaviour is covered in status-animator.service.spec.ts).
@@ -1230,9 +1249,19 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    // ADR 0053: with a live status message, the question + inline keyboard MORPH
-    // that message in place (editMessageText carrying the buttons) — no fresh
-    // sendActions / sendMessage bubble.
+    // ADR 0059: before sending, the runner settles the draft TO the question text
+    // (the clear_draft equivalent) — a no-op on this non-private stub but still
+    // invoked with the question, and ordered BEFORE the question send.
+    expect(harness.statusAnimation.settleDraftTo).toHaveBeenCalledWith(
+      'Which day?',
+    );
+    expect(
+      harness.statusAnimation.settleDraftTo.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.vendor.editMessageText.mock.invocationCallOrder[0]);
+
+    // ADR 0053: with a live status message (non-private), the question + inline
+    // keyboard MORPH that message in place (editMessageText carrying the buttons)
+    // — no fresh sendActions / sendMessage bubble.
     expect(harness.vendor.editMessageText).toHaveBeenCalledTimes(1);
     expect(harness.vendor.sendActions).not.toHaveBeenCalled();
     expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
@@ -1245,6 +1274,99 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       { label: 'Friday', callbackData: 'ask:pq-77:fri' },
       { label: 'Saturday', callbackData: 'ask:pq-77:sat' },
     ]);
+  });
+
+  it('private ask_user: settles the draft TO the question, then sends a FRESH sendActions keyboard (clear_draft equivalent)', async () => {
+    const harness = buildHarness();
+
+    // Swap the stubbed animation for a REAL StatusAnimation on a PRIVATE chat, so
+    // the full chain runs: settleDraftTo → real sendMessageDraft frame, then the
+    // presenter's FRESH sendActions (a draft carries no buttons, ADR 0059). The
+    // session-store fake echoes the seeded draft id; messageId stays null (private)
+    // so the presenter sends fresh rather than morphing.
+    const sessions = {
+      open: jest.fn(
+        async (input): Promise<StatusSession> => ({
+          vendorChatId: input.vendorChatId,
+          turnId: input.turnId,
+          chatType: input.chatType,
+          vendorMessageId: undefined,
+          draftId: input.seedDraftId,
+          locale: input.locale,
+          phase: StatusSessionPhase.Thinking,
+        }),
+      ),
+      clear: jest.fn().mockResolvedValue(undefined),
+      advancePhase: jest.fn().mockResolvedValue(undefined),
+    };
+    const realAnimator = new StatusAnimatorService(
+      harness.vendor as never,
+      sessions as never,
+      { statusWordIntervalMs: 5000, draftUpdatesPerSecond: 4 } as never,
+    );
+    const realAnimation = await realAnimator.begin({
+      vendorChatId: CHAT_ID,
+      turnId: 'cid-priv',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    harness.statusAnimator.begin.mockResolvedValueOnce(realAnimation);
+
+    harness.pendingInteraction.createPendingQuestion.mockResolvedValueOnce({
+      id: 'pq-88',
+      payload: { optionLabels: [] },
+    });
+    harness.ai.complete.mockResolvedValueOnce(
+      completion({
+        stopReason: AiStopReason.TOOL_USE,
+        toolCalls: [toolCall('ask_user', { question: 'Which day?' })],
+      }),
+    );
+    harness.toolDispatcher.dispatch.mockResolvedValue({
+      content: 'suspended',
+      askUser: {
+        question: 'Which day?',
+        options: [
+          { id: 'fri', label: 'Friday' },
+          { id: 'sat', label: 'Saturday' },
+        ],
+      },
+    });
+
+    await harness.service.handleText(USER, {
+      text: 'when should I book it?',
+      contentType: ConversationMessageContentType.TEXT,
+      vendorChatId: CHAT_ID,
+      vendorMessageId: null,
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    // A final draft frame equal to the question text was pushed (clear_draft
+    // equivalent) — the last sendMessageDraft carries exactly the question.
+    const lastDraft = harness.vendor.sendMessageDraft.mock.calls.at(-1)?.[1];
+
+    expect(lastDraft.text).toBe('Which day?');
+
+    // Then the REAL question is a fresh sendActions keyboard (no morph on a private
+    // draft turn), ordered AFTER the settle draft frame.
+    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
+    expect(harness.vendor.editMessageText).not.toHaveBeenCalled();
+
+    const [, actions] = harness.vendor.sendActions.mock.calls[0];
+
+    expect(actions.text).toBe('Which day?');
+    expect(actions.buttons[0]).toEqual([
+      { label: 'Friday', callbackData: 'ask:pq-88:fri' },
+      { label: 'Saturday', callbackData: 'ask:pq-88:sat' },
+    ]);
+
+    const settleOrder =
+      harness.vendor.sendMessageDraft.mock.invocationCallOrder.at(-1)!;
+    const actionsOrder = harness.vendor.sendActions.mock.invocationCallOrder[0];
+
+    expect(settleOrder).toBeLessThan(actionsOrder);
   });
 
   it('resumes on a button tap: claims the row, feeds back ONE synthetic tool_result, and re-invokes the model', async () => {

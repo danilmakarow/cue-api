@@ -24,33 +24,49 @@ export enum StatusSessionPhase {
 }
 
 /**
- * The persisted live-status handle for one in-flight turn (ADR 0053). The status
- * surface is ALWAYS a single real message edited in place via `editMessageText`
- * (no ephemeral draft) — so the handle holds the real `vendorMessageId` it
- * re-targets, plus the chat + locale the animation needs and the current phase.
+ * The persisted live-status handle for one in-flight turn (ADR 0059, reversing
+ * 0053). The surface depends on the chat kind: a PRIVATE chat drives an ephemeral
+ * Telegram draft (`sendMessageDraft`) keyed by a stable non-zero {@link draftId}
+ * and has NO real status message until the turn finalizes; a NON-PRIVATE chat
+ * keeps the ADR 0053 fallback — a single real message edited in place via
+ * `editMessageText`, re-targeted by {@link vendorMessageId}. The handle carries
+ * whichever pointer the surface uses, plus the chat + locale + current phase.
  */
 export interface StatusSession {
   vendorChatId: string;
   turnId: string;
   chatType: ChatType;
-  /** Real vendor message id of the one per-turn status message (once posted). */
+  /**
+   * Real vendor message id of the one per-turn status message (non-private
+   * fallback, ADR 0053). Absent on a private/draft turn — there is no real status
+   * message; the draft self-expires and the final answer is a fresh send.
+   */
   vendorMessageId?: string;
+  /**
+   * Stable NON-ZERO draft id for the private-chat ephemeral draft surface (ADR
+   * 0059). Re-sending `sendMessageDraft` with the same id animates the text diffs
+   * natively. Absent on the non-private fallback (which has no draft).
+   */
+  draftId?: number;
   locale: string;
   phase: StatusSessionPhase;
 }
 
 /**
  * Inputs needed to open a status session for a turn. `seedVendorMessageId`
- * carries the real message id the caller created for this turn's status surface
- * (absent until the initial send lands).
+ * carries the real message id the caller created for a NON-PRIVATE turn's status
+ * surface (absent until the initial send lands); `seedDraftId` carries the stable
+ * non-zero draft id for a PRIVATE turn's ephemeral draft surface (ADR 0059).
  */
 export interface OpenStatusSessionInput {
   vendorChatId: string;
   turnId: string;
   chatType: ChatType;
   locale: string;
-  /** The real message id to edit for this turn's status surface, when known. */
+  /** The real message id to edit for a non-private turn's status surface, when known. */
   seedVendorMessageId?: string;
+  /** The stable non-zero draft id for a private turn's ephemeral draft surface (ADR 0059). */
+  seedDraftId?: number;
 }
 
 /**
@@ -75,9 +91,10 @@ export class StatusSessionStore {
   ) {}
 
   /**
-   * Builds the session object a fresh `open` persists from its input. The surface
-   * is always a single real message (ADR 0053), so it carries the seed message id
-   * when the caller already posted it.
+   * Builds the session object a fresh `open` persists from its input. It carries
+   * whichever surface pointer the chat kind uses (ADR 0059): the seed `draftId`
+   * for a private/draft turn, or the seed `vendorMessageId` for the non-private
+   * `editMessageText` fallback — whichever the caller supplied.
    */
   private buildSession(input: OpenStatusSessionInput): StatusSession {
     return {
@@ -85,6 +102,7 @@ export class StatusSessionStore {
       turnId: input.turnId,
       chatType: input.chatType,
       vendorMessageId: input.seedVendorMessageId,
+      draftId: input.seedDraftId,
       locale: input.locale,
       phase: StatusSessionPhase.Thinking,
     };

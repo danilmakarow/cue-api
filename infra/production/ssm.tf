@@ -75,10 +75,12 @@ locals {
     # the per-turn Redis StatusSession pointer. (The former dot/word animation
     # intervals were removed with the draft surface.)
     ASSISTANT_STATUS_SESSION_TTL_SECONDS = "120"
-    # Status-surface ASCII braille spinner tick interval (ms, R1 / ADR 0057). Kept
-    # ~1000 (never sub-second) to stay clear of Telegram editMessageText 429
-    # flood-control.
-    ASSISTANT_STATUS_SPINNER_INTERVAL_MS = "1000"
+    # Loading-word rotation / draft keepalive interval (ms): how often the status
+    # surface cycles its loading word and re-touches the draft so it stays alive.
+    ASSISTANT_STATUS_WORD_INTERVAL_MS = "5000"
+    # Max Telegram draft updates per second — coalescing rate cap that keeps
+    # token-stream edits clear of editMessageText 429 flood-control.
+    ASSISTANT_DRAFT_UPDATES_PER_SECOND = "4"
 
     # v2 message debounce + queue-after (Wave C, Story 14a).
     ASSISTANT_DEBOUNCE_WINDOW_MS      = "2000"

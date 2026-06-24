@@ -5,8 +5,7 @@ import {
   resolveStatusLocale,
   resolveTextStatusLocale,
   resolveVoiceStatusLocale,
-  SPINNER_FRAMES,
-  spinnerLoadingLine,
+  StatusLocale,
   voiceListeningPhrase,
 } from './status-phrases';
 
@@ -202,13 +201,54 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
     });
   });
 
-  describe('voiceListeningPhrase', () => {
-    it('returns the localized voice line per locale', () => {
-      expect(voiceListeningPhrase('en')).toBe(
+  describe('voiceListeningPhrase (ADR 0059 — picks among variants)', () => {
+    /** The authored voice variants per locale, mirrored from the source for assertion. */
+    const VARIANTS: Record<StatusLocale, string[]> = {
+      en: [
         'Listening to your beautiful voice',
-      );
-      expect(voiceListeningPhrase('uk')).toBe('Слухаю ваш чудовий голос');
-      expect(voiceListeningPhrase('ru')).toBe('Слушаю ваш прекрасный голос');
+        'Lending you my ear',
+        'All ears',
+        'Tuning in to your voice',
+      ],
+      uk: [
+        'Вчуваюся у ваш голос',
+        'Ловлю ваш шепіт',
+        'Слухаю мов босорканя',
+        'Дослухаюсь до вашого слова',
+        'Прихиляю вухо до вас',
+      ],
+      ru: [
+        'Слушаю вас',
+        'Обратилась в слух',
+        'Ловлю каждое слово',
+        'Вся внимание',
+        'Внимаю каждому слову',
+      ],
+    };
+
+    it('returns a valid variant for each locale (real RNG, many draws stay in-set)', () => {
+      (['en', 'uk', 'ru'] as StatusLocale[]).forEach((locale) => {
+        for (let index = 0; index < 50; index += 1) {
+          expect(VARIANTS[locale]).toContain(voiceListeningPhrase(locale));
+        }
+      });
+    });
+
+    it('picks the first variant with random→0 and the last with random→1 (deterministic)', () => {
+      (['en', 'uk', 'ru'] as StatusLocale[]).forEach((locale) => {
+        const variants = VARIANTS[locale];
+
+        expect(voiceListeningPhrase(locale, () => 0)).toBe(variants[0]);
+        // random()→1 clamps to the last index (no overrun).
+        expect(voiceListeningPhrase(locale, () => 1)).toBe(
+          variants[variants.length - 1],
+        );
+      });
+    });
+
+    it('selects an inner variant by the injected random', () => {
+      // random→0.5 over 4 en variants ⇒ floor(2) ⇒ the third variant.
+      expect(voiceListeningPhrase('en', () => 0.5)).toBe('All ears');
     });
   });
 
@@ -233,8 +273,8 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
       const ruFirst = nextLoadingWord('ru', undefined, () => 0);
 
       expect(enFirst).toBe('Thinking');
-      expect(ukFirst).toBe('Думаю');
-      expect(ruFirst).toBe('Думаю'); // ru list also starts with Думаю
+      expect(ukFirst).toBe('Ворожу');
+      expect(ruFirst).toBe('Колдую');
     });
 
     it('excludes the previous word so the candidate pool shifts', () => {
@@ -250,57 +290,45 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
     });
   });
 
-  describe('spinnerLoadingLine (R1 / ADR 0057)', () => {
-    it('prepends the frame-0 glyph to the word with NO trailing ellipsis', () => {
-      expect(spinnerLoadingLine('Thinking', 0)).toBe(
-        `${SPINNER_FRAMES[0]} Thinking`,
-      );
-      // The spinner replaces the old static dots — no trailing ellipsis remains.
-      expect(spinnerLoadingLine('Thinking', 0)).not.toMatch(/…$/);
-    });
+  describe('no phrase carries trailing punctuation (Telegram renders the draft bare)', () => {
+    /** Trailing dot, ellipsis (… or ...), comma, or whitespace at the very end. */
+    const TRAILING_PUNCTUATION = /(\.\.\.|[.…,\s])$/;
 
-    it('advances through the frame set as the index grows', () => {
-      expect(spinnerLoadingLine('Готую', 1)).toBe(`${SPINNER_FRAMES[1]} Готую`);
-      expect(spinnerLoadingLine('Готую', 4)).toBe(`${SPINNER_FRAMES[4]} Готую`);
-    });
+    /**
+     * Sweeps a picker across every index by feeding it injected randoms fine
+     * enough to land on each slot (both pickers clamp the index), de-duping into
+     * the full distinct vocabulary so the assertion covers every authored phrase.
+     */
+    const collectAll = (pick: (random: () => number) => string): string[] => {
+      const seen = new Set<string>();
 
-    it('wraps the frame index modulo the frame count (monotonic counters are fine)', () => {
-      const frameCount = SPINNER_FRAMES.length;
+      for (let step = 0; step < 1000; step += 1) {
+        seen.add(pick(() => step / 1000));
+      }
 
-      // Index frameCount wraps back to frame 0, frameCount+2 to frame 2.
-      expect(spinnerLoadingLine('Cooking', frameCount)).toBe(
-        `${SPINNER_FRAMES[0]} Cooking`,
-      );
-      expect(spinnerLoadingLine('Cooking', frameCount + 2)).toBe(
-        `${SPINNER_FRAMES[2]} Cooking`,
-      );
-    });
+      return [...seen];
+    };
 
-    it('animates the SAME word across ticks (only the leading frame changes)', () => {
-      const lines = [0, 1, 2, 3].map((frame) =>
-        spinnerLoadingLine('Brewing', frame),
-      );
+    (['en', 'uk', 'ru'] as StatusLocale[]).forEach((locale) => {
+      it(`no LOADING_WORDS entry for ${locale} ends with a dot / ellipsis / comma`, () => {
+        const words = collectAll((random) =>
+          nextLoadingWord(locale, undefined, random),
+        );
 
-      // Every line ends in the same word; only the leading glyph rotates.
-      lines.forEach((line) => expect(line.endsWith('Brewing')).toBe(true));
-      expect(new Set(lines).size).toBe(4);
-    });
-  });
+        words.forEach((word) => {
+          expect(word).not.toMatch(TRAILING_PUNCTUATION);
+        });
+      });
 
-  describe('SPINNER_FRAMES', () => {
-    it('is the classic 10-frame braille set', () => {
-      expect(SPINNER_FRAMES).toEqual([
-        '⠋',
-        '⠙',
-        '⠹',
-        '⠸',
-        '⠼',
-        '⠴',
-        '⠦',
-        '⠧',
-        '⠇',
-        '⠏',
-      ]);
+      it(`no VOICE_LISTENING variant for ${locale} ends with a dot / ellipsis / comma`, () => {
+        const variants = collectAll((random) =>
+          voiceListeningPhrase(locale, random),
+        );
+
+        variants.forEach((variant) => {
+          expect(variant).not.toMatch(TRAILING_PUNCTUATION);
+        });
+      });
     });
   });
 });
