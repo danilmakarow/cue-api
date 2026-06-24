@@ -1,4 +1,5 @@
-# Continuous delivery. On every push to master: re-run the quality gate, build & push the
+# Continuous delivery. On every push to master: re-run the quality + functionality gates (lint,
+# type, unit, e2e), build & push the
 # image to ECR (tagged with the commit SHA — reused, not re-pushed, if it already exists since
 # tags are immutable), then run deploy/deploy.sh on the box via SSM Run Command. Can also be
 # dispatched manually to redeploy/roll back to any retained tag (see workflow_dispatch below).
@@ -32,12 +33,19 @@ permissions:
   contents: read
 
 jobs:
-  # Same checks as PR CI — a release can never skip the gate.
+  # Same staged checks as PR CI — a release can never skip the gate.
+  # Stage 1 — quality (lint + type-check).
   quality:
     uses: ./.github/workflows/_quality.yml
 
-  deploy:
+  # Stage 2 — functionality (unit + e2e), only after quality passes.
+  functionality:
     needs: quality
+    uses: ./.github/workflows/_functionality.yml
+
+  # Stage 3 — deploy, only after both check stages pass.
+  deploy:
+    needs: functionality
     runs-on: ubuntu-latest
     environment: production # optional required-reviewer gate; also pins the OIDC subject
     permissions:

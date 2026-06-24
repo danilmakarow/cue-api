@@ -1,6 +1,7 @@
-# Continuous integration — runs the quality gate on every pull request.
-# Pushes to master are handled by deploy.yml, which runs the same quality job
-# before deploying, so the checks gate both merge and release.
+# Continuous integration — runs the full check pipeline on every pull request:
+# stage 1 (quality: lint + type) then stage 2 (functionality: unit + e2e). Pushes
+# to master are handled by deploy.yml, which runs these same two stages before
+# deploying, so the checks gate both merge and release.
 name: ci
 
 on:
@@ -15,5 +16,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Stage 1 — quality gate (lint + type-check).
   quality:
     uses: ./.github/workflows/_quality.yml
+
+  # Stage 2 — functionality gate (unit + e2e), only after quality passes.
+  functionality:
+    needs: quality
+    uses: ./.github/workflows/_functionality.yml
