@@ -215,10 +215,14 @@ export interface VendorMessageRef {
 }
 
 /**
- * Edit the text (and optional format) of an already-sent message in place,
- * mapped to Telegram `editMessageText`. The non-private degraded path for the
- * live-status / streaming surface (drafts are private-only); shares the per-chat
- * ~1 msg/s send budget, so callers must throttle (ADR 0012).
+ * Edit the text (and optional format / inline keyboard) of an already-sent
+ * message in place, mapped to Telegram `editMessageText`. This is the SOLE
+ * live-status + reply surface (ADR 0053): one real message per turn is posted as
+ * the loading line, edited with per-round recaps, then edited ONE last time into
+ * the final answer — so the user ever sees exactly one message that morphs in
+ * place (no ephemeral draft, no ghost). `buttons`, when present, attach an inline
+ * keyboard via `reply_markup` so an `ask_user` question can morph the same
+ * message instead of spawning a second one.
  */
 export interface EditMessage {
   /** Vendor message id of the message to edit (string form). */
@@ -227,6 +231,17 @@ export interface EditMessage {
   text: string;
   /** Optional format hint; connector maps it to the vendor's scheme. */
   format?: OutboundFormat;
+  /** Optional inline keyboard rows to attach (e.g. an `ask_user` morph). */
+  buttons?: OutboundActionButton[][];
+  /**
+   * REMOVE any inline keyboard currently attached to the edited message (R3 / ADR
+   * 0058) by sending an empty `inline_keyboard` via `reply_markup`. Used when a
+   * button tap morphs the original `ask_user` question message — the now-answered
+   * buttons are stripped so they can no longer be tapped. Mutually exclusive with
+   * {@link buttons} (which attaches a keyboard); when both are set, `buttons` wins.
+   * Omitting both leaves any existing keyboard untouched.
+   */
+  clearButtons?: boolean;
 }
 
 /**

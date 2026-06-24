@@ -1,7 +1,12 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
 import { TaskGroupService } from './task-group.service';
-import { Calendar, TaskGroup } from '@/modules/database/entities';
+import {
+  Calendar,
+  RecurrenceEndType,
+  RecurrenceFrequency,
+  TaskGroup,
+} from '@/modules/database/entities';
 
 /**
  * Builds a TaskGroupDatabaseService stub exposing only the helpers the service
@@ -29,15 +34,6 @@ const buildCalendarDatabaseService = () => ({
 });
 
 /**
- * Builds a RecurrenceRuleService stub (no recurrence needed in most tests).
- */
-const buildRecurrenceRuleService = () => ({
-  create: jest.fn().mockResolvedValue({ id: 'rule-1' }),
-  update: jest.fn(),
-  remove: jest.fn(),
-});
-
-/**
  * Builds a calendar owned by the given user.
  */
 const ownedCalendar = (id: string, ownerId = 'user-1'): Calendar =>
@@ -48,18 +44,12 @@ describe('TaskGroupService', () => {
     it('validates calendar ownership then builds and saves the group', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({
-        id: 'group-1',
-        calendarId: 'cal-1',
-      } as TaskGroup);
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.create('user-1', {
@@ -74,8 +64,9 @@ describe('TaskGroupService', () => {
           name: 'Work',
           color: null,
           icon: null,
+          requiresCompletion: null,
           defaultNotificationStrategyId: null,
-          defaultRecurrenceRuleId: null,
+          recurrenceConfig: null,
           sortOrder: 0,
         }),
       );
@@ -83,17 +74,48 @@ describe('TaskGroupService', () => {
       expect(result.id).toBe('group-1');
     });
 
+    it('stores the inline recurrence config when recurrence is provided', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+
+      calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await service.create('user-1', {
+        calendarId: 'cal-1',
+        name: 'Work',
+        recurrence: { frequency: RecurrenceFrequency.DAILY },
+      });
+
+      expect(groupDb.createInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          recurrenceConfig: {
+            frequency: RecurrenceFrequency.DAILY,
+            interval: 1,
+            byWeekday: null,
+            byMonthDay: null,
+            byMonth: null,
+            endType: RecurrenceEndType.NEVER,
+            endDate: null,
+            count: null,
+          },
+        }),
+      );
+    });
+
     it('rejects when the calendar belongs to another user', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1', 'someone'));
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await expect(
@@ -105,12 +127,10 @@ describe('TaskGroupService', () => {
     it('rejects when the calendar does not exist', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await expect(
@@ -123,7 +143,6 @@ describe('TaskGroupService', () => {
     it('returns groups across every owned calendar ordered by sortOrder', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const groups = [{ id: 'g1' }, { id: 'g2' }] as TaskGroup[];
 
       calendarDb.findAllByOwner.mockResolvedValue([
@@ -135,7 +154,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.findAllForUser('user-1');
@@ -149,12 +167,10 @@ describe('TaskGroupService', () => {
     it('short-circuits to an empty array when the user owns no calendars', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.findAllForUser('user-1');
@@ -168,7 +184,6 @@ describe('TaskGroupService', () => {
     it('asserts ownership then delegates to the ordered calendar finder', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const groups = [{ id: 'g1' }] as TaskGroup[];
 
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
@@ -177,7 +192,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.findAllByCalendar('user-1', 'cal-1');
@@ -193,7 +207,6 @@ describe('TaskGroupService', () => {
     it('returns ALL matches so the caller can disambiguate duplicates', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       // Same name in two different calendars — both must come back.
       const matches = [
         { id: 'g1', calendarId: 'cal-1', name: 'Errands' },
@@ -209,7 +222,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.findByName('user-1', 'Errands');
@@ -226,12 +238,10 @@ describe('TaskGroupService', () => {
     it('returns empty when the user owns no calendars', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.findByName('user-1', 'Errands');
@@ -245,7 +255,6 @@ describe('TaskGroupService', () => {
     it('mutates the name and saves after asserting ownership', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const group = {
         id: 'group-1',
         calendarId: 'cal-1',
@@ -258,7 +267,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await service.rename('user-1', 'group-1', 'New');
@@ -270,7 +278,6 @@ describe('TaskGroupService', () => {
     it('short-circuits without saving when the name is unchanged', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const group = {
         id: 'group-1',
         calendarId: 'cal-1',
@@ -283,7 +290,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.rename('user-1', 'group-1', 'Same');
@@ -295,7 +301,6 @@ describe('TaskGroupService', () => {
     it("rejects a rename on a group in another user's calendar", async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const group = {
         id: 'group-1',
         calendarId: 'cal-1',
@@ -308,7 +313,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await expect(
@@ -321,7 +325,6 @@ describe('TaskGroupService', () => {
     it('deletes the group after asserting ownership', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
       const group = { id: 'group-1', calendarId: 'cal-1' } as TaskGroup;
 
       groupDb.findOneBy.mockResolvedValue(group);
@@ -330,7 +333,6 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await service.remove('user-1', 'group-1');
@@ -341,12 +343,10 @@ describe('TaskGroupService', () => {
     it('throws 404 when the group does not exist', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await expect(service.remove('user-1', 'missing')).rejects.toBeInstanceOf(
@@ -356,7 +356,9 @@ describe('TaskGroupService', () => {
   });
 
   describe('update', () => {
-    const groupWithRule = (ruleId: string | null): TaskGroup =>
+    const groupWithConfig = (
+      recurrenceConfig: TaskGroup['recurrenceConfig'] = null,
+    ): TaskGroup =>
       ({
         id: 'group-1',
         calendarId: 'cal-1',
@@ -364,24 +366,21 @@ describe('TaskGroupService', () => {
         color: null,
         icon: null,
         sortOrder: 0,
-        defaultRecurrenceRuleId: ruleId,
-        defaultRecurrenceRule: ruleId ? { id: ruleId } : null,
+        requiresCompletion: null,
+        recurrenceConfig,
       }) as unknown as TaskGroup;
 
-    it('updates the name and saves', async () => {
+    it('updates the name and saves the same row (no re-load)', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
-      const group = groupWithRule(null);
+      const group = groupWithConfig(null);
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({ ...group, name: 'Updated' });
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       const result = await service.update('user-1', 'group-1', {
@@ -392,72 +391,94 @@ describe('TaskGroupService', () => {
       expect(result.name).toBe('Updated');
     });
 
-    it('creates a recurrence rule and links it when recurrence is provided', async () => {
+    it('sets the inline recurrence config when recurrence is provided', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
-      const group = groupWithRule(null);
+      const group = groupWithConfig(null);
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({
-        ...group,
-        defaultRecurrenceRuleId: 'rule-1',
-      });
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await service.update('user-1', 'group-1', {
-        recurrence: { frequency: 'DAILY' as never },
+        recurrence: { frequency: RecurrenceFrequency.DAILY },
       });
 
-      expect(recurrenceService.create).toHaveBeenCalledTimes(1);
-      expect(group.defaultRecurrenceRuleId).toBe('rule-1');
+      expect(group.recurrenceConfig).toEqual({
+        frequency: RecurrenceFrequency.DAILY,
+        interval: 1,
+        byWeekday: null,
+        byMonthDay: null,
+        byMonth: null,
+        endType: RecurrenceEndType.NEVER,
+        endDate: null,
+        count: null,
+      });
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
     });
 
-    it('clears the recurrence rule when recurrence: null is passed', async () => {
+    it('clears the inline recurrence config when recurrence: null is passed', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
-      const group = groupWithRule('old-rule');
+      const group = groupWithConfig({
+        frequency: RecurrenceFrequency.DAILY,
+        interval: 1,
+        byWeekday: null,
+        byMonthDay: null,
+        byMonth: null,
+        endType: RecurrenceEndType.NEVER,
+        endDate: null,
+        count: null,
+      });
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue({
-        ...group,
-        defaultRecurrenceRuleId: null,
-      });
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       await service.update('user-1', 'group-1', { recurrence: null });
 
-      expect(recurrenceService.remove).toHaveBeenCalledWith('old-rule');
-      expect(group.defaultRecurrenceRuleId).toBeNull();
+      expect(group.recurrenceConfig).toBeNull();
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('sets the group default requiresCompletion', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+      const group = groupWithConfig(null);
+
+      groupDb.findOneBy.mockResolvedValue(group);
+      calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await service.update('user-1', 'group-1', { requiresCompletion: true });
+
+      expect(group.requiresCompletion).toBe(true);
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
     });
 
     it('short-circuits without saving when nothing changes', async () => {
       const groupDb = buildGroupDatabaseService();
       const calendarDb = buildCalendarDatabaseService();
-      const recurrenceService = buildRecurrenceRuleService();
-      const group = groupWithRule(null);
+      const group = groupWithConfig(null);
 
       groupDb.findOneBy.mockResolvedValue(group);
       calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
-      groupDb.findOne.mockResolvedValue(group);
 
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
-        recurrenceService as never,
       );
 
       // Passing the same name — no change, should not call save.

@@ -1,16 +1,19 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsInt,
   IsOptional,
   IsString,
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
+import { IsTaskColor } from '@/modules/task/dtos/is-task-color.validator';
 
 /**
  * DTO for updating a TaskGroup. All fields are optional — omitted keys leave the
@@ -24,10 +27,11 @@ export class UpdateTaskGroupDto {
   @MaxLength(255)
   name?: string;
 
-  @ApiPropertyOptional({ nullable: true, example: '#E27921', maxLength: 64 })
+  /** Preset name / `#RRGGBB` hex to set; null to clear the default. */
+  @ApiPropertyOptional({ nullable: true, example: 'BLUE' })
   @IsOptional()
-  @IsString()
-  @MaxLength(64)
+  @ValidateIf((dto: UpdateTaskGroupDto) => dto.color !== null)
+  @IsTaskColor()
   color?: string | null;
 
   @ApiPropertyOptional({ nullable: true, example: 'cart.fill', maxLength: 64 })
@@ -41,6 +45,12 @@ export class UpdateTaskGroupDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  /** Boolean to set the group default; null to clear it. */
+  @ApiPropertyOptional({ nullable: true })
+  @IsOptional()
+  @IsBoolean()
+  requiresCompletion?: boolean | null;
 
   /**
    * When set to a rule DTO, adds or replaces the group's default recurrence rule.

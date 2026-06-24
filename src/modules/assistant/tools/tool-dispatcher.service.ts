@@ -20,6 +20,7 @@ import {
   listGroupsInputSchema,
   listTasksInputSchema,
   setReminderInputSchema,
+  updateGroupInputSchema,
   updateTaskInputSchema,
 } from './tool-schemas';
 import { ToolHandlerHost } from './tool.contract';
@@ -779,6 +780,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
       isAllDay: parsed.isAllDay,
       timezone,
       requiresCompletion: parsed.requiresCompletion,
+      color: parsed.color,
       groupId,
       recurrence: parsed.recurrence
         ? this.toRecurrenceDto(parsed.recurrence)
@@ -808,16 +810,35 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     const task = await this.taskService.findById(context.userId, target.taskId);
     const isRecurringInstance =
-      task.recurrenceRuleId !== null && target.originalStart !== null;
-    const recurrenceDto = parsed.recurrence
-      ? this.toRecurrenceDto(parsed.recurrence)
-      : undefined;
+      task.recurrenceConfig !== null && target.originalStart !== null;
+    const recurrenceUpdate = this.resolveRecurrenceUpdate(parsed.recurrence);
 
     if (isRecurringInstance) {
-      return this.updateRecurring(context, task, target, parsed, recurrenceDto);
+      return this.updateRecurring(
+        context,
+        task,
+        target,
+        parsed,
+        recurrenceUpdate,
+      );
     }
 
-    return this.updateOneOff(context, task, parsed, recurrenceDto);
+    return this.updateOneOff(context, task, parsed, recurrenceUpdate);
+  }
+
+  /**
+   * Maps a validated `recurrence` update input to the value the task service
+   * expects: `undefined` (omitted ⇒ leave unchanged), `null` (clear recurrence),
+   * or the `CreateRecurrenceRuleDto` (set/replace). Single-sourced so the
+   * one-off, `all`, and `this_and_following` paths thread the same tri-state.
+   */
+  private resolveRecurrenceUpdate(
+    recurrence: RecurrenceInput | null | undefined,
+  ): CreateRecurrenceRuleDto | null | undefined {
+    if (recurrence === undefined) return undefined;
+    if (recurrence === null) return null;
+
+    return this.toRecurrenceDto(recurrence);
   }
 
   /**
@@ -840,7 +861,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
     task: Task,
     target: HandleTarget,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
-    recurrenceDto: CreateRecurrenceRuleDto | undefined,
+    recurrenceUpdate: CreateRecurrenceRuleDto | null | undefined,
   ): Promise<ToolDispatchOutcome> {
     const scope = parsed.editScope;
 
@@ -848,6 +869,11 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     const userId = context.userId;
     const originalStart = target.originalStart as Date;
+    // The split path can only ADD/replace a rule, not clear it (a split needs a
+    // rule for the new series), so it consumes only the DTO form; `all` threads
+    // the full tri-state through to the master update.
+    const recurrenceDto =
+      recurrenceUpdate === null ? undefined : recurrenceUpdate;
 
     if (scope === 'this') {
       // Read the occurrence's existing override (if any) ONCE. A prior length
@@ -956,8 +982,15 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
       ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
+      ...(parsed.requiresCompletion !== undefined
+        ? { requiresCompletion: parsed.requiresCompletion }
+        : {}),
+      ...(parsed.color !== undefined ? { color: parsed.color } : {}),
       ...(groupId !== undefined ? { groupId } : {}),
-      ...(recurrenceDto ? { recurrence: recurrenceDto } : {}),
+      // Tri-state recurrence: a DTO sets/replaces, null clears, undefined leaves.
+      ...(recurrenceUpdate !== undefined
+        ? { recurrence: recurrenceUpdate }
+        : {}),
     });
 
     return { content: `Updated all of "${updated.title}".` };
@@ -1198,7 +1231,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
     context: ToolDispatchContext,
     task: Task,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
-    recurrenceDto: CreateRecurrenceRuleDto | undefined,
+    recurrenceUpdate: CreateRecurrenceRuleDto | null | undefined,
   ): Promise<ToolDispatchOutcome> {
     let groupId: string | undefined;
 
@@ -1248,8 +1281,15 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
       ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
+      ...(parsed.requiresCompletion !== undefined
+        ? { requiresCompletion: parsed.requiresCompletion }
+        : {}),
+      ...(parsed.color !== undefined ? { color: parsed.color } : {}),
       ...(groupId !== undefined ? { groupId } : {}),
-      ...(recurrenceDto ? { recurrence: recurrenceDto } : {}),
+      // Tri-state recurrence: a DTO sets/replaces, null clears, undefined leaves.
+      ...(recurrenceUpdate !== undefined
+        ? { recurrence: recurrenceUpdate }
+        : {}),
     });
 
     return { content: `Updated "${updated.title}".` };
@@ -1272,7 +1312,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const completed = parsed.completed ?? true;
     const task = await this.taskService.findById(context.userId, target.taskId);
 
-    if (task.recurrenceRuleId !== null && target.originalStart !== null) {
+    if (task.recurrenceConfig !== null && target.originalStart !== null) {
       await this.taskService.setOccurrenceCompleted(
         context.userId,
         target.taskId,
@@ -1315,7 +1355,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     const task = await this.taskService.findById(context.userId, target.taskId);
     const isRecurringInstance =
-      task.recurrenceRuleId !== null && target.originalStart !== null;
+      task.recurrenceConfig !== null && target.originalStart !== null;
 
     // Ask which scope FIRST when a repeating task is targeted without one — the
     // model cannot meaningfully confirm a delete whose extent it has not pinned.
@@ -1382,7 +1422,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
   }
 
   /**
-   * Handles `create_group`: resolves the calendar and creates a task group.
+   * Handles `create_group`: resolves the calendar and creates a task group,
+   * threading the optional inherited defaults (color, recurrence, completion
+   * requirement) through to the service.
    */
   async handleCreateGroup(
     input: Record<string, unknown>,
@@ -1403,9 +1445,52 @@ export class ToolDispatcherService implements ToolHandlerHost {
       name: parsed.name,
       color: parsed.color,
       icon: parsed.icon,
+      requiresCompletion: parsed.requiresCompletion,
+      recurrence: parsed.recurrence
+        ? this.toRecurrenceDto(parsed.recurrence)
+        : undefined,
     });
 
     return { content: `Created group "${group.name}".` };
+  }
+
+  /**
+   * Handles `update_group`: resolves the group BY NAME (the same `resolveGroup`
+   * the create/update-task paths use — zero / multiple matches surface as a
+   * recoverable result), then renames it and/or changes its inherited defaults
+   * (color, icon, recurrence, completion requirement). Each settable field is a
+   * tri-state — a value SETS it, `null` CLEARS the group default, an omitted key
+   * leaves it — mirroring how `update_task` clears recurrence with null. A write;
+   * not a schedule-fetch.
+   */
+  async handleUpdateGroup(
+    input: Record<string, unknown>,
+    context: ToolDispatchContext,
+  ): Promise<ToolDispatchOutcome> {
+    const parsed = updateGroupInputSchema.parse(input);
+    const resolution = await this.resolveGroup(context.userId, parsed.group);
+
+    if (resolution.outcome) return resolution.outcome;
+
+    const recurrenceUpdate = this.resolveRecurrenceUpdate(parsed.recurrence);
+
+    const group = await this.taskGroupService.update(
+      context.userId,
+      resolution.groupId as string,
+      {
+        ...(parsed.name !== undefined ? { name: parsed.name } : {}),
+        ...(parsed.color !== undefined ? { color: parsed.color } : {}),
+        ...(parsed.icon !== undefined ? { icon: parsed.icon } : {}),
+        ...(parsed.requiresCompletion !== undefined
+          ? { requiresCompletion: parsed.requiresCompletion }
+          : {}),
+        ...(recurrenceUpdate !== undefined
+          ? { recurrence: recurrenceUpdate }
+          : {}),
+      },
+    );
+
+    return { content: `Updated group "${group.name}".` };
   }
 
   /**

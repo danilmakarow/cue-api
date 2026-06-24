@@ -24,6 +24,8 @@ import {
   LAST_BUTTON_STORE,
   LastButtonStore,
 } from './session/last-button.store';
+import { LastMenuStore } from './session/last-menu.store';
+import { LastMessageLanguageStore } from './session/last-message-language.store';
 import { MessageBufferStore } from './session/message-buffer.store';
 import {
   PENDING_INTERACTION_STORE,
@@ -110,6 +112,8 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
       provide: LAST_BUTTON_STORE,
       useExisting: LastButtonStore,
     },
+    LastMessageLanguageStore,
+    LastMenuStore,
     LinkingService,
     SummarizerService,
     MemoryExtractorService,

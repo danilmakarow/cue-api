@@ -11,9 +11,9 @@ import {
 import { BaseEntity } from './base.entity';
 import { Calendar } from './calendar.entity';
 import { NotificationStrategy } from './notification-strategy.entity';
-import { RecurrenceRule } from './recurrence-rule.entity';
 import { TaskGroup } from './task-group.entity';
 import { TaskOccurrenceException } from './task-occurrence-exception.entity';
+import type { RecurrenceConfig } from '@/modules/recurrence-rule/recurrence.types';
 
 /**
  * Task entity — the unified event+todo primitive for Cue.
@@ -61,8 +61,20 @@ export class Task extends BaseEntity {
   @Column()
   timezone: string;
 
-  @Column({ default: true })
-  requiresCompletion: boolean;
+  /**
+   * Per-task completion requirement. Nullable: when null the effective value is
+   * resolved task-wins as `task.requiresCompletion ?? group.requiresCompletion ??
+   * false` (the default lives in the resolver, NOT as a column default).
+   */
+  @Column({ type: 'boolean', nullable: true })
+  requiresCompletion: boolean | null;
+
+  /**
+   * Display color: a {@link TaskColor} preset name OR a custom `#RRGGBB` hex.
+   * Null inherits the group color via the effective-settings resolver.
+   */
+  @Column({ type: 'varchar', nullable: true })
+  color: string | null;
 
   /**
    * Set to the completion timestamp when the task is marked done. Stored as a timestamp rather
@@ -78,12 +90,13 @@ export class Task extends BaseEntity {
   @JoinColumn({ name: 'notificationStrategyId' })
   notificationStrategy: NotificationStrategy | null;
 
-  @Column({ type: 'uuid', nullable: true })
-  recurrenceRuleId: string | null;
-
-  @ManyToOne(() => RecurrenceRule, { onDelete: 'SET NULL' })
-  @JoinColumn({ name: 'recurrenceRuleId' })
-  recurrenceRule: RecurrenceRule | null;
+  /**
+   * Inline recurrence configuration (JSONB), or null for a non-recurring task.
+   * Replaces the former `recurrenceRuleId` FK + `recurrenceRule` relation — the
+   * rule now lives on the row itself (ADR 0054).
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  recurrenceConfig: RecurrenceConfig | null;
 
   @DeleteDateColumn({ type: 'timestamptz' })
   deletedAt: Date | null;

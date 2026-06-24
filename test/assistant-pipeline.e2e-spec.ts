@@ -36,7 +36,11 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
     await harness.reset();
   });
 
-  /** Reads the text off a captured `sendMessage`. */
+  /**
+   * Reads the text off a captured reply. Under ADR 0053 the substantive reply is
+   * an `editMessageText` (the morph) whose payload still carries a `.text`; the
+   * text is HTML-converted but plain words survive, so `/.../i` patterns match.
+   */
   const replyTextOf = (send: CapturedSend): string =>
     (send.payload as { text: string }).text;
 
@@ -59,7 +63,7 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    expect(reply.method).toBe('editMessageText');
     expect(reply.target).toEqual({ vendorChatId: fixtures.chatId });
     expect(replyTextOf(reply)).toMatch(/buy milk/i);
 
@@ -96,7 +100,7 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    expect(reply.method).toBe('editMessageText');
     expect(replyTextOf(reply)).toMatch(/three|3/i);
 
     const tasks = await harness.listTasks(fixtures.calendar.id);
@@ -216,7 +220,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     // The clash surfaced as an ask_user inline-keyboard question (the model's
     // choice), NOT a deterministic hold keyboard — there is no held Redis key.
-    expect(ask.method).toBe('sendActions');
+    // Under ADR 0053 the question MORPHS the loading line via editMessageText
+    // carrying the inline keyboard, instead of a fresh sendActions.
+    expect(ask.method).toBe('editMessageText');
 
     const actions = ask.payload as {
       text: string;
@@ -281,7 +287,7 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    expect(reply.method).toBe('editMessageText');
     expect(replyTextOf(reply)).toMatch(/booked|done/i);
 
     // The authorized overlap landed: now two tasks, no pending question, no hold.
@@ -340,7 +346,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const ask = await harness.vendor.nextSend();
 
-    expect(ask.method).toBe('sendActions');
+    // ADR 0053: the ask_user question morphs the loading line via editMessageText
+    // carrying the inline keyboard (not a fresh sendActions).
+    expect(ask.method).toBe('editMessageText');
 
     // The destructive-replace refusal was fed back to the model in-loop.
     const auditRows = await harness.listToolAuditRows();
@@ -395,8 +403,8 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    // It committed without asking: a plain reply, two tasks, no pending question.
-    expect(reply.method).toBe('sendMessage');
+    // It committed without asking: a morphed reply, two tasks, no pending question.
+    expect(reply.method).toBe('editMessageText');
     expect(replyTextOf(reply)).toMatch(/booked|done/i);
     expect(await harness.countTasks(fixtures.calendar.id)).toBe(2);
     expect(await harness.listPendingQuestions()).toHaveLength(0);
@@ -441,7 +449,7 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    expect(reply.method).toBe('editMessageText');
 
     // The deny-policy refusal reached the model in-loop.
     const auditRows = await harness.listToolAuditRows();
@@ -480,8 +488,9 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const ask = await harness.vendor.nextSend();
 
-    // The question is asked via an inline keyboard, not a plain reply.
-    expect(ask.method).toBe('sendActions');
+    // ADR 0053: the question morphs the loading line via editMessageText carrying
+    // the inline keyboard, not a fresh sendActions / plain reply.
+    expect(ask.method).toBe('editMessageText');
 
     const actions = ask.payload as {
       text: string;
@@ -533,10 +542,21 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
       harness.buildCallbackUpdate(fixtures.chatId, fridayCallback),
     );
 
-    // The callback path acknowledges, then sends the continued reply.
+    // The callback path acknowledges, morphs the original question (R3 / ADR 0058
+    // — strips the buttons + appends "User selected: Friday"), then sends the
+    // continued reply. Drain to the resume's TERMINAL ANSWER morph specifically:
+    // skip the ack, the answered-question morph (clearButtons — its text ALSO
+    // contains "Friday"), and any `<pre>` recap/loading frame, so we only assert on
+    // the real confirmation AND so the resumed model rounds have been captured
+    // before the request assertions below (otherwise we race the in-flight turn).
     let resumeReply = await harness.vendor.nextSend();
 
-    if (resumeReply.method === 'acknowledgeCallback') {
+    while (
+      resumeReply.method !== 'editMessageText' ||
+      (resumeReply.payload as { clearButtons?: boolean }).clearButtons ===
+        true ||
+      !/booked your slot/i.test(replyTextOf(resumeReply))
+    ) {
       resumeReply = await harness.vendor.nextSend();
     }
 
@@ -592,7 +612,7 @@ describe('Assistant pipeline (real-request e2e, deterministic AI)', () => {
 
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    expect(reply.method).toBe('editMessageText');
     expect(replyTextOf(reply)).toMatch(/nothing scheduled/i);
 
     // Read-only narration is genuine: the loop must NOT have forced a re-drive,

@@ -205,6 +205,7 @@ export class TaskController {
       endAt: dto.endAt,
       isAllDay: dto.isAllDay,
       requiresCompletion: dto.requiresCompletion,
+      color: dto.color,
       groupId: dto.groupId,
       recurrence: dto.recurrence,
     });

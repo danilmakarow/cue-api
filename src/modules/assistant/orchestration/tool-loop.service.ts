@@ -21,6 +21,7 @@ import {
 } from '../assistant.types';
 import { RoundRecapService } from '../background/round-recap.service';
 import { ContextBuilderService } from '../context-builder.service';
+import { StatusLocale } from '../reply/status-phrases';
 import { HandleMap } from '../tools/handle-map';
 import { ToolDispatcherService } from '../tools/tool-dispatcher.service';
 import { SCHEDULE_FETCH_TOOLS, WRITE_TOOLS } from '../tools/tool-registry';
@@ -105,6 +106,14 @@ export interface ToolLoopState {
   correlationId: string;
   resumeRounds?: ToolRound[];
   /**
+   * The turn's resolved loading-status locale (R2 / ADR 0055): the language the
+   * per-round recaps are written in. Threaded down to {@link RoundRecapService} so
+   * the BACKGROUND recap model is told to write in the user's language. Absent ⇒
+   * the recap defaults to English (the prior behaviour), so a turn whose language
+   * never resolved is unaffected.
+   */
+  recapLocale?: StatusLocale;
+  /**
    * Optional live-status sink (Story 13 / ADR 0041): the loop streams the final
    * round's answer text into it (the throttled status draft) and renders a
    * per-round progress recap between rounds. L9-blind — the loop only sees the
@@ -148,6 +157,7 @@ export class ToolLoopService {
     const { user, conversationId, currentMessageText, correlationId } = state;
     const resumeRounds = state.resumeRounds;
     const streamSink = state.streamSink;
+    const recapLocale = state.recapLocale;
     // One HandleMap per user turn: the context builder seeds it with an alias
     // per rendered agenda occurrence, and the SAME instance threads into every
     // tool-loop dispatch so those handles resolve when the model later mutates a
@@ -214,11 +224,13 @@ export class ToolLoopService {
         forcedToolChoice = undefined;
 
         // Drive the round via the connector's `completeStream` (Story 13 / ADR
-        // 0041). The model's answer is NO LONGER rendered into the draft (ADR
-        // 0052 — the draft is status-only; the answer lands as the real
-        // `sendMessage`, which Telegram renders by replacing the draft preview),
-        // so the `onText` handler is intentionally a no-op. We keep the STREAMING
-        // entry point (not `complete`) purely for its resilience: `completeStream`
+        // 0041). R3 / ADR 0058 RE-ENABLES answer token streaming (reversing the
+        // ADR-0052 no-op): we forward each round's accumulated answer SNAPSHOT to
+        // the stream sink's `onToken`, which renders it into the live morph message
+        // (throttled in L9). We forward on EVERY round — a round that ends in
+        // `tool_use` has its streamed text reconciled by the per-round recap (which
+        // overwrites the streamed line), and the terminal answer round's streamed
+        // text becomes the answer the L9 morph then re-formats. `completeStream`
         // MUST return, never throw — a stream fault reconciles to a non-streamed
         // result inside the connector — so the loop's outcomes and the `attempts:1`
         // posture hold regardless of how the round resolves.
@@ -233,9 +245,11 @@ export class ToolLoopService {
             features: { promptCaching: true, contextEditing: true },
             traceId: correlationId,
           },
-          () => {
-            // Deltas are intentionally discarded — the draft surface shows status
-            // + recap only (ADR 0052); the answer is sent once, in full, by L9.
+          (_delta, snapshot) => {
+            // Forward the accumulated answer text to the live morph message; the
+            // sink throttles/coalesces and swallows its own fault (degrade-never
+            // -throw), so a status fault never disturbs the turn (ADR 0058).
+            streamSink?.onToken?.(snapshot);
           },
         );
 
@@ -474,7 +488,12 @@ export class ToolLoopService {
         // degrade-never-throw — `recapRound` returns null on any fault and the sink
         // swallows its own send fault. Skipped when there's no live status sink.
         if (streamSink) {
-          await this.renderRoundRecap(streamSink, steps, correlationId);
+          await this.renderRoundRecap(
+            streamSink,
+            steps,
+            correlationId,
+            recapLocale,
+          );
         }
       }
 
@@ -503,7 +522,8 @@ export class ToolLoopService {
   /**
    * Generates and renders a per-round progress recap into the live status sink
    * (Story 13 / ADR 0041). Asks the BACKGROUND model for a one-sentence "what just
-   * happened" line and pushes it into the status draft. Entirely best-effort: the
+   * happened" line, in the user's language (`recapLocale`, R2 / ADR 0055; English
+   * when absent), and pushes it into the status draft. Entirely best-effort: the
    * recap service returns null on any fault (rendered as a no-op) and the sink
    * swallows its own send error, so this NEVER throws into the loop (`attempts:1`).
    */
@@ -511,8 +531,13 @@ export class ToolLoopService {
     streamSink: TurnStreamSink,
     steps: ToolStepRecord[],
     correlationId: string,
+    recapLocale: StatusLocale | undefined,
   ): Promise<void> {
-    const recap = await this.roundRecap.recapRound(steps, correlationId);
+    const recap = await this.roundRecap.recapRound(
+      steps,
+      correlationId,
+      recapLocale,
+    );
 
     if (recap) {
       streamSink.showRecap(recap);

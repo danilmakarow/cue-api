@@ -22,7 +22,7 @@ tags:
   - name: tasks
     description: Task/event CRUD. A Task is the unified event + todo primitive.
   - name: task-groups
-    description: TaskGroup CRUD. A TaskGroup is a calendar-owned bucket of tasks that may carry a default recurrence rule.
+    description: TaskGroup CRUD. A TaskGroup is a calendar-owned bucket of tasks that may carry a default recurrence config, color, and completion requirement its tasks inherit.
   - name: users
     description: Current-user profile and per-user settings (e.g. the daily notification report).
 
@@ -230,7 +230,7 @@ paths:
       description: |
         Creates a task in the referenced calendar (which must belong to the
         authenticated user) and returns the persisted series row as a `TaskDTO`
-        with the embedded recurrence rule. Supports timed events, all-day events,
+        with the embedded recurrence config. Supports timed events, all-day events,
         timeless todos, recurring series (via `recurrence`), and group assignment.
       security:
         - bearerAuth: []
@@ -324,7 +324,7 @@ paths:
         `since` (the `serverTime` of the previous response, echoed verbatim):
 
         - `tasks` — changed series rows (`updatedAt > since`), each with the
-          embedded `recurrence` rule.
+          embedded `recurrence` config.
         - `deleted` — ids of series soft-deleted (`deletedAt > since`); visible
           via `withDeleted`.
         - `exceptions` — per-occurrence overrides changed since the cursor.
@@ -417,9 +417,10 @@ paths:
       summary: Update a task (all / one-off scope)
       description: |
         Updates the task's fields in the "all" scope — the whole series or the
-        one-off task. Omitted fields are left unchanged. `recurrence: null` removes
-        the rule; a `RecurrenceRuleInput` replaces or adds it. Returns the updated
-        `TaskDTO`.
+        one-off task. Omitted fields are left unchanged. `recurrence: null` clears
+        the inline config; a `RecurrenceRuleInput` replaces or adds it. `color` and
+        `requiresCompletion` may likewise be set or cleared (null re-inherits the
+        group). Returns the updated `TaskDTO`.
       security:
         - bearerAuth: []
       parameters:
@@ -580,7 +581,7 @@ paths:
         Returns all task groups for the authenticated user. When `calendarId` is
         provided, scopes the result to that calendar (ownership asserted); otherwise
         returns groups across all calendars the user owns. Each group includes its
-        embedded `recurrence` rule (or null).
+        embedded `recurrence` config (or null).
       security:
         - bearerAuth: []
       parameters:
@@ -611,9 +612,9 @@ paths:
       summary: Create a task group
       description: |
         Creates a task group in the referenced calendar. When `recurrence` is
-        provided, creates a `RecurrenceRule` and sets it as the group default —
-        tasks in the group with no own rule will inherit this schedule. Returns
-        the created `TaskGroupDTO`.
+        provided, it is stored inline as the group's default `recurrenceConfig`
+        (JSONB — no separate row, ADR 0054); tasks in the group with no own config
+        inherit this schedule. Returns the created `TaskGroupDTO`.
       security:
         - bearerAuth: []
       requestBody:
@@ -643,9 +644,10 @@ paths:
       tags: [task-groups]
       summary: Update a task group
       description: |
-        Updates the task group's mutable fields. `recurrence: null` removes the
-        default rule; a `RecurrenceRuleInput` replaces or adds it. Returns the
-        updated `TaskGroupDTO`.
+        Updates the task group's mutable fields. `recurrence: null` clears the
+        inline default config; a `RecurrenceRuleInput` replaces or adds it. `color`
+        and `requiresCompletion` (the defaults tasks inherit) may likewise be set or
+        cleared. Returns the updated `TaskGroupDTO`.
       security:
         - bearerAuth: []
       parameters:
@@ -881,16 +883,14 @@ components:
           minLength: 1
           maxLength: 2000
           description: The custom persona instruction text for the assistant.
-    RecurrenceRuleDTO:
+    RecurrenceConfig:
       type: object
       description: |
-        An embedded recurrence rule returned inside TaskDTO and TaskGroupDTO.
-        Field names are normative — the FE decodes them exactly.
-      required: [id, frequency, interval, byWeekday, byMonthDay, byMonth, endType, endDate, count]
+        The inline recurrence config returned inside TaskDTO and TaskGroupDTO.
+        Stored as a JSONB column on `task` / `task_group` (no separate row, no
+        `id`) — ADR 0054. Field names are normative — the FE decodes them exactly.
+      required: [frequency, interval, byWeekday, byMonthDay, byMonth, endType, endDate, count]
       properties:
-        id:
-          type: string
-          format: uuid
         frequency:
           type: string
           enum: [DAILY, WEEKLY, MONTHLY, YEARLY]
@@ -934,9 +934,10 @@ components:
     RecurrenceRuleInput:
       type: object
       description: |
-        Recurrence rule payload sent inside create/update task and task-group
-        request bodies. Same as RecurrenceRuleDTO minus `id`. Cross-field: COUNT
-        requires `count`; UNTIL_DATE requires `endDate`.
+        Recurrence config payload sent inside create/update task and task-group
+        request bodies — the same inline shape as RecurrenceConfig (normalized and
+        stored verbatim as JSONB). Cross-field: COUNT requires `count`; UNTIL_DATE
+        requires `endDate`.
       required: [frequency]
       properties:
         frequency:
@@ -981,10 +982,10 @@ components:
       type: object
       description: |
         A task series row. Returned by POST /tasks, PATCH /tasks/:id, GET /tasks/:id.
-        Includes the embedded recurrence rule for the edit form.
+        Includes the embedded recurrence config for the edit form.
       required:
         [id, calendarId, groupId, title, notes, startAt, endAt, isAllDay, timezone,
-         requiresCompletion, completedAt, recurrenceRuleId, recurrence,
+         requiresCompletion, color, completedAt, recurrence,
          notificationStrategyId, createdAt, updatedAt]
       properties:
         id:
@@ -1013,18 +1014,25 @@ components:
           type: string
           description: IANA zone — the anchor for recurrence/DST expansion.
         requiresCompletion:
-          type: boolean
+          type: [boolean, 'null']
+          description: |
+            Per-task override; null inherits the group, then defaults to false.
+            See the effective-settings resolver (ADR 0054, task-wins).
+        color:
+          type: [string, 'null']
+          description: |
+            A TaskColor preset name OR a #RRGGBB hex; null inherits the group.
+            Effective color resolves task-wins (ADR 0054).
         completedAt:
           type: [string, 'null']
           format: date-time
-        recurrenceRuleId:
-          type: [string, 'null']
-          format: uuid
         recurrence:
           oneOf:
-            - $ref: '#/components/schemas/RecurrenceRuleDTO'
+            - $ref: '#/components/schemas/RecurrenceConfig'
             - type: 'null'
-          description: Embedded rule for the edit form; null when not recurring.
+          description: |
+            Inline recurrence config (JSONB) for the edit form; null when not
+            recurring. ADR 0054 — no separate rule id.
         notificationStrategyId:
           type: [string, 'null']
           format: uuid
@@ -1042,7 +1050,7 @@ components:
         calendar cell. Stable identity = (taskId, occurrenceStart).
       required:
         [taskId, calendarId, groupId, originalStart, occurrenceStart, occurrenceEnd,
-         title, notes, isAllDay, timezone, requiresCompletion, completedAt,
+         title, notes, isAllDay, timezone, requiresCompletion, color, completedAt,
          isRecurring, isException]
       properties:
         taskId:
@@ -1076,6 +1084,14 @@ components:
           type: string
         requiresCompletion:
           type: boolean
+          description: |
+            Effective value (task ?? group ?? false) per the ADR 0054 resolver,
+            already resolved for the rendered occurrence.
+        color:
+          type: [string, 'null']
+          description: |
+            Effective color (task ?? group) per the ADR 0054 resolver — a TaskColor
+            preset name OR a #RRGGBB hex; null when neither task nor group sets one.
         completedAt:
           type: [string, 'null']
           format: date-time
@@ -1180,10 +1196,11 @@ components:
       type: object
       description: |
         A task group. Returned by all task-group endpoints.
-        The embedded `recurrence` is the group default rule inherited by tasks
-        with no own recurrence rule.
+        The embedded `recurrence` is the group default config inherited by tasks
+        with no own recurrence; `color` / `requiresCompletion` are likewise the
+        group-level defaults a task inherits when it sets none (ADR 0054).
       required:
-        [id, calendarId, name, color, icon, sortOrder, defaultRecurrenceRuleId,
+        [id, calendarId, name, color, requiresCompletion, icon, sortOrder,
          recurrence, defaultNotificationStrategyId, createdAt, updatedAt]
       properties:
         id:
@@ -1196,19 +1213,26 @@ components:
           type: string
         color:
           type: [string, 'null']
+          description: |
+            Group default color — a TaskColor preset name OR a #RRGGBB hex; tasks
+            inherit it when they set no own color (ADR 0054).
+        requiresCompletion:
+          type: [boolean, 'null']
+          description: |
+            Group default completion requirement; tasks inherit it when they set
+            none, falling back to false (ADR 0054 resolver). Nullable, no DB default.
         icon:
           type: [string, 'null']
         sortOrder:
           type: integer
           minimum: 0
-        defaultRecurrenceRuleId:
-          type: [string, 'null']
-          format: uuid
         recurrence:
           oneOf:
-            - $ref: '#/components/schemas/RecurrenceRuleDTO'
+            - $ref: '#/components/schemas/RecurrenceConfig'
             - type: 'null'
-          description: Group default recurrence rule; null when the group has no default.
+          description: |
+            Inline group default recurrence config (JSONB); null when the group has
+            no default. ADR 0054 — no separate rule id.
         defaultNotificationStrategyId:
           type: [string, 'null']
           format: uuid
@@ -1261,8 +1285,13 @@ components:
           type: string
           description: IANA zone.
         requiresCompletion:
-          type: boolean
-          default: true
+          type: [boolean, 'null']
+          description: |
+            Omit / null to inherit the group, falling back to false (ADR 0054
+            resolver). No column default.
+        color:
+          type: [string, 'null']
+          description: A TaskColor preset name OR a #RRGGBB hex; null/omit inherits the group.
         groupId:
           type: string
           format: uuid
@@ -1288,7 +1317,13 @@ components:
         isAllDay:
           type: boolean
         requiresCompletion:
-          type: boolean
+          type: [boolean, 'null']
+          description: null clears the per-task override (re-inherit group, then false). ADR 0054.
+        color:
+          type: [string, 'null']
+          description: |
+            A TaskColor preset name OR a #RRGGBB hex; null clears the per-task color
+            (re-inherit group). ADR 0054.
         groupId:
           type: [string, 'null']
           format: uuid
@@ -1297,7 +1332,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/RecurrenceRuleInput'
             - type: 'null'
-          description: null removes the rule; a DTO replaces/adds it.
+          description: null removes the inline config; an Input replaces/adds it.
 
     SetCompletionRequest:
       type: object
@@ -1334,6 +1369,10 @@ components:
           minLength: 1
         color:
           type: string
+          description: Group default color — a TaskColor preset name OR a #RRGGBB hex.
+        requiresCompletion:
+          type: [boolean, 'null']
+          description: Group default completion requirement inherited by tasks (ADR 0054). No column default.
         icon:
           type: string
         sortOrder:
@@ -1355,6 +1394,12 @@ components:
           minLength: 1
         color:
           type: [string, 'null']
+          description: |
+            Group default color — a TaskColor preset name OR a #RRGGBB hex; null
+            clears it. (Also settable by the assistant via the `update_group` AI tool — ADR 0054.)
+        requiresCompletion:
+          type: [boolean, 'null']
+          description: Group default completion requirement; null clears it. ADR 0054.
         icon:
           type: [string, 'null']
         sortOrder:
@@ -1364,7 +1409,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/RecurrenceRuleInput'
             - type: 'null'
-          description: null removes the group default rule; a DTO replaces/adds it.
+          description: null removes the group default config; an Input replaces/adds it.
 
     AppleSignInRequest:
       type: object

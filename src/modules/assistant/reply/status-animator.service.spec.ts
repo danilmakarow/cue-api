@@ -1,35 +1,38 @@
 import { StatusAnimatorService } from './status-animator.service';
-import { StatusSessionPhase, StatusSurfaceKind } from './status-session.store';
+import { SPINNER_FRAMES } from './status-phrases';
+import { StatusSession, StatusSessionPhase } from './status-session.store';
 import {
   ChatAction,
   ChatType,
+  OutboundFormat,
 } from '@/modules/external-vendor/external-vendor.types';
 
+/** Spinner tick interval (ms) the fake AssistantConfig hands the animator. */
+const SPINNER_INTERVAL_MS = 1000;
+
 /**
- * Builds a StatusSessionStore fake whose `open` returns a session whose surface
- * kind follows the input chat type (private ⇒ draft, else ⇒ message). `open` is
- * idempotent in spirit here (returns the same seed); `clear`/`advancePhase` are
- * spies. A `failOpen` flag makes `open` reject to exercise the degrade path.
+ * Builds a StatusSessionStore fake for the ONE-real-message surface (ADR 0053).
+ * `open` is idempotent: the SET-NX winner gets a fresh session with NO
+ * `vendorMessageId` (so the animator posts the message), while a configured
+ * `existingMessageId` simulates a replay/lost-race that already carries a posted
+ * message id (so the animator must NOT post again). `clear`/`advancePhase` are
+ * spies. `failOpen` makes `open` reject to exercise the degrade path.
  */
-const buildSessionStore = (options: { failOpen?: boolean } = {}) => {
+const buildSessionStore = (
+  options: { failOpen?: boolean; existingMessageId?: string } = {},
+) => {
   const clear = jest.fn().mockResolvedValue(undefined);
   const advancePhase = jest.fn().mockResolvedValue(undefined);
-  const open = jest.fn(async (input) => {
+  const open = jest.fn(async (input): Promise<StatusSession> => {
     if (options.failOpen) {
       throw new Error('redis down');
     }
-
-    const isPrivate = input.chatType === ChatType.Private;
 
     return {
       vendorChatId: input.vendorChatId,
       turnId: input.turnId,
       chatType: input.chatType,
-      surfaceKind: isPrivate
-        ? StatusSurfaceKind.Draft
-        : StatusSurfaceKind.Message,
-      draftId: isPrivate ? input.seedDraftId : undefined,
-      vendorMessageId: isPrivate ? undefined : input.seedVendorMessageId,
+      vendorMessageId: options.existingMessageId,
       locale: input.locale,
       phase: StatusSessionPhase.Thinking,
     };
@@ -38,42 +41,39 @@ const buildSessionStore = (options: { failOpen?: boolean } = {}) => {
   return { open, clear, advancePhase };
 };
 
-/** Builds a vendor connector fake covering the send / draft / edit / chat-action surface. */
+/** Builds a vendor connector fake covering the send / edit / delete / chat-action surface. */
 const buildVendor = () => ({
-  sendMessage: jest.fn().mockResolvedValue({ vendorMessageId: 'static-msg-1' }),
-  sendMessageDraft: jest.fn().mockResolvedValue(undefined),
+  sendMessage: jest.fn().mockResolvedValue({ vendorMessageId: 'status-msg-1' }),
   editMessageText: jest.fn().mockResolvedValue(undefined),
+  deleteMessage: jest.fn().mockResolvedValue(undefined),
   sendChatAction: jest.fn().mockResolvedValue(undefined),
 });
 
-const CONFIG = {
-  statusDotIntervalMs: 500,
-  statusWordIntervalMs: 5000,
-};
+/** Builds an AssistantConfig fake exposing only the spinner interval the animator reads. */
+const buildConfig = () => ({
+  statusSpinnerIntervalMs: SPINNER_INTERVAL_MS,
+});
 
-const buildAnimator = (options: { failOpen?: boolean } = {}) => {
+const buildAnimator = (
+  options: { failOpen?: boolean; existingMessageId?: string } = {},
+) => {
   const vendor = buildVendor();
-  const sessions = buildSessionStore({ failOpen: options.failOpen });
+  const sessions = buildSessionStore({
+    failOpen: options.failOpen,
+    existingMessageId: options.existingMessageId,
+  });
+  const config = buildConfig();
   const service = new StatusAnimatorService(
     vendor as never,
     sessions as never,
-    CONFIG as never,
+    config as never,
   );
 
-  return { service, vendor, sessions };
+  return { service, vendor, sessions, config };
 };
 
-describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
-  beforeEach(() => {
-    jest.useFakeTimers();
-  });
-
-  afterEach(() => {
-    jest.clearAllTimers();
-    jest.useRealTimers();
-  });
-
-  it('does NOT post an empty-text placeholder draft on open for a private chat (FIX 3 scroll mitigation)', async () => {
+describe('StatusAnimatorService (live status, ADR 0053 — one morphing message)', () => {
+  it('posts exactly ONE real message with a loading line on open and exposes its id via .messageId', async () => {
     const { service, vendor } = buildAnimator();
 
     const animation = await service.begin({
@@ -83,106 +83,65 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       languageCode: 'en',
     });
 
-    // open() no longer seeds an empty "Thinking…" draft — the empty streaming
-    // -draft surface is what scrolled the chat. No draft is emitted yet.
-    expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
+    // open() posts ONE real message (no draft surface anywhere).
+    expect(vendor.sendMessage).toHaveBeenCalledTimes(1);
 
-    await animation.finalize();
-  });
+    const [target, message] = vendor.sendMessage.mock.calls[0];
 
-  it('defers the first draft frame to startLoading, which carries a real loading word (not empty)', async () => {
-    const { service, vendor } = buildAnimator();
-
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
-    });
-
-    // Nothing on open…
-    expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
-
-    await animation.startLoading();
-
-    // …then the FIRST draft frame appears, carrying a real <word><dots> — never
-    // an empty placeholder.
-    expect(vendor.sendMessageDraft).toHaveBeenCalled();
-
-    const firstFrame = vendor.sendMessageDraft.mock.calls[0][1];
-
-    expect(firstFrame.text).not.toBe('');
-    expect(firstFrame.text).toMatch(/\.{1,3}$/);
-    expect(firstFrame.draftId).toBeGreaterThan(0); // non-zero draft id (Telegram rule)
-
-    await animation.finalize();
-  });
-
-  it('animates the trailing dots through the draft surface and clears the interval on finalize', async () => {
-    const { service, vendor } = buildAnimator();
-
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
-    });
-
-    await animation.startLoading();
-
-    // Drive a few dot ticks; flush the throttle's trailing-coalesced frame after
-    // each so the latest <word><dots> frame actually reaches the draft surface.
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-    const latestFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-    // The animated frame is a word followed by 1–3 trailing dots.
-    expect(latestFrame).toMatch(/\.{1,3}$/);
-
-    // Finalize clears BOTH timers — no further draft sends after teardown.
-    await animation.finalize();
-
-    const afterFinalize = vendor.sendMessageDraft.mock.calls.length;
-
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs * 4);
-
-    expect(vendor.sendMessageDraft.mock.calls.length).toBe(afterFinalize);
-  });
-
-  it('swaps the loading word on the word interval without an immediate repeat', async () => {
-    const { service, vendor } = buildAnimator();
-
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
-    });
-
-    await animation.startLoading();
-
-    // Flush the first loading frame, capture its word.
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-    const wordOf = (text: string): string => text.replace(/\.+$/, '');
-    const firstWord = wordOf(
-      vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text ?? '',
+    expect(target).toEqual(expect.objectContaining({ vendorChatId: 'chat-1' }));
+    // The loading line is an HTML <pre> code block: the frame-0 spinner glyph +
+    // a single localized loading word, NO trailing ellipsis (R1 / ADR 0057).
+    expect(message.format).toBe(OutboundFormat.Html);
+    expect(message.text).toMatch(
+      new RegExp(`^<pre>${SPINNER_FRAMES[0]} [A-Za-z]+</pre>$`),
     );
 
-    // One full word interval ⇒ the word swaps (and never repeats back-to-back).
-    await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs);
-
-    const secondWord = wordOf(
-      vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text ?? '',
-    );
-
-    expect(secondWord).not.toBe(firstWord);
+    // The posted message's id is exposed so the reply can morph the SAME message.
+    expect(animation.messageId).toBe('status-msg-1');
 
     await animation.finalize();
   });
 
-  it('shows the localized voice line then transitions to the loading animation', async () => {
+  it('does NOT post again on an idempotent re-open whose session already carries a message id', async () => {
+    const { service, vendor } = buildAnimator({
+      existingMessageId: 'prior-99',
+    });
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    // A lost NX race / replay re-reads the existing surface — no second send.
+    expect(vendor.sendMessage).not.toHaveBeenCalled();
+    expect(animation.messageId).toBe('prior-99');
+
+    await animation.finalize();
+  });
+
+  it('messageId is null when the initial send failed', async () => {
+    const { service, vendor } = buildAnimator();
+
+    vendor.sendMessage.mockRejectedValueOnce(new Error('telegram 500'));
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    // The send was attempted but failed — the surface degraded, id stays null so
+    // the reply path sends a fresh message instead of morphing.
+    expect(vendor.sendMessage).toHaveBeenCalledTimes(1);
+    expect(animation.messageId).toBeNull();
+
+    await animation.finalize();
+  });
+
+  it('showVoiceListening fires a record_voice chat action and edits the one message to the localized voice phrase', async () => {
     const { service, vendor } = buildAnimator();
 
     const animation = await service.begin({
@@ -194,52 +153,406 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
 
     await animation.showVoiceListening();
 
-    // Flush the throttle so the coalesced voice frame reaches the surface.
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-    const voiceFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-    expect(voiceFrame).toBe('Слушаю ваш прекрасный голос');
     expect(vendor.sendChatAction).toHaveBeenCalledWith(
       expect.objectContaining({ vendorChatId: 'chat-1' }),
       ChatAction.RecordVoice,
     );
 
-    // Transition: the loading loop supersedes the voice line.
-    await animation.startLoading();
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-    const loadingFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-    expect(loadingFrame).not.toBe('Слушаю ваш прекрасный голос');
-    expect(loadingFrame).toMatch(/\.{1,3}$/);
+    // The voice line is shown by EDITING the one real message (not a new send),
+    // wrapped in an HTML <pre> code block (R1 / ADR 0057).
+    expect(vendor.editMessageText).toHaveBeenCalledWith(
+      expect.objectContaining({ vendorChatId: 'chat-1' }),
+      expect.objectContaining({
+        vendorMessageId: 'status-msg-1',
+        text: '<pre>Слушаю ваш прекрасный голос</pre>',
+        format: OutboundFormat.Html,
+      }),
+    );
 
     await animation.finalize();
   });
 
+  it('startLoading advances the phase to Working, fires a typing chat action, and ARMS the ASCII spinner (R1 / ADR 0057)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor, sessions } = buildAnimator();
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      const editsBeforeLoading = vendor.editMessageText.mock.calls.length;
+      const sendsBeforeLoading = vendor.sendMessage.mock.calls.length;
+
+      await animation.startLoading();
+
+      // Phase advanced to Working (advisory label) + a one-shot typing hint.
+      expect(sessions.advancePhase).toHaveBeenCalledWith(
+        'chat-1',
+        'turn-1',
+        StatusSessionPhase.Working,
+      );
+      expect(vendor.sendChatAction).toHaveBeenCalledWith(
+        expect.objectContaining({ vendorChatId: 'chat-1' }),
+        ChatAction.Typing,
+      );
+
+      // The spinner now ANIMATES: advancing the clock fires further edits (NOT
+      // sends — the one message is edited in place), each an HTML <pre> spinner
+      // frame on the captured loading word.
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 3);
+
+      expect(vendor.editMessageText.mock.calls.length).toBeGreaterThan(
+        editsBeforeLoading,
+      );
+      expect(vendor.sendMessage.mock.calls.length).toBe(sendsBeforeLoading);
+
+      const lastFrame = vendor.editMessageText.mock.calls.at(-1)?.[1];
+
+      expect(lastFrame).toEqual(
+        expect.objectContaining({
+          vendorMessageId: 'status-msg-1',
+          format: OutboundFormat.Html,
+        }),
+      );
+      // A <pre>-wrapped spinner frame: a braille glyph + the loading word.
+      expect(lastFrame?.text).toMatch(/^<pre>[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] [A-Za-z]+<\/pre>$/);
+
+      await animation.finalize();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('the spinner animates the SAME captured word across ticks (only the frame rotates)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor } = buildAnimator();
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      await animation.startLoading();
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 4);
+
+      /** Recovers the bare loading word from a <pre>-wrapped spinner frame. */
+      const wordOfFrame = (text: string): string =>
+        text
+          .replace(/^<pre>./, '')
+          .replace(/<\/pre>$/, '')
+          .trim();
+
+      const frameTexts = vendor.editMessageText.mock.calls.map(
+        (call) => call[1].text as string,
+      );
+      const words = new Set(frameTexts.map(wordOfFrame));
+
+      // Every frame animates the one captured word — exactly one distinct word.
+      expect(words.size).toBe(1);
+      // But the frames themselves differ (the leading glyph rotates).
+      expect(new Set(frameTexts).size).toBeGreaterThan(1);
+
+      await animation.finalize();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('showRecap STOPS the spinner and edits the one message with a <pre> recap (R1 / ADR 0057)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor } = buildAnimator();
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      await animation.startLoading();
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 2);
+
+      await animation.showRecap('Checking Thursday afternoon');
+
+      // The recap is the LAST edit and is a <pre> HTML code block.
+      expect(vendor.editMessageText).toHaveBeenCalledWith(
+        expect.objectContaining({ vendorChatId: 'chat-1' }),
+        expect.objectContaining({
+          vendorMessageId: 'status-msg-1',
+          text: '<pre>Checking Thursday afternoon</pre>',
+          format: OutboundFormat.Html,
+        }),
+      );
+
+      const editsAfterRecap = vendor.editMessageText.mock.calls.length;
+      const lastAfterRecap = vendor.editMessageText.mock.calls.at(-1)?.[1].text;
+
+      // The spinner is dead: advancing the clock queues NO further frame, so the
+      // recap stays the last thing shown.
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+
+      expect(vendor.editMessageText.mock.calls.length).toBe(editsAfterRecap);
+      expect(vendor.editMessageText.mock.calls.at(-1)?.[1].text).toBe(
+        lastAfterRecap,
+      );
+
+      await animation.finalize();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('settle STOPS the spinner so no late frame lands after the reply morphs (R1 / ADR 0057)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor } = buildAnimator();
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      await animation.startLoading();
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 2);
+
+      await animation.settle();
+
+      const editsAfterSettle = vendor.editMessageText.mock.calls.length;
+
+      // After settle the spinner must be dead — the morph (a separate path) is
+      // free to edit the answer without a stray frame reverting it.
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+
+      expect(vendor.editMessageText.mock.calls.length).toBe(editsAfterSettle);
+
+      await animation.finalize();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('finalize STOPS the spinner so no queued frame survives (R1 / ADR 0057)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor } = buildAnimator();
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      await animation.startLoading();
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 2);
+
+      await animation.finalize();
+
+      const editsAfterFinalize = vendor.editMessageText.mock.calls.length;
+
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+
+      expect(vendor.editMessageText.mock.calls.length).toBe(editsAfterFinalize);
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('does NOT arm the spinner when the initial send failed (null messageId)', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const { service, vendor } = buildAnimator();
+
+      vendor.sendMessage.mockRejectedValueOnce(new Error('telegram 500'));
+
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'en',
+      });
+
+      expect(animation.messageId).toBeNull();
+
+      await animation.startLoading();
+
+      const editsBefore = vendor.editMessageText.mock.calls.length;
+
+      // No surface to animate — ticking the clock must not edit a phantom message.
+      await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+
+      expect(vendor.editMessageText.mock.calls.length).toBe(editsBefore);
+
+      await animation.finalize();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  });
+
+  it('showRecap edits the one message via editMessageText with a <pre> recap', async () => {
+    const { service, vendor } = buildAnimator();
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    await animation.showRecap('Checking Thursday afternoon');
+
+    expect(vendor.editMessageText).toHaveBeenCalledWith(
+      expect.objectContaining({ vendorChatId: 'chat-1' }),
+      expect.objectContaining({
+        vendorMessageId: 'status-msg-1',
+        text: '<pre>Checking Thursday afternoon</pre>',
+        format: OutboundFormat.Html,
+      }),
+    );
+
+    await animation.finalize();
+  });
+
+  it('showRecap is a no-op for empty text', async () => {
+    const { service, vendor } = buildAnimator();
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    await animation.showRecap('');
+
+    expect(vendor.editMessageText).not.toHaveBeenCalled();
+
+    await animation.finalize();
+  });
+
+  it('showRecap is a no-op once finalized (a late recap never edits the message)', async () => {
+    const { service, vendor } = buildAnimator();
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    await animation.finalize();
+
+    await animation.showRecap('also too late');
+
+    expect(vendor.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('finalize clears the StatusSession and does NOT touch the message (the reply has morphed it)', async () => {
+    const { service, vendor, sessions } = buildAnimator();
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    const sendsBeforeFinalize = vendor.sendMessage.mock.calls.length;
+
+    await animation.finalize();
+
+    // Only the Redis session is cleared — the message is left intact (the reply
+    // morphed it into the answer). No retract send/edit/delete.
+    expect(sessions.clear).toHaveBeenCalledWith('chat-1', 'turn-1');
+    expect(vendor.sendMessage.mock.calls.length).toBe(sendsBeforeFinalize);
+    expect(vendor.editMessageText).not.toHaveBeenCalled();
+    expect(vendor.deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('degrades (never throws) and still allows the turn to proceed when open fails', async () => {
+    const { service, vendor, sessions } = buildAnimator({ failOpen: true });
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    // No surface was posted (session open failed) but no throw escaped, and no id.
+    expect(vendor.sendMessage).not.toHaveBeenCalled();
+    expect(animation.messageId).toBeNull();
+
+    // startLoading / showRecap / finalize are likewise safe no-ops.
+    await expect(animation.startLoading()).resolves.toBeUndefined();
+    await expect(animation.showRecap('progress')).resolves.toBeUndefined();
+    await expect(animation.finalize()).resolves.toBeUndefined();
+    expect(sessions.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades (never throws) when clearing the session fails', async () => {
+    const { service, sessions } = buildAnimator();
+
+    const animation = await service.begin({
+      vendorChatId: 'chat-1',
+      turnId: 'turn-1',
+      chatType: ChatType.Private,
+      languageCode: 'en',
+    });
+
+    sessions.clear.mockRejectedValue(new Error('redis down'));
+
+    await expect(animation.finalize()).resolves.toBeUndefined();
+  });
+
   describe('loading-word locale resolution (v2 Task 4 / ADR 0051)', () => {
     // The loading word is picked at random from the locale's vocabulary, so a
-    // single frame's exact word is not deterministic. We instead assert the word's
+    // single open's exact word is not deterministic. We instead assert the word's
     // SCRIPT, which is decisive: the en vocabulary is all-Latin while the ru/uk
     // vocabularies are all-Cyrillic. (ru vs uk both being Cyrillic is covered by
     // the pure status-phrases.spec.ts unit tests on the resolver chain.)
     const CYRILLIC = /[А-яЁёІіЇїЄєҐґ]/;
 
-    /** Strips the trailing animated dots to recover the bare loading word. */
-    const wordOf = (text: string): string => text.replace(/\.+$/, '');
+    /**
+     * Recovers the bare loading word from the posted initial line: a <pre>-wrapped
+     * frame-0 spinner glyph + the word (R1 / ADR 0057). Strips the <pre> wrapper
+     * and the leading spinner glyph + space.
+     */
+    const wordOf = (text: string): string =>
+      text
+        .replace(/^<pre>/, '')
+        .replace(/<\/pre>$/, '')
+        .replace(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s/, '');
 
-    /** Runs a turn's first loading frame and returns the bare loading word. */
-    const firstLoadingWord = async (
+    /** Begins a turn and returns the bare loading word from the posted message. */
+    const openingWord = async (
       input: Parameters<typeof service.begin>[0],
     ): Promise<string> => {
       const animation = await service.begin(input);
 
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      const word = wordOf(
-        vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text ?? '',
-      );
+      const word = wordOf(vendor.sendMessage.mock.calls.at(-1)?.[1].text ?? '');
 
       await animation.finalize();
 
@@ -256,10 +569,10 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       vendor = built.vendor;
     });
 
-    it('drives the loading words from the MESSAGE text, OVERRIDING an English language_code (the bug fix)', async () => {
+    it('drives the loading word from the MESSAGE text, OVERRIDING an English language_code (the bug fix)', async () => {
       // The user writes Russian but their Telegram language_code is English — the
-      // message text must win so the loading words are Cyrillic (ru), not Latin (en).
-      const word = await firstLoadingWord({
+      // message text must win so the loading word is Cyrillic (ru), not Latin (en).
+      const word = await openingWord({
         vendorChatId: 'chat-1',
         turnId: 'turn-1',
         chatType: ChatType.Private,
@@ -270,8 +583,8 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       expect(word).toMatch(CYRILLIC);
     });
 
-    it('detects a Ukrainian message (distinctive і/ї/є/ґ) and shows Cyrillic (uk) words', async () => {
-      const word = await firstLoadingWord({
+    it('detects a Ukrainian message (distinctive і/ї/є/ґ) and shows a Cyrillic (uk) word', async () => {
+      const word = await openingWord({
         vendorChatId: 'chat-1',
         turnId: 'turn-1',
         chatType: ChatType.Private,
@@ -284,7 +597,7 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
 
     it('falls back to the language_code when the message text is inconclusive', async () => {
       // Digits/emoji only → detector returns null → language_code (ru) drives it.
-      const word = await firstLoadingWord({
+      const word = await openingWord({
         vendorChatId: 'chat-1',
         turnId: 'turn-1',
         chatType: ChatType.Private,
@@ -296,7 +609,7 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
     });
 
     it('defaults to en (Latin) when the message is inconclusive AND the language_code is unsupported', async () => {
-      const word = await firstLoadingWord({
+      const word = await openingWord({
         vendorChatId: 'chat-1',
         turnId: 'turn-1',
         chatType: ChatType.Private,
@@ -317,20 +630,41 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
       });
 
       await animation.showVoiceListening();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
 
-      const line = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
+      const line = vendor.editMessageText.mock.calls.at(-1)?.[1].text;
 
-      // The pre-STT line is the Ukrainian voice line (from language_code).
-      expect(line).toBe('Слухаю ваш чудовий голос');
+      // The pre-STT line is the Ukrainian voice line (from language_code), wrapped
+      // in a <pre> code block (R1 / ADR 0057).
+      expect(line).toBe('<pre>Слухаю ваш чудовий голос</pre>');
 
       await animation.finalize();
     });
 
-    it('voice post-STT switches the loading words to the STT-reported spoken language (over an English code)', async () => {
+    it('voice pre-STT borrows the prior-turn locale for the Listening line when language_code is unsupported (R2 / ADR 0055)', async () => {
+      // No STT lang, no text, an UNSUPPORTED language_code (fr) — the borrowed
+      // priorLocale (ru) is the only signal, so a follow-up voice note keeps the
+      // conversation's language instead of snapping to the English voice line.
+      const animation = await service.begin({
+        vendorChatId: 'chat-1',
+        turnId: 'turn-1',
+        chatType: ChatType.Private,
+        languageCode: 'fr',
+        priorLocale: 'ru',
+      });
+
+      await animation.showVoiceListening();
+
+      const line = vendor.editMessageText.mock.calls.at(-1)?.[1].text;
+
+      expect(line).toBe('<pre>Слушаю ваш прекрасный голос</pre>');
+
+      await animation.finalize();
+    });
+
+    it('voice post-STT drives the loading word from the STT-reported spoken language (over an English code)', async () => {
       // Post-STT re-open of the SAME idempotent surface: the STT language ('ru')
-      // wins over an English language_code, so the loading words are Cyrillic.
-      const word = await firstLoadingWord({
+      // wins over an English language_code, so the loading word is Cyrillic.
+      const word = await openingWord({
         vendorChatId: 'chat-1',
         turnId: 'turn-1',
         chatType: ChatType.Private,
@@ -343,209 +677,192 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
     });
   });
 
-  it('sends a single static real line for a non-private chat (no draft, no interval)', async () => {
-    const { service, vendor } = buildAnimator();
+  describe('streamAnswer (R3 / ADR 0058 token streaming)', () => {
+    it('STOPS the spinner on the first token so no late frame reverts the streamed text', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(0);
 
-    const animation = await service.begin({
-      vendorChatId: 'chat-grp',
-      turnId: 'turn-1',
-      chatType: ChatType.Group,
-      languageCode: 'en',
+      try {
+        const { service, vendor } = buildAnimator();
+
+        const animation = await service.begin({
+          vendorChatId: 'chat-1',
+          turnId: 'turn-1',
+          chatType: ChatType.Private,
+          languageCode: 'en',
+        });
+
+        await animation.startLoading();
+        await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 2);
+
+        // First token: the spinner must die.
+        animation.streamAnswer('Hello');
+        await jest.advanceTimersByTimeAsync(0);
+
+        const editsAfterFirstToken = vendor.editMessageText.mock.calls.length;
+
+        // Advancing the clock queues NO further spinner frame (it is stopped).
+        await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+
+        // Only streamAnswer's own (throttled) flush could have edited — assert the
+        // spinner contributed nothing more: the streamed text is the last thing
+        // shown and it is the bare escaped answer (NOT a <pre> spinner frame).
+        const lastText = vendor.editMessageText.mock.calls.at(-1)?.[1].text;
+
+        expect(lastText).toBe('Hello');
+        // No NEW spinner frames after the token (count unchanged sans our flush).
+        expect(vendor.editMessageText.mock.calls.length).toBe(
+          editsAfterFirstToken,
+        );
+
+        await animation.finalize();
+      } finally {
+        jest.clearAllTimers();
+        jest.useRealTimers();
+      }
     });
 
-    // Non-private surface ⇒ no draft ever, but a single REAL static line lands
-    // via sendMessage (no caller seeds a message id — the surface mints its own).
-    expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
-    expect(vendor.sendMessage).toHaveBeenCalledTimes(1);
+    it('streams the answer as bare HTML-escaped PLAIN text (no <pre> wrapper) with OutboundFormat.Html', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(0);
 
-    const [staticTarget, staticMessage] = vendor.sendMessage.mock.calls[0];
+      try {
+        const { service, vendor } = buildAnimator();
 
-    expect(staticTarget).toEqual(
-      expect.objectContaining({ vendorChatId: 'chat-grp' }),
-    );
-    // A single localized loading word with exactly one trailing dot (no animation).
-    expect(staticMessage.text).toMatch(/^[A-Za-z]+\.$/);
+        const animation = await service.begin({
+          vendorChatId: 'chat-1',
+          turnId: 'turn-1',
+          chatType: ChatType.Private,
+          languageCode: 'en',
+        });
 
-    await animation.startLoading();
+        animation.streamAnswer('a < b & c');
+        await jest.advanceTimersByTimeAsync(0);
 
-    // The static line is the ONLY surface write: no draft, no edits, and no
-    // second send — the non-private path never arms the animation loop.
-    const sendsAfterStart = vendor.sendMessage.mock.calls.length;
-    const editsAfterStart = vendor.editMessageText.mock.calls.length;
+        expect(vendor.editMessageText).toHaveBeenLastCalledWith(
+          expect.objectContaining({ vendorChatId: 'chat-1' }),
+          expect.objectContaining({
+            vendorMessageId: 'status-msg-1',
+            text: 'a &lt; b &amp; c',
+            format: OutboundFormat.Html,
+          }),
+        );
 
-    await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs * 6);
-
-    expect(vendor.sendMessage.mock.calls.length).toBe(sendsAfterStart);
-    expect(vendor.editMessageText.mock.calls.length).toBe(editsAfterStart);
-    expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
-
-    await animation.finalize();
-  });
-
-  it('degrades (never throws) and still allows the turn to proceed when open fails', async () => {
-    const { service, vendor, sessions } = buildAnimator({ failOpen: true });
-
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
+        await animation.finalize();
+      } finally {
+        jest.clearAllTimers();
+        jest.useRealTimers();
+      }
     });
 
-    // No surface was posted (session open failed) but no throw escaped.
-    expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
+    it('THROTTLES to ~1/sec: rapid snapshots coalesce into far fewer edits', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(0);
 
-    // startLoading + finalize are likewise safe no-ops.
-    await expect(animation.startLoading()).resolves.toBeUndefined();
-    await expect(animation.finalize()).resolves.toBeUndefined();
-    expect(sessions.clear).toHaveBeenCalledTimes(1);
-  });
+      try {
+        const { service, vendor } = buildAnimator();
 
-  it('swallows a draft-send fault so the animation loop keeps running', async () => {
-    const { service, vendor } = buildAnimator();
+        const animation = await service.begin({
+          vendorChatId: 'chat-1',
+          turnId: 'turn-1',
+          chatType: ChatType.Private,
+          languageCode: 'en',
+        });
 
-    vendor.sendMessageDraft.mockRejectedValue(new Error('telegram 500'));
+        const editsBefore = vendor.editMessageText.mock.calls.length;
 
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
+        // 20 snapshots within the SAME throttle window (no clock advance between):
+        // the first flushes immediately, the rest coalesce away.
+        for (let index = 1; index <= 20; index += 1) {
+          animation.streamAnswer('word '.repeat(index).trim());
+        }
+
+        await jest.advanceTimersByTimeAsync(0);
+
+        const streamedEdits =
+          vendor.editMessageText.mock.calls.length - editsBefore;
+
+        // Far fewer than 20 — coalesced to a single in-window edit.
+        expect(streamedEdits).toBe(1);
+
+        await animation.finalize();
+      } finally {
+        jest.clearAllTimers();
+        jest.useRealTimers();
+      }
     });
 
-    // The failing open-draft did not throw; startLoading + ticks are safe too.
-    await expect(animation.startLoading()).resolves.toBeUndefined();
-    await expect(
-      jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs * 2),
-    ).resolves.toBeUndefined();
+    it('pushes a new edit once the throttle window elapses (>= ~1s apart)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(0);
 
-    await animation.finalize();
-  });
+      try {
+        const { service, vendor } = buildAnimator();
 
-  it('clears the StatusSession on finalize (no stale handle)', async () => {
-    const { service, sessions } = buildAnimator();
+        const animation = await service.begin({
+          vendorChatId: 'chat-1',
+          turnId: 'turn-1',
+          chatType: ChatType.Private,
+          languageCode: 'en',
+        });
 
-    const animation = await service.begin({
-      vendorChatId: 'chat-1',
-      turnId: 'turn-1',
-      chatType: ChatType.Private,
-      languageCode: 'en',
+        const editsBefore = vendor.editMessageText.mock.calls.length;
+
+        animation.streamAnswer('frame 1');
+        await jest.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS + 50);
+        animation.streamAnswer('frame 1 and 2');
+        await jest.advanceTimersByTimeAsync(0);
+
+        const streamedEdits =
+          vendor.editMessageText.mock.calls.length - editsBefore;
+
+        // Two windows ⇒ two edits.
+        expect(streamedEdits).toBe(2);
+        expect(vendor.editMessageText.mock.calls.at(-1)?.[1].text).toBe(
+          'frame 1 and 2',
+        );
+
+        await animation.finalize();
+      } finally {
+        jest.clearAllTimers();
+        jest.useRealTimers();
+      }
     });
 
-    await animation.finalize();
+    it('settle FLUSHES the latest coalesced snapshot before draining (so it reaches the chain)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(0);
 
-    expect(sessions.clear).toHaveBeenCalledWith('chat-1', 'turn-1');
-  });
+      try {
+        const { service, vendor } = buildAnimator();
 
-  describe('finalize (ADR 0052 — no draft collapse)', () => {
-    it('pushes NO extra draft frame on finalize — the real reply supersedes the preview', async () => {
-      const { service, vendor, sessions } = buildAnimator();
+        const animation = await service.begin({
+          vendorChatId: 'chat-1',
+          turnId: 'turn-1',
+          chatType: ChatType.Private,
+          languageCode: 'en',
+        });
 
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
+        // First token flushes 'a'; the next two are throttled away (same window).
+        animation.streamAnswer('a');
+        animation.streamAnswer('a b');
+        animation.streamAnswer('a b c');
 
-      // Run the loading animation so the draft surface is live with status frames.
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
+        // settle must push the latest held snapshot ('a b c') onto the chain.
+        await animation.settle();
 
-      const beforeFinalize = vendor.sendMessageDraft.mock.calls.length;
+        expect(vendor.editMessageText.mock.calls.at(-1)?.[1].text).toBe(
+          'a b c',
+        );
 
-      await animation.finalize();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs * 2);
-
-      // No empty-text "collapse" frame (the old FIX 1 artifact that surfaced as a
-      // blank bubble) and no late ticks: finalize only tears down the timers and
-      // clears the session. The real `sendMessage` (L9) supersedes the preview.
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
-      expect(sessions.clear).toHaveBeenCalledWith('chat-1', 'turn-1');
+        await animation.finalize();
+      } finally {
+        jest.clearAllTimers();
+        jest.useRealTimers();
+      }
     });
 
-    it('never touches the draft API for a non-private (static-line) surface', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-grp',
-        turnId: 'turn-1',
-        chatType: ChatType.Group,
-        languageCode: 'en',
-      });
-
-      await animation.finalize();
-
-      expect(vendor.sendMessageDraft).not.toHaveBeenCalled();
-    });
-
-    it('degrades (never throws) when clearing the session fails', async () => {
-      const { service, sessions } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      // The session clear rejects — finalize must still resolve.
-      sessions.clear.mockRejectedValue(new Error('redis down'));
-
-      await expect(animation.finalize()).resolves.toBeUndefined();
-    });
-  });
-
-  describe('recaps (Story 13 / ADR 0041, narrowed by ADR 0052)', () => {
-    it('renders a per-round recap BELOW the status line as an HTML blockquote composite (not a replacement) and ignores an empty recap', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      // The status word must already be on top before a recap arrives (real flow:
-      // startLoading runs at turn start, recaps land between tool rounds).
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      const statusFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-      // Pre-recap the draft is JUST the animated status line — no quote yet.
-      expect(statusFrame).toMatch(/\.{1,3}$/);
-      expect(statusFrame).not.toContain('<blockquote>');
-
-      const before = vendor.sendMessageDraft.mock.calls.length;
-
-      await animation.showRecap('');
-
-      // Empty recap is a no-op.
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(before);
-
-      await animation.showRecap('Checking Thursday afternoon');
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      const composite = vendor.sendMessageDraft.mock.calls.at(-1)?.[1];
-
-      // ONE composite draft: the status word still on TOP, the recap BELOW it as
-      // an HTML <blockquote> (the recap did NOT replace the status — Task 5).
-      expect(composite?.text).toContain(
-        '<blockquote>Checking Thursday afternoon</blockquote>',
-      );
-      // The status line survives above the quote (a <word><dots> frame precedes it).
-      expect(composite?.text).toMatch(
-        /\.{1,3}\n\n<blockquote>Checking Thursday afternoon<\/blockquote>$/,
-      );
-      // Sent as HTML so Telegram renders the quote (ties to the ADR 0049 fix).
-      expect(composite?.format).toBe('html');
-
-      await animation.finalize();
-    });
-
-    it('keeps the status word cycling while the recap persists below (a loading tick after a recap re-renders the SAME composite, detail intact)', async () => {
+    it('is a no-op for empty text and once finalized', async () => {
       const { service, vendor } = buildAnimator();
 
       const animation = await service.begin({
@@ -555,103 +872,15 @@ describe('StatusAnimatorService (Story 12 live status, ADR 0012)', () => {
         languageCode: 'en',
       });
 
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      // Land the between-rounds recap on the draft (flush the coalesced frame).
-      await animation.showRecap('Checking Thursday afternoon');
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      const recapFrame = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-      expect(recapFrame).toContain(
-        '<blockquote>Checking Thursday afternoon</blockquote>',
-      );
-
-      // The dots keep animating ON TOP: a later word swap re-renders the SAME
-      // composite — a new <word><dots> status line, with the recap STILL below it
-      // (the recap was not re-armed/cleared; it persists while the dots tick).
-      const callsAfterRecap = vendor.sendMessageDraft.mock.calls.length;
-
-      await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs);
-
-      expect(vendor.sendMessageDraft.mock.calls.length).toBeGreaterThan(
-        callsAfterRecap,
-      );
-
-      const tickAfterRecap = vendor.sendMessageDraft.mock.calls.at(-1)?.[1];
-
-      // Composite re-rendered: status line on top (animated dots) AND the recap
-      // detail STILL below it, sent as HTML.
-      expect(tickAfterRecap?.text).toMatch(
-        /\.{1,3}\n\n<blockquote>Checking Thursday afternoon<\/blockquote>$/,
-      );
-      expect(tickAfterRecap?.format).toBe('html');
-
-      // finalize stops the loop — no animation frames after teardown, and (ADR
-      // 0052) NO empty-text collapse frame: the last draft frame remains the recap
-      // composite, not a blank bubble.
-      const beforeFinalize = vendor.sendMessageDraft.mock.calls.length;
-      const lastFrameText = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
+      animation.streamAnswer('');
+      expect(vendor.editMessageText).not.toHaveBeenCalled();
 
       await animation.finalize();
+      animation.streamAnswer('too late');
+      await animation.settle();
 
-      // Finalize emitted no further draft frame (no collapse).
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
-      expect(vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text).toBe(
-        lastFrameText,
-      );
-      expect(lastFrameText).not.toBe('');
-
-      await jest.advanceTimersByTimeAsync(CONFIG.statusWordIntervalMs * 2);
-
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(beforeFinalize);
-    });
-
-    it('HTML-escapes the recap text inside the blockquote (degrade-safe; no tag injection)', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      await animation.startLoading();
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      await animation.showRecap('Checking <b>A & B</b> > now');
-      await jest.advanceTimersByTimeAsync(CONFIG.statusDotIntervalMs);
-
-      const composite = vendor.sendMessageDraft.mock.calls.at(-1)?.[1].text;
-
-      // The recap's <, >, & are escaped so it cannot inject a tag Telegram rejects.
-      expect(composite).toContain(
-        '<blockquote>Checking &lt;b&gt;A &amp; B&lt;/b&gt; &gt; now</blockquote>',
-      );
-
-      await animation.finalize();
-    });
-
-    it('is a no-op once finalized (a late recap frame never re-posts)', async () => {
-      const { service, vendor } = buildAnimator();
-
-      const animation = await service.begin({
-        vendorChatId: 'chat-1',
-        turnId: 'turn-1',
-        chatType: ChatType.Private,
-        languageCode: 'en',
-      });
-
-      await animation.finalize();
-
-      const afterFinalize = vendor.sendMessageDraft.mock.calls.length;
-
-      await animation.showRecap('also too late');
-      await jest.advanceTimersByTimeAsync(1000);
-
-      expect(vendor.sendMessageDraft.mock.calls.length).toBe(afterFinalize);
+      // Nothing streamed: empty was ignored and the post-finalize token no-ops.
+      expect(vendor.editMessageText).not.toHaveBeenCalled();
     });
   });
 });

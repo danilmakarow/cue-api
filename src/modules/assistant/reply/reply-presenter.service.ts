@@ -1,7 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { markdownToTelegramHtml } from './markdown-to-telegram-html';
+import {
+  escapeHtml,
+  markdownToTelegramHtml,
+} from './markdown-to-telegram-html';
 import { buildAskKeyboard } from './quick-reply.builder';
+import { StatusLocale } from './status-phrases';
 import { AskUserOption } from '../assistant.types';
 import { ExternalVendorConnector } from '@/modules/external-vendor/external-vendor-connector.abstract';
 import { ACTIVE_VENDOR_CONNECTOR } from '@/modules/external-vendor/external-vendor.module';
@@ -9,6 +13,19 @@ import {
   OutboundFormat,
   ReplyKeyboard,
 } from '@/modules/external-vendor/external-vendor.types';
+
+/**
+ * Localized "User selected:" prefix prepended to the answered `ask_user` question
+ * when a button tap morphs the original question message (R3 / ADR 0058), so the
+ * thread reads as a resolved exchange. Keyed by the turn's resolved
+ * {@link StatusLocale}; collapses to English for any unsupported locale via the
+ * caller's resolution chain.
+ */
+const USER_SELECTED_PREFIX: Record<StatusLocale, string> = {
+  en: 'User selected:',
+  ru: 'Вы выбрали:',
+  uk: 'Ви обрали:',
+};
 
 /**
  * L9 reply / egress layer — the SOLE caller of the vendor send surface
@@ -37,12 +54,22 @@ export class ReplyPresenter {
    * the bot) it retries ONCE as PLAIN text (no parse_mode) so the user ALWAYS
    * gets the answer rather than silence. Returns the vendor message id of the
    * delivered message, or null when even the plain retry failed.
+   *
+   * When `editMessageId` is given (ADR 0053), the reply MORPHS that message — the
+   * turn's one live status message is edited in place into the final answer, so
+   * the user only ever sees a single message (no second bubble). See
+   * {@link morphInto} for the edit + fallback chain.
    */
   async sendText(
     vendorChatId: string,
     text: string,
     correlationId?: string,
+    editMessageId?: string | null,
   ): Promise<string | null> {
+    if (editMessageId) {
+      return this.morphInto(vendorChatId, editMessageId, text, correlationId);
+    }
+
     const html = markdownToTelegramHtml(text);
 
     try {
@@ -60,6 +87,93 @@ export class ReplyPresenter {
       );
 
       return this.sendPlainTextFallback(vendorChatId, text, correlationId);
+    }
+  }
+
+  /**
+   * Morphs the turn's live status message into the final answer (ADR 0053) by
+   * editing it in place: HTML first, then a PLAIN-text edit if the HTML edit 400s.
+   * If neither edit lands (e.g. the message was deleted, or is too old to edit),
+   * it falls back to sending a FRESH reply message AND retires the stale status
+   * message via {@link deleteQuietly}, so the user is never left with a dangling
+   * "thinking…" bubble next to the answer. Returns the id of the message the
+   * answer ended up on (the edited one on success, the fresh one on fallback), or
+   * null when even the fresh send failed.
+   */
+  private async morphInto(
+    vendorChatId: string,
+    editMessageId: string,
+    text: string,
+    correlationId?: string,
+  ): Promise<string | null> {
+    const html = markdownToTelegramHtml(text);
+
+    try {
+      await this.vendor.editMessageText(
+        { vendorChatId },
+        {
+          vendorMessageId: editMessageId,
+          text: html,
+          format: OutboundFormat.Html,
+        },
+      );
+
+      return editMessageId;
+    } catch (htmlError) {
+      const htmlMessage =
+        htmlError instanceof Error ? htmlError.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] HTML morph of ${editMessageId} failed (${htmlMessage}); retrying as plain-text edit`,
+      );
+
+      try {
+        await this.vendor.editMessageText(
+          { vendorChatId },
+          { vendorMessageId: editMessageId, text },
+        );
+
+        return editMessageId;
+      } catch (plainError) {
+        const plainMessage =
+          plainError instanceof Error ? plainError.message : 'unknown error';
+
+        this.logger.warn(
+          `[cid=${correlationId ?? 'none'}] Plain morph of ${editMessageId} also failed (${plainMessage}); sending a fresh reply and retiring the stale status message`,
+        );
+
+        const freshId = await this.sendText(vendorChatId, text, correlationId);
+
+        // Only retire the stale status message once the fresh reply actually
+        // landed — if the fresh send ALSO failed, keep it as the user's sole
+        // remaining message rather than leaving the chat with nothing.
+        if (freshId) {
+          await this.deleteQuietly(vendorChatId, editMessageId, correlationId);
+        }
+
+        return freshId;
+      }
+    }
+  }
+
+  /**
+   * Deletes a message best-effort, swallowing any fault with a log — used to
+   * retire the stale status message when a morph fell back to a fresh send so it
+   * never lingers as a second bubble. A failed delete is cosmetic.
+   */
+  private async deleteQuietly(
+    vendorChatId: string,
+    vendorMessageId: string,
+    correlationId?: string,
+  ): Promise<void> {
+    try {
+      await this.vendor.deleteMessage({ vendorChatId }, vendorMessageId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] Failed to retire stale status message ${vendorMessageId}: ${message}`,
+      );
     }
   }
 
@@ -95,8 +209,10 @@ export class ReplyPresenter {
    * else an inline keyboard with one button per option (callback data
    * `ask:<pendingQuestionId>:<optId>`). Each path swallows a send failure with a
    * log (mirroring {@link sendText}) and returns the outbound vendor message id
-   * (or null) so the persisted assistant message can reference it. A keyboard send
-   * has no per-message id to thread back, so it returns null.
+   * (or null) so the persisted assistant message can reference it AND the orch can
+   * capture it for the answered-question morph (R3 / ADR 0058). The fresh-keyboard
+   * fallback now ALSO returns its `sendActions` message id (was null) so Feature 1
+   * works on BOTH the morph and fresh-keyboard paths.
    */
   async sendQuestion(
     vendorChatId: string,
@@ -104,28 +220,105 @@ export class ReplyPresenter {
     options: AskUserOption[],
     pendingQuestionId: string,
     correlationId: string,
+    editMessageId?: string | null,
   ): Promise<string | null> {
     if (options.length === 0) {
-      return this.sendText(vendorChatId, question, correlationId);
+      return this.sendText(
+        vendorChatId,
+        question,
+        correlationId,
+        editMessageId,
+      );
     }
 
+    const buttons = buildAskKeyboard(options, pendingQuestionId);
+
+    // Morph the live status message into the question + inline keyboard (ADR
+    // 0053) so the ask reuses the one message instead of spawning a second.
+    if (editMessageId) {
+      try {
+        await this.vendor.editMessageText(
+          { vendorChatId },
+          { vendorMessageId: editMessageId, text: question, buttons },
+        );
+
+        return editMessageId;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'unknown error';
+
+        this.logger.warn(
+          `[cid=${correlationId}] Morph of ask_user keyboard onto ${editMessageId} failed (${message}); sending a fresh keyboard`,
+        );
+      }
+    }
+
+    // Fresh keyboard (no morph, or the morph failed). Retire the stale status
+    // message ONLY after the fresh keyboard actually landed — otherwise keep it,
+    // so a double-failure never leaves the chat with nothing. Capture the fresh
+    // message id (R3 / ADR 0058) so the answered-question morph can later target
+    // the question on the fresh-keyboard path too.
     try {
-      await this.vendor.sendActions(
+      const ref = await this.vendor.sendActions(
         { vendorChatId },
-        {
-          text: question,
-          buttons: buildAskKeyboard(options, pendingQuestionId),
-        },
+        { text: question, buttons },
       );
+
+      if (editMessageId) {
+        await this.deleteQuietly(vendorChatId, editMessageId, correlationId);
+      }
+
+      return ref.vendorMessageId;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
 
       this.logger.warn(
         `[cid=${correlationId}] Failed to send ask_user keyboard to ${vendorChatId}: ${message}`,
       );
-    }
 
-    return null;
+      return null;
+    }
+  }
+
+  /**
+   * Marks an `ask_user` question as answered on a BUTTON tap (R3 / ADR 0058) by
+   * editing the ORIGINAL question message in place: it removes the (now-stale)
+   * inline keyboard and appends a localized "User selected: <label>" line, so the
+   * question reads as a resolved exchange instead of a dangling tappable card. Sent
+   * as HTML with both the question and the chosen label escaped (the question was
+   * authored by the model and the label is user-facing button text — neither is
+   * trusted HTML). Degrade-never-throw: a failed edit (message too old / deleted)
+   * is swallowed with a log — the morph is cosmetic, and the resume's own reply
+   * still lands separately.
+   */
+  async markQuestionAnswered(
+    vendorChatId: string,
+    questionMessageId: string,
+    originalQuestion: string,
+    answerLabel: string,
+    locale: StatusLocale,
+    correlationId?: string,
+  ): Promise<void> {
+    const prefix = USER_SELECTED_PREFIX[locale];
+    const text = `${escapeHtml(originalQuestion)}\n\n${prefix} ${escapeHtml(answerLabel)}`;
+
+    try {
+      await this.vendor.editMessageText(
+        { vendorChatId },
+        {
+          vendorMessageId: questionMessageId,
+          text,
+          format: OutboundFormat.Html,
+          clearButtons: true,
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `[cid=${correlationId ?? 'none'}] Failed to mark question ${questionMessageId} answered: ${message}`,
+      );
+    }
   }
 
   /**
@@ -136,6 +329,11 @@ export class ReplyPresenter {
    * failure with a log (mirroring {@link sendText}) so a keyboard send can never
    * crash the deterministic keyboard path; an optional `format` carries through (the
    * ASCII calendar is sent as Markdown so it lands in a monospace code block).
+   *
+   * Returns the delivered message's vendor message id (R4 / ADR 0056 — the Menu
+   * surface needs it to dedup-delete the prior menu card), or null when the send
+   * was swallowed. The swallow-and-log-never-throw contract is preserved: this
+   * remains the sole vendor-send chokepoint and never rethrows.
    */
   async sendTextWithKeyboard(
     vendorChatId: string,
@@ -143,19 +341,37 @@ export class ReplyPresenter {
     keyboard: ReplyKeyboard,
     format?: OutboundFormat,
     correlationId?: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     try {
-      await this.vendor.sendMessageWithKeyboard(
+      const ref = await this.vendor.sendMessageWithKeyboard(
         { vendorChatId },
         { text, format, replyKeyboard: keyboard },
       );
+
+      return ref.vendorMessageId;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
 
       this.logger.warn(
         `[cid=${correlationId ?? 'none'}] Failed to send keyboard message to ${vendorChatId}: ${message}`,
       );
+
+      return null;
     }
+  }
+
+  /**
+   * Public best-effort delete (R4 / ADR 0056) — a thin wrapper over the private
+   * {@link deleteQuietly} so the Menu surface can retire its prior menu card after
+   * sending the new one (send-new-first, delete-old-after, never orphaning). Swallows
+   * any fault with a log; a failed delete is cosmetic (worst case one extra bubble).
+   */
+  async deleteMessageQuietly(
+    vendorChatId: string,
+    vendorMessageId: string,
+    correlationId?: string,
+  ): Promise<void> {
+    await this.deleteQuietly(vendorChatId, vendorMessageId, correlationId);
   }
 
   /**

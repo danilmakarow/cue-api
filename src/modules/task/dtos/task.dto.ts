@@ -1,20 +1,22 @@
 import { ApiProperty } from '@nestjs/swagger';
 
-import { RecurrenceRule, Task } from '@/modules/database/entities';
-import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
+import { resolveEffectiveSettings } from '../effective-settings';
+import { Task } from '@/modules/database/entities';
+import {
+  Occurrence,
+  RecurrenceConfig,
+} from '@/modules/recurrence-rule/recurrence.types';
 
 /**
- * Wire shape for a RecurrenceRule embedded in task/group responses.
- * Field names are normative per the FE contract (Part C).
+ * Wire shape for an inline recurrence config embedded in task/group responses
+ * (ADR 0054). Field names are normative per the FE contract (Part C). Unlike the
+ * former `RecurrenceRuleDTO` it carries NO `id` — recurrence is no longer a row.
  *
  * Modelled as a class (not an interface) so `@ApiProperty` can describe it for
- * Swagger; the `toRecurrenceRuleDTO` mapper returns a structurally compatible
+ * Swagger; the `toRecurrenceConfigDTO` mapper returns a structurally compatible
  * object literal — no instantiation needed.
  */
-export class RecurrenceRuleDTO {
-  @ApiProperty({ format: 'uuid' })
-  id: string;
-
+export class RecurrenceConfigDTO {
   @ApiProperty({ example: 'WEEKLY' })
   frequency: string;
 
@@ -42,7 +44,7 @@ export class RecurrenceRuleDTO {
 
 /**
  * Wire shape for a Task series row. Returned by POST /tasks, PATCH /tasks/:id,
- * GET /tasks/:id. Includes the embedded recurrence rule for editing.
+ * GET /tasks/:id. Includes the inline recurrence config for editing.
  */
 export class TaskDTO {
   @ApiProperty({ format: 'uuid' })
@@ -72,17 +74,19 @@ export class TaskDTO {
   @ApiProperty({ example: 'Europe/Berlin' })
   timezone: string;
 
-  @ApiProperty()
-  requiresCompletion: boolean;
+  /** Task's OWN value; null means "inherit" (resolve task-wins on the client). */
+  @ApiProperty({ nullable: true })
+  requiresCompletion: boolean | null;
+
+  /** Task's OWN color (preset name or `#RRGGBB`); null inherits the group color. */
+  @ApiProperty({ nullable: true, example: 'BLUE' })
+  color: string | null;
 
   @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
 
-  @ApiProperty({ format: 'uuid', nullable: true })
-  recurrenceRuleId: string | null;
-
-  @ApiProperty({ type: () => RecurrenceRuleDTO, nullable: true })
-  recurrence: RecurrenceRuleDTO | null;
+  @ApiProperty({ type: () => RecurrenceConfigDTO, nullable: true })
+  recurrence: RecurrenceConfigDTO | null;
 
   @ApiProperty({ format: 'uuid', nullable: true })
   notificationStrategyId: string | null;
@@ -97,6 +101,8 @@ export class TaskDTO {
 /**
  * Wire shape for a single expanded occurrence. Returned by GET /tasks.
  * One per visible instance — recurring tasks produce one per occurrence date.
+ * `requiresCompletion` / `color` / `isRecurring` reflect the EFFECTIVE
+ * (task-wins-over-group) settings so the client renders one resolved value.
  */
 export class OccurrenceDTO {
   @ApiProperty({ format: 'uuid' })
@@ -129,8 +135,13 @@ export class OccurrenceDTO {
   @ApiProperty({ example: 'Europe/Berlin' })
   timezone: string;
 
+  /** EFFECTIVE completion requirement (task ?? group ?? false). */
   @ApiProperty()
   requiresCompletion: boolean;
+
+  /** EFFECTIVE color (task ?? group ?? null). */
+  @ApiProperty({ nullable: true, example: 'BLUE' })
+  color: string | null;
 
   @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
@@ -157,26 +168,26 @@ export class CompletionResultDTO {
 }
 
 /**
- * Maps a RecurrenceRule entity to its DTO wire shape.
+ * Maps an inline RecurrenceConfig to its DTO wire shape (no id).
  */
-export const toRecurrenceRuleDTO = (
-  rule: RecurrenceRule,
-): RecurrenceRuleDTO => ({
-  id: rule.id,
-  frequency: rule.frequency,
-  interval: rule.interval,
-  byWeekday: rule.byWeekday,
-  byMonthDay: rule.byMonthDay,
-  byMonth: rule.byMonth,
-  endType: rule.endType,
-  endDate: rule.endDate,
-  count: rule.count,
+export const toRecurrenceConfigDTO = (
+  config: RecurrenceConfig,
+): RecurrenceConfigDTO => ({
+  frequency: config.frequency,
+  interval: config.interval,
+  byWeekday: config.byWeekday,
+  byMonthDay: config.byMonthDay,
+  byMonth: config.byMonth,
+  endType: config.endType,
+  endDate: config.endDate,
+  count: config.count,
 });
 
 /**
- * Maps a Task entity (with optional eagerly-loaded `recurrenceRule` relation) to
- * the `TaskDTO` wire shape. The `recurrence` field is populated only when the
- * relation is loaded; if you need it, use `findByIdWithRule`.
+ * Maps a Task entity to the `TaskDTO` wire shape. `recurrence` is the inline
+ * `recurrenceConfig` on the row (its OWN config, not the group-inherited one);
+ * `requiresCompletion` / `color` are the task's OWN (nullable) values so the
+ * client can distinguish "inherit" from an explicit setting.
  */
 export const toTaskDTO = (task: Task): TaskDTO => ({
   id: task.id,
@@ -189,10 +200,10 @@ export const toTaskDTO = (task: Task): TaskDTO => ({
   isAllDay: task.isAllDay,
   timezone: task.timezone,
   requiresCompletion: task.requiresCompletion,
+  color: task.color,
   completedAt: task.completedAt ? task.completedAt.toISOString() : null,
-  recurrenceRuleId: task.recurrenceRuleId,
-  recurrence: task.recurrenceRule
-    ? toRecurrenceRuleDTO(task.recurrenceRule)
+  recurrence: task.recurrenceConfig
+    ? toRecurrenceConfigDTO(task.recurrenceConfig)
     : null,
   notificationStrategyId: task.notificationStrategyId,
   createdAt: task.createdAt.toISOString(),
@@ -202,28 +213,36 @@ export const toTaskDTO = (task: Task): TaskDTO => ({
 /**
  * Maps a computed `Occurrence` value to the `OccurrenceDTO` wire shape.
  * Picks only the fields the FE needs — does NOT serialize the full `task` entity.
+ * `requiresCompletion` / `color` are resolved EFFECTIVE (task-wins over group)
+ * via {@link resolveEffectiveSettings}; group inheritance is honored only when the
+ * occurrence's `task.group` relation was loaded.
  */
-export const toOccurrenceDTO = (occurrence: Occurrence): OccurrenceDTO => ({
-  taskId: occurrence.task.id,
-  calendarId: occurrence.task.calendarId,
-  groupId: occurrence.task.groupId,
-  originalStart: occurrence.originalStart
-    ? occurrence.originalStart.toISOString()
-    : null,
-  occurrenceStart: occurrence.occurrenceStart
-    ? occurrence.occurrenceStart.toISOString()
-    : null,
-  occurrenceEnd: occurrence.occurrenceEnd
-    ? occurrence.occurrenceEnd.toISOString()
-    : null,
-  title: occurrence.title,
-  notes: occurrence.task.notes,
-  isAllDay: occurrence.task.isAllDay,
-  timezone: occurrence.task.timezone,
-  requiresCompletion: occurrence.task.requiresCompletion,
-  completedAt: occurrence.completedAt
-    ? occurrence.completedAt.toISOString()
-    : null,
-  isRecurring: occurrence.isRecurring,
-  isException: occurrence.isException,
-});
+export const toOccurrenceDTO = (occurrence: Occurrence): OccurrenceDTO => {
+  const effective = resolveEffectiveSettings(occurrence.task);
+
+  return {
+    taskId: occurrence.task.id,
+    calendarId: occurrence.task.calendarId,
+    groupId: occurrence.task.groupId,
+    originalStart: occurrence.originalStart
+      ? occurrence.originalStart.toISOString()
+      : null,
+    occurrenceStart: occurrence.occurrenceStart
+      ? occurrence.occurrenceStart.toISOString()
+      : null,
+    occurrenceEnd: occurrence.occurrenceEnd
+      ? occurrence.occurrenceEnd.toISOString()
+      : null,
+    title: occurrence.title,
+    notes: occurrence.task.notes,
+    isAllDay: occurrence.task.isAllDay,
+    timezone: occurrence.task.timezone,
+    requiresCompletion: effective.requiresCompletion,
+    color: effective.color,
+    completedAt: occurrence.completedAt
+      ? occurrence.completedAt.toISOString()
+      : null,
+    isRecurring: occurrence.isRecurring,
+    isException: occurrence.isException,
+  };
+};

@@ -11,9 +11,12 @@ import { ScriptedAiConnector } from './scripted-ai.connector';
 import { AppModule } from '@/app.module';
 import { ACTIVE_AI_CONNECTOR } from '@/modules/ai/ai.module';
 import { AnthropicAiConnector } from '@/modules/ai/anthropic/anthropic-ai.connector';
+import { KeyboardSurface } from '@/modules/assistant/reply/reply-keyboard.layout';
+import { ActiveKeyboardStore } from '@/modules/assistant/session/active-keyboard.store';
 import {
   Calendar,
   ConflictPolicy,
+  Task,
   TelegramLink,
   User,
 } from '@/modules/database/entities';
@@ -26,6 +29,10 @@ import {
 import { ExternalVendorConfig } from '@/modules/external-vendor/external-vendor.config';
 import { TelegramVendorConnector } from '@/modules/external-vendor/telegram/telegram-vendor.connector';
 import { REDIS_CLIENT } from '@/modules/redis/redis.module';
+import {
+  EffectiveSettings,
+  resolveEffectiveSettings,
+} from '@/modules/task/effective-settings';
 
 /**
  * Mutable tables truncated between tests so each scenario starts from a clean
@@ -41,7 +48,9 @@ const TRUNCATABLE_TABLES = [
   'telegram_link',
   'task_occurrence_exception',
   'task_group',
-  'recurrence_rule',
+  // `recurrence_rule` was dropped by the inline-recurrence wipe migration (ADR
+  // 0054) — recurrence now lives as a JSONB column on `task` / `task_group`, so
+  // there is no rule table to truncate. Truncating `task` clears any inline config.
   'notification_rule',
   'notification_strategy',
   'scheduled_notification',
@@ -313,6 +322,86 @@ export class E2eHarness {
       );
 
     return rows;
+  }
+
+  /**
+   * Returns the inline recurrence / effective-settings columns (ADR 0054) of the
+   * tasks in a calendar, ordered by creation, so a test can assert the AI tool
+   * path persisted `recurrenceConfig` as JSONB plus the nullable `color` /
+   * `requiresCompletion` directly on the row (no separate `recurrence_rule` row).
+   * Raw SQL reads the columns straight, bypassing the 3-layer constraints.
+   */
+  async listTaskSettings(calendarId: string): Promise<
+    Array<{
+      title: string;
+      recurrenceConfig: Record<string, unknown> | null;
+      color: string | null;
+      requiresCompletion: boolean | null;
+    }>
+  > {
+    return this.dataSource.query(
+      `SELECT title, "recurrenceConfig", color, "requiresCompletion"
+         FROM task WHERE "calendarId" = $1 ORDER BY "createdAt" ASC`,
+      [calendarId],
+    );
+  }
+
+  /**
+   * Returns whether a base relation (table) exists in the public schema, via
+   * `to_regclass`. Used to assert the wipe migration (ADR 0054) really dropped the
+   * `recurrence_rule` table — recurrence is now inline JSONB, so no rule row can
+   * exist for a recurring task created through the pipeline.
+   */
+  async tableExists(tableName: string): Promise<boolean> {
+    const rows: Array<{ exists: string | null }> = await this.dataSource.query(
+      `SELECT to_regclass($1) AS exists`,
+      [`public.${tableName}`],
+    );
+
+    return rows[0]?.exists !== null && rows[0]?.exists !== undefined;
+  }
+
+  /**
+   * Docks a reply-keyboard surface for a user (Story 16 / ADR 0045) via the same
+   * {@link ActiveKeyboardStore} the keyboard handlers write, so a subsequent
+   * plain-text tap of a label that surface owns (e.g. "Open Menu" on the MAIN
+   * surface, R4 / ADR 0056) is classified as a deterministic keyboard action by
+   * the inbound router instead of a fresh model turn. Seeds the precondition a
+   * keyboard-tap scenario needs without sending the linking handshake first.
+   */
+  async setActiveKeyboardSurface(
+    userId: string,
+    surface: KeyboardSurface,
+  ): Promise<void> {
+    const activeKeyboard = this.moduleRef.get(ActiveKeyboardStore);
+
+    await activeKeyboard.setActiveSurface(userId, surface);
+  }
+
+  /**
+   * Loads the earliest-created task in a calendar WITH its group relation and runs
+   * the REAL {@link resolveEffectiveSettings} resolver (ADR 0054) on it, so a test
+   * asserts the production task-wins-over-group inheritance for `recurrence` /
+   * `requiresCompletion` / `color` — not a hand-rolled mirror. The group relation
+   * is eager-loaded so group inheritance is honored when the task sets none.
+   */
+  async resolveEffectiveForFirstTask(
+    calendarId: string,
+  ): Promise<EffectiveSettings> {
+    const repository = this.dataSource.getRepository(Task);
+    const task = await repository.findOne({
+      where: { calendarId },
+      relations: { group: true },
+      order: { createdAt: 'ASC' },
+    });
+
+    if (!task) {
+      throw new Error(
+        `resolveEffectiveForFirstTask: no task found in calendar ${calendarId}`,
+      );
+    }
+
+    return resolveEffectiveSettings(task);
   }
 
   /**

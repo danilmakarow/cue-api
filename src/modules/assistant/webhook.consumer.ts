@@ -15,6 +15,7 @@ import {
 } from './reply/status-animator.service';
 import { ActiveKeyboardStore } from './session/active-keyboard.store';
 import { DebounceCoordinatorService } from './session/debounce-coordinator.service';
+import { LastMessageLanguageStore } from './session/last-message-language.store';
 import { PENDING_INTERACTION_STORE } from './session/pending-interaction.store';
 import type { PendingInteractionStore } from './session/pending-interaction.store';
 import { dedupeKey, WEBHOOK_QUEUE_NAME } from '../redis/redis.constants';
@@ -74,6 +75,7 @@ export class WebhookConsumer extends WorkerHost {
     private readonly activeKeyboardStore: ActiveKeyboardStore,
     private readonly debounceCoordinator: DebounceCoordinatorService,
     private readonly statusAnimator: StatusAnimatorService,
+    private readonly lastMessageLanguageStore: LastMessageLanguageStore,
     private readonly config: AssistantConfig,
   ) {
     super();
@@ -107,16 +109,26 @@ export class WebhookConsumer extends WorkerHost {
    * then transitions into the cycling-word loading animation. Degrades
    * never-throw; the returned handle is finalized by the caller only on the STT
    * failure path (a successful turn hands finalize to the turn-runner).
+   *
+   * The pre-STT line has no transcript or STT language yet, so its locale comes
+   * from the `language_code` and — when that is unsupported/absent — the user's
+   * last-message language borrowed from Redis (R2 / ADR 0055), so a follow-up
+   * voice note keeps the conversation's language instead of snapping to `en`. The
+   * peek is degrade-never-throw (a fault returns null → bare `language_code`/`en`).
    */
   private async beginVoiceStatus(
+    userId: string,
     normalized: NormalizedInboundMessage,
     correlationId: string,
   ): Promise<StatusAnimation> {
+    const priorLocale = await this.lastMessageLanguageStore.peek(userId);
+
     const animation = await this.statusAnimator.begin({
       vendorChatId: normalized.vendorChatId,
       turnId: correlationId,
       chatType: normalized.chatType,
       languageCode: normalized.languageCode,
+      priorLocale: priorLocale ?? undefined,
     });
 
     await animation.showVoiceListening();
@@ -195,7 +207,11 @@ export class WebhookConsumer extends WorkerHost {
       // text yet); the POST-STT loading words switch to the spoken language once
       // the turn re-opens this surface with `sttLanguage` + the transcript (v2
       // Task 4 / ADR 0051). Begin/voice-state degrade never-throw.
-      voiceStatus = await this.beginVoiceStatus(normalized, correlationId);
+      voiceStatus = await this.beginVoiceStatus(
+        user.id,
+        normalized,
+        correlationId,
+      );
 
       const result = await this.transcribeVoice(connector, normalized);
 

@@ -7,7 +7,7 @@ Cue is an iOS planner / TODO app. The iOS codebase lives at `~/personal-projects
 Core features beyond a plain TODO app:
 - **Calendar-centric data model** — users own multiple Calendars; tasks, groups, and notification strategies belong to a Calendar (not directly to the user). Sharing calendars with other users is a future capability.
 - **Tasks and events unified** — one `Task` entity with optional start/end time (or all-day), optional completion requirement.
-- **Recurring tasks** — RFC 5545-inspired RRULE model (`RecurrenceRule`) with per-occurrence overrides (`TaskOccurrenceException`).
+- **Recurring tasks** — RFC 5545-inspired RRULE model stored inline as a JSONB `recurrenceConfig` on `Task` and `TaskGroup`, with per-occurrence overrides (`TaskOccurrenceException`).
 - **Notification strategies** — reusable sets of reminder rules. Per-task override falls back to per-group default.
 - **Multi-channel notifications** — APNs push + Telegram bot (both planned, not yet wired).
 - **Siri integration (iOS side via App Intents)** — BE stores the tasks; iOS exposes the intents.
@@ -39,7 +39,7 @@ database                   ← single aggregator module (entities, repositories,
 device                     ← APNs device tokens, per-User
 notification-rule          ← one reminder: offsetMinutes + channel
 notification-strategy      ← named set of NotificationRules, owned by Calendar
-recurrence-rule            ← RRULE (frequency, interval, by-weekday/month/etc., endType)
+recurrence-rule            ← pure RRULE expansion engine (DB-less); config stored inline as JSONB on Task/TaskGroup
 scheduled-notification     ← outbox table: status, fireAt, channel, attemptCount, userId (delivery target)
 task                       ← unified event+task: startAt/endAt/isAllDay, completedAt, timezone, calendarId
 task-group                 ← collection of Tasks within a Calendar; has defaultNotificationStrategyId
@@ -78,7 +78,6 @@ Calendar ─1─* NotificationStrategy (cascade)
 TaskGroup *─1 NotificationStrategy (default, nullable, SET NULL)
 TaskGroup 1─* Task                 (via Task.groupId, nullable, SET NULL)
 
-Task *─1 RecurrenceRule            (nullable, SET NULL)
 Task *─1 NotificationStrategy      (override, nullable, SET NULL)
 Task 1─* TaskOccurrenceException   (cascade)
 Task 1─* ScheduledNotification     (cascade; also cascade from User)
@@ -86,14 +85,18 @@ Task 1─* ScheduledNotification     (cascade; also cascade from User)
 NotificationStrategy 1─* NotificationRule (cascade)
 ```
 
-Effective notification strategy for a task = `task.notificationStrategyId ?? task.group.defaultNotificationStrategyId`.
+Recurrence is **not** a relationship — it is an inline JSONB `recurrenceConfig` column on **both** `Task` and `TaskGroup` (ADR [0054](docs/adr/0054-inline-recurrence-and-effective-settings.md)). The `RecurrenceRule` entity / table / repository / database-service were **deleted**; `recurrence-rule` is now a DB-less pure expansion engine.
+
+**Effective-settings resolver** (`resolveEffectiveSettings`, task-wins): recurrence / `requiresCompletion` / `color` each resolve as `task value ?? group value ?? default`. `requiresCompletion` defaults to **`false`** in the resolver — the column is nullable on both `Task` and `TaskGroup` with **no DB default** (the default lives in the resolver because a column default cannot express task-wins inheritance). `Task` gained a `color` column (a `TaskColor` enum preset name OR a `#RRGGBB` hex, validated by a single-sourced `isValidTaskColor` predicate at the DTO / AI-tool boundary); `TaskGroup` gained a nullable `requiresCompletion` alongside its existing `color`.
+
+Effective notification strategy for a task = `task.notificationStrategyId ?? task.group.defaultNotificationStrategyId`. This is documented **intent only** — the notification-strategy service is a skeleton; the working template for task-wins inheritance is the recurrence/`requiresCompletion`/`color` resolver above, not a live `notificationStrategy` resolver.
 
 ### Key schema decisions
 - **UUID PKs everywhere** — distributed-friendly, safe for future CloudKit / cross-device sync on the iOS side.
 - **`Task.completedAt` timestamp, NOT `isDone` bool** — enables historical reporting for free.
 - **Per-task `timezone` field (IANA)** — critical correctness for recurring tasks across DST. All timestamps are `timestamptz`.
 - **Soft delete (`@DeleteDateColumn`) on `Task` only** — supports tombstone-based sync with iOS.
-- **Recurrence = RRULE + exception rows** — RFC 5545 pattern. Never materialize every occurrence.
+- **Recurrence config stored inline as JSONB** on `Task` / `TaskGroup` (ADR [0054](docs/adr/0054-inline-recurrence-and-effective-settings.md)); the expansion engine is pure / DB-less. The RRULE is still never materialized (ADR [0002](docs/adr/0002-rrule-not-materialized.md) holds) — RFC 5545 pattern, occurrences computed on-read, only divergences persisted as `TaskOccurrenceException` rows.
 - **`ScheduledNotification.userId` is the delivery target** — calendar context is derivable via `task.calendarId`. Do NOT denormalize calendar onto scheduled notifications.
 - **`Calendar.ownerId` now; `CalendarMember` later** — YAGNI on sharing. Adding a member join table is a small additive migration when sharing actually ships.
 

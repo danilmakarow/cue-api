@@ -8,11 +8,13 @@
  * active-surface flag the router gates on, and the action the tap resolves to can
  * never drift apart.
  *
- * Two surfaces: the MAIN keyboard ([Today's schedule] [Next week] [Settings]) and
- * the SETTINGS keyboard ([Disconnect] [Back]). Both are persistent
+ * Three surfaces: the MAIN keyboard ([Today's schedule] [Next week] [Settings] +
+ * [Open Menu]), the SETTINGS keyboard ([Disconnect] [Back]), and the MENU keyboard
+ * ([Settings] [Logout] + [Close], R4 / ADR 0056). All are persistent
  * (`is_persistent` + `resize_keyboard`, via the Story-10 primitive); swapping one
- * for the other is just sending a new message with the other's markup, and
- * Disconnect removes the keyboard entirely (`ReplyKeyboardRemove`).
+ * for another is just sending a new message with the other's markup, and Disconnect
+ * / Logout removes the keyboard entirely (`ReplyKeyboardRemove`). 'Open Menu' is
+ * globally owned across surfaces so it routes regardless of the docked surface.
  *
  * See `docs/specs/assistant-layered-architecture.md` → L9 reply/egress.
  */
@@ -28,6 +30,7 @@ import { ReplyKeyboard } from '@/modules/external-vendor/external-vendor.types';
 export enum KeyboardSurface {
   Main = 'main',
   Settings = 'settings',
+  Menu = 'menu',
 }
 
 /** The action a reply-keyboard tap resolves to (all deterministic — NO LLM). */
@@ -42,6 +45,18 @@ export enum KeyboardAction {
   Disconnect = 'disconnect',
   /** [Back] — swap the settings keyboard back to the main keyboard. */
   Back = 'back',
+  /**
+   * [Open Menu] — dock the persistent Menu surface (account + status card),
+   * dedup-replacing any prior menu message (R4 / ADR 0056). Globally owned on
+   * EVERY docked surface so it routes regardless of which surface is active.
+   */
+  OpenMenu = 'open_menu',
+  /** [Settings] (Menu surface) — open the settings keyboard from the menu. */
+  MenuSettings = 'menu_settings',
+  /** [Logout] (Menu surface) — unlink Telegram and remove the keyboard. */
+  Logout = 'logout',
+  /** [Close] (Menu surface) — return to the main keyboard. */
+  CloseMenu = 'close_menu',
 }
 
 /** Button labels — the verbatim text a tap echoes back as inbound plain text. */
@@ -51,9 +66,15 @@ export const KEYBOARD_LABELS = {
   settings: 'Settings',
   disconnect: 'Disconnect',
   back: 'Back',
+  openMenu: 'Open Menu',
+  logout: 'Logout',
 } as const;
 
-/** The main reply keyboard: one row of [Today's schedule] [Next week] [Settings]. */
+/**
+ * The main reply keyboard: [Today's schedule] [Next week] [Settings] on the first
+ * row and [Open Menu] on the second, so the menu surface is reachable from normal
+ * chat (R4 / ADR 0056).
+ */
 export const MAIN_KEYBOARD: ReplyKeyboard = {
   buttons: [
     [
@@ -61,6 +82,7 @@ export const MAIN_KEYBOARD: ReplyKeyboard = {
       { label: KEYBOARD_LABELS.nextWeek },
       { label: KEYBOARD_LABELS.settings },
     ],
+    [{ label: KEYBOARD_LABELS.openMenu }],
   ],
 };
 
@@ -68,6 +90,19 @@ export const MAIN_KEYBOARD: ReplyKeyboard = {
 export const SETTINGS_KEYBOARD: ReplyKeyboard = {
   buttons: [
     [{ label: KEYBOARD_LABELS.disconnect }, { label: KEYBOARD_LABELS.back }],
+  ],
+};
+
+/**
+ * The menu reply keyboard (R4 / ADR 0056): [Settings] [Logout] on the first row
+ * and [Close] on the second. It is docked alongside the account/status card; the
+ * menu message itself is dedup-deleted on the next [Open Menu] so the chat never
+ * accumulates stale cards.
+ */
+export const MENU_KEYBOARD: ReplyKeyboard = {
+  buttons: [
+    [{ label: KEYBOARD_LABELS.settings }, { label: KEYBOARD_LABELS.logout }],
+    [{ label: KEYBOARD_LABELS.back }],
   ],
 };
 
@@ -85,10 +120,26 @@ const SURFACE_ACTIONS: Record<
     [KEYBOARD_LABELS.todaySchedule]: KeyboardAction.TodaySchedule,
     [KEYBOARD_LABELS.nextWeek]: KeyboardAction.NextWeek,
     [KEYBOARD_LABELS.settings]: KeyboardAction.OpenSettings,
+    // 'Open Menu' is globally owned on EVERY docked surface (R4 / ADR 0056) so a
+    // tap routes to OpenMenu regardless of which surface is currently active —
+    // otherwise the active-surface gate would treat it as plain chat.
+    [KEYBOARD_LABELS.openMenu]: KeyboardAction.OpenMenu,
   },
   [KeyboardSurface.Settings]: {
     [KEYBOARD_LABELS.disconnect]: KeyboardAction.Disconnect,
     [KEYBOARD_LABELS.back]: KeyboardAction.Back,
+    // 'Open Menu' is globally owned (see above) — also routed while Settings is
+    // docked even though Settings does not render the button itself.
+    [KEYBOARD_LABELS.openMenu]: KeyboardAction.OpenMenu,
+  },
+  [KeyboardSurface.Menu]: {
+    // The Menu surface re-uses the [Settings] / [Back] labels for its own actions:
+    // [Settings] opens the settings keyboard, [Back] closes the menu back to main,
+    // [Logout] unlinks. 'Open Menu' stays globally owned (idempotent re-open).
+    [KEYBOARD_LABELS.settings]: KeyboardAction.MenuSettings,
+    [KEYBOARD_LABELS.logout]: KeyboardAction.Logout,
+    [KEYBOARD_LABELS.back]: KeyboardAction.CloseMenu,
+    [KEYBOARD_LABELS.openMenu]: KeyboardAction.OpenMenu,
   },
 };
 
@@ -114,7 +165,11 @@ export const resolveKeyboardAction = (
 export const toKeyboardSurface = (
   value: string | null,
 ): KeyboardSurface | null => {
-  if (value === KeyboardSurface.Main || value === KeyboardSurface.Settings) {
+  if (
+    value === KeyboardSurface.Main ||
+    value === KeyboardSurface.Settings ||
+    value === KeyboardSurface.Menu
+  ) {
     return value;
   }
 

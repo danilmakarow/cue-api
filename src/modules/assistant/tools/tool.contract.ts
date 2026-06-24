@@ -63,6 +63,10 @@ export interface ToolHandlerHost {
     input: Record<string, unknown>,
     context: ToolDispatchContext,
   ): ToolDispatchOutcome;
+  handleUpdateGroup(
+    input: Record<string, unknown>,
+    context: ToolDispatchContext,
+  ): Promise<ToolDispatchOutcome>;
 }
 
 /**

@@ -78,7 +78,7 @@ describe('Debounce queue-after under REAL BullMQ (FIX 1)', () => {
     await harness.reset();
   });
 
-  /** Reads the text off a captured `sendMessage`. */
+  /** Reads the text off a captured reply (the morph `editMessageText`, ADR 0053). */
   const replyTextOf = (send: CapturedSend): string =>
     (send.payload as { text: string }).text;
 
@@ -146,7 +146,9 @@ describe('Debounce queue-after under REAL BullMQ (FIX 1)', () => {
     // (no second webhook was posted).
     const reply = await harness.vendor.nextSend();
 
-    expect(reply.method).toBe('sendMessage');
+    // ADR 0053: the continued turn morphs its loading line into the answer via
+    // editMessageText (not a fresh sendMessage).
+    expect(reply.method).toBe('editMessageText');
     expect(replyTextOf(reply)).toMatch(/second task/i);
 
     // The write committed — the queued-after turn really ran after the lock freed.

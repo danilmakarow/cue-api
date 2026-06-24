@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsInt,
   IsOptional,
   IsString,
@@ -12,6 +13,7 @@ import {
 } from 'class-validator';
 
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
+import { IsTaskColor } from '@/modules/task/dtos/is-task-color.validator';
 
 /**
  * DTO for creating a new TaskGroup inside an existing Calendar. The referenced
@@ -31,10 +33,10 @@ export class CreateTaskGroupDto {
   @MaxLength(255)
   name: string;
 
-  @ApiPropertyOptional({ example: '#E27921', maxLength: 64 })
+  /** Default color: a preset name (e.g. BLUE) or a custom `#RRGGBB` hex. */
+  @ApiPropertyOptional({ example: 'BLUE' })
   @IsOptional()
-  @IsString()
-  @MaxLength(64)
+  @IsTaskColor()
   color?: string;
 
   @ApiPropertyOptional({ example: 'cart.fill', maxLength: 64 })
@@ -42,6 +44,14 @@ export class CreateTaskGroupDto {
   @IsString()
   @MaxLength(64)
   icon?: string;
+
+  /** Group default completion requirement inherited by tasks (task-wins). */
+  @ApiPropertyOptional({
+    description: 'Default completion requirement inherited by tasks.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiresCompletion?: boolean;
 
   /** Optional default notification strategy inherited by tasks in this group. */
   @ApiPropertyOptional({
@@ -65,12 +75,12 @@ export class CreateTaskGroupDto {
   sortOrder?: number;
 
   /**
-   * When present, creates a RecurrenceRule and sets it as the group's default.
-   * Tasks in this group with no own rule will inherit this schedule.
+   * When present, stored inline as the group's default recurrenceConfig.
+   * Tasks in this group with no own config will inherit this schedule.
    */
   @ApiPropertyOptional({
     type: () => CreateRecurrenceRuleDto,
-    description: "Creates a RecurrenceRule and sets it as the group's default.",
+    description: "Stored inline as the group's default recurrence.",
   })
   @IsOptional()
   @ValidateNested()

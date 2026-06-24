@@ -24,6 +24,7 @@ const buildHarness = () => {
     createInstance: jest.fn((partial) => partial),
     save: jest.fn(async (entity) => ({ id: 'pq-1', ...entity })),
     claimAwaiting: jest.fn(),
+    findOneBy: jest.fn(),
   };
 
   const service = new PendingInteractionService(
@@ -167,5 +168,81 @@ describe('PendingInteractionService (ask_user write side, ADR 0010)', () => {
     const wins = [first, second].filter((result) => result !== null);
 
     expect(wins).toHaveLength(1);
+  });
+
+  describe('attachQuestionMessageId (R3 / ADR 0058)', () => {
+    it('loads the row, sets payload.questionVendorMessageId, and saves', async () => {
+      const { service, pendingQuestionDatabaseService } = buildHarness();
+      const row = {
+        id: 'pq-1',
+        payload: {
+          question: 'Which day?',
+          optionLabels: [{ id: 'fri', label: 'Friday' }],
+          toolRounds: [],
+          correlationId: 'cid-1',
+          vendorChatId: 'chat-1',
+        },
+      } as unknown as PendingQuestion;
+
+      pendingQuestionDatabaseService.findOneBy.mockResolvedValueOnce(row);
+
+      await service.attachQuestionMessageId('pq-1', 'msg-42');
+
+      expect(pendingQuestionDatabaseService.findOneBy).toHaveBeenCalledWith({
+        id: 'pq-1',
+      });
+
+      const [saved] = pendingQuestionDatabaseService.save.mock.calls[0] as [
+        PendingQuestion,
+      ];
+
+      expect(saved.payload.questionVendorMessageId).toBe('msg-42');
+      // The rest of the payload is preserved (spread, not clobbered).
+      expect(saved.payload.question).toBe('Which day?');
+    });
+
+    it('short-circuits without a save when the row is gone', async () => {
+      const { service, pendingQuestionDatabaseService } = buildHarness();
+
+      pendingQuestionDatabaseService.findOneBy.mockResolvedValueOnce(null);
+
+      await service.attachQuestionMessageId('pq-gone', 'msg-42');
+
+      expect(pendingQuestionDatabaseService.save).not.toHaveBeenCalled();
+    });
+
+    it('short-circuits without a save when the id already matches (idempotent)', async () => {
+      const { service, pendingQuestionDatabaseService } = buildHarness();
+      const row = {
+        id: 'pq-1',
+        payload: {
+          question: 'Which day?',
+          optionLabels: [],
+          toolRounds: [],
+          correlationId: 'cid-1',
+          vendorChatId: 'chat-1',
+          questionVendorMessageId: 'msg-42',
+        },
+      } as unknown as PendingQuestion;
+
+      pendingQuestionDatabaseService.findOneBy.mockResolvedValueOnce(row);
+
+      await service.attachQuestionMessageId('pq-1', 'msg-42');
+
+      expect(pendingQuestionDatabaseService.save).not.toHaveBeenCalled();
+    });
+
+    it('degrades (never throws) when the load/save fails', async () => {
+      const { service, pendingQuestionDatabaseService } = buildHarness();
+
+      pendingQuestionDatabaseService.findOneBy.mockRejectedValueOnce(
+        new Error('db down'),
+      );
+
+      await expect(
+        service.attachQuestionMessageId('pq-1', 'msg-42'),
+      ).resolves.toBeUndefined();
+      expect(pendingQuestionDatabaseService.save).not.toHaveBeenCalled();
+    });
   });
 });

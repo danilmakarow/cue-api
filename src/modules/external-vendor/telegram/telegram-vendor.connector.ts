@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { ExternalVendorConnector } from '../external-vendor-connector.abstract';
 import {
@@ -49,6 +49,18 @@ const ALLOWED_UPDATES = ['message', 'callback_query'];
 const DEFAULT_MEDIA_MIME = 'application/octet-stream';
 
 /**
+ * Telegram's benign "edit was a no-op" error (R1 / ADR 0057): editing a message
+ * to the exact text it already shows returns `400 Bad Request: message is not
+ * modified`. The status spinner re-posts identical frame text on a stalled turn,
+ * so this is treated as SUCCESS, not a fault. Matched on the substring,
+ * case-insensitively, since the prefix punctuation varies.
+ */
+const NOT_MODIFIED_FRAGMENT = 'message is not modified';
+
+/** Telegram's HTTP status for flood-control rejections (`Too Many Requests`). */
+const TOO_MANY_REQUESTS_CODE = 429;
+
+/**
  * Telegram implementation of {@link ExternalVendorConnector} over the Bot API
  * using the global `fetch` (no SDK), in webhook mode.
  *
@@ -56,6 +68,8 @@ const DEFAULT_MEDIA_MIME = 'application/octet-stream';
  */
 @Injectable()
 export class TelegramVendorConnector extends ExternalVendorConnector {
+  private readonly logger = new Logger(TelegramVendorConnector.name);
+
   private readonly config: TelegramVendorConfig;
 
   constructor(externalVendorConfig: ExternalVendorConfig) {
@@ -115,8 +129,41 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
   }
 
   /**
-   * POSTs a JSON body to a Bot API method and returns the parsed `result`,
-   * throwing when the transport fails or Telegram reports `ok: false`.
+   * Tells whether a Telegram error envelope is the benign "message is not
+   * modified" no-op (R1 / ADR 0057) — editing a message to the text it already
+   * shows. The status spinner repeats identical frame text on a stalled turn, so
+   * this is success, not a fault.
+   */
+  private isNotModified(payload: TelegramApiResponse<unknown>): boolean {
+    return Boolean(
+      payload.description?.toLowerCase().includes(NOT_MODIFIED_FRAGMENT),
+    );
+  }
+
+  /**
+   * Best-effort log of a Telegram flood-control (429) rejection (R1 / ADR 0057),
+   * reading the suggested back-off from `parameters.retry_after`. Advisory only:
+   * the per-turn webhook queue is `attempts:1`, so we degrade rather than hard-
+   * block the turn waiting out the window.
+   */
+  private noteFloodControl(
+    method: string,
+    retryAfter: number | undefined,
+  ): void {
+    this.logger.debug(
+      `Telegram ${method} hit flood control (429)` +
+        (retryAfter !== undefined ? `; retry_after=${retryAfter}s` : ''),
+    );
+  }
+
+  /**
+   * POSTs a JSON body to a Bot API method and returns the parsed `result`. Parses
+   * the JSON envelope even on an HTTP error status so a Bot API error code /
+   * description is available (Telegram may report errors as either HTTP 200 +
+   * `ok:false` or a real 4xx). Throws when the transport or Telegram rejects,
+   * EXCEPT: a benign "message is not modified" 400 resolves as success (R1 / ADR
+   * 0057), and a 429 is noted with its `retry_after` before throwing so callers
+   * can degrade rather than block.
    */
   private async callApi<TResult>(
     method: string,
@@ -128,19 +175,29 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       body: JSON.stringify(body),
     });
 
-    if (!response.ok) {
-      throw new Error(`Telegram ${method} failed with HTTP ${response.status}`);
+    const payload = (await response
+      .json()
+      .catch(() => ({ ok: false }))) as TelegramApiResponse<TResult>;
+
+    if (response.ok && payload.ok) {
+      return payload.result;
     }
 
-    const payload = (await response.json()) as TelegramApiResponse<TResult>;
-
-    if (!payload.ok) {
-      throw new Error(
-        `Telegram ${method} rejected: ${payload.description ?? 'unknown error'}`,
-      );
+    // A no-op edit (identical frame text) is success, not a fault — the spinner
+    // and recaps re-post the same line on a stalled turn.
+    if (this.isNotModified(payload)) {
+      return payload.result;
     }
 
-    return payload.result;
+    const status = payload.error_code ?? response.status;
+
+    if (status === TOO_MANY_REQUESTS_CODE) {
+      this.noteFloodControl(method, payload.parameters?.retry_after);
+    }
+
+    throw new Error(
+      `Telegram ${method} rejected: ${payload.description ?? `HTTP ${response.status}`}`,
+    );
   }
 
   /**
@@ -454,9 +511,36 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
   }
 
   /**
-   * Edits an already-sent message's text in place via `editMessageText`. The
-   * non-private degraded path for live status / streaming (drafts are
-   * private-only); shares the per-chat send budget, so callers throttle.
+   * Builds the optional `reply_markup` fragment for an {@link editMessageText}
+   * call (R3 / ADR 0058). `edit.buttons` attaches an inline keyboard (an `ask_user`
+   * morph); `edit.clearButtons` REMOVES the current keyboard by sending an empty
+   * `inline_keyboard` (the Bot-API way to drop an inline keyboard via an edit) —
+   * used when a button tap morphs the answered question message. `buttons` wins
+   * when both are set; with neither, an EMPTY fragment is returned so spreading it
+   * omits `reply_markup` and leaves any existing keyboard untouched.
+   */
+  private toEditReplyMarkup(edit: EditMessage): Record<string, unknown> {
+    if (edit.buttons) {
+      return {
+        reply_markup: { inline_keyboard: this.toInlineKeyboard(edit.buttons) },
+      };
+    }
+
+    if (edit.clearButtons) {
+      return { reply_markup: { inline_keyboard: [] } };
+    }
+
+    return {};
+  }
+
+  /**
+   * Edits an already-sent message's text (and optional inline keyboard) in place
+   * via `editMessageText`. The SOLE live-status + reply surface (ADR 0053): the
+   * one per-turn message is edited with recaps and then into the final answer, so
+   * the user sees a single message that morphs in place. `edit.buttons`, when
+   * present, attaches an inline keyboard (an `ask_user` morph); `edit.clearButtons`
+   * removes the current keyboard (R3 / ADR 0058 — the answered-question morph) —
+   * setting neither leaves any existing keyboard untouched.
    */
   async editMessageText(target: SendTarget, edit: EditMessage): Promise<void> {
     await this.callApi('editMessageText', {
@@ -464,6 +548,7 @@ export class TelegramVendorConnector extends ExternalVendorConnector {
       message_id: Number(edit.vendorMessageId),
       text: edit.text,
       parse_mode: this.toParseMode(edit.format),
+      ...this.toEditReplyMarkup(edit),
     });
   }
 

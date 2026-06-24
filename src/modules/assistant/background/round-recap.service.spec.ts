@@ -44,6 +44,35 @@ describe('RoundRecapService (Story 13 / ADR 0041)', () => {
     expect(ai.complete).toHaveBeenCalledTimes(1);
     expect(ai.complete.mock.calls[0][0].modelRole).toBe(AiModelRole.BACKGROUND);
     expect(ai.complete.mock.calls[0][0].traceId).toBe('cid-1');
+    // No locale ⇒ the recap defaults to English (prior behaviour preserved).
+    expect(ai.complete.mock.calls[0][0].system[0].content).toContain(
+      'Write the sentence in English.',
+    );
+  });
+
+  it('instructs the BACKGROUND model to write the recap in the turn locale (R2 / ADR 0055)', async () => {
+    const { ai, service } = buildHarness();
+
+    ai.complete.mockResolvedValue({
+      stopReason: 'end_turn',
+      text: 'Проверяю четверг',
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    });
+
+    await service.recapRound([step()], 'cid-ru', 'ru');
+    expect(ai.complete.mock.calls[0][0].system[0].content).toContain(
+      'Write the sentence in Russian.',
+    );
+
+    await service.recapRound([step()], 'cid-uk', 'uk');
+    expect(ai.complete.mock.calls[1][0].system[0].content).toContain(
+      'Write the sentence in Ukrainian.',
+    );
   });
 
   it('DEGRADES to null (never throws) when the background model fails', async () => {

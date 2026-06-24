@@ -2,8 +2,8 @@ import { ApiProperty } from '@nestjs/swagger';
 
 import { TaskGroup } from '@/modules/database/entities';
 import {
-  RecurrenceRuleDTO,
-  toRecurrenceRuleDTO,
+  RecurrenceConfigDTO,
+  toRecurrenceConfigDTO,
 } from '@/modules/task/dtos/task.dto';
 
 /**
@@ -24,7 +24,7 @@ export class TaskGroupDTO {
   @ApiProperty({ example: 'Errands' })
   name: string;
 
-  @ApiProperty({ nullable: true, example: '#E27921' })
+  @ApiProperty({ nullable: true, example: 'BLUE' })
   color: string | null;
 
   @ApiProperty({ nullable: true, example: 'cart.fill' })
@@ -33,11 +33,12 @@ export class TaskGroupDTO {
   @ApiProperty({ example: 0 })
   sortOrder: number;
 
-  @ApiProperty({ format: 'uuid', nullable: true })
-  defaultRecurrenceRuleId: string | null;
+  /** Group default completion requirement (inherited task-wins); null = unset. */
+  @ApiProperty({ nullable: true })
+  requiresCompletion: boolean | null;
 
-  @ApiProperty({ type: () => RecurrenceRuleDTO, nullable: true })
-  recurrence: RecurrenceRuleDTO | null;
+  @ApiProperty({ type: () => RecurrenceConfigDTO, nullable: true })
+  recurrence: RecurrenceConfigDTO | null;
 
   @ApiProperty({ format: 'uuid', nullable: true })
   defaultNotificationStrategyId: string | null;
@@ -50,8 +51,8 @@ export class TaskGroupDTO {
 }
 
 /**
- * Maps a TaskGroup entity (with optional eagerly-loaded `defaultRecurrenceRule`
- * relation) to the `TaskGroupDTO` wire shape.
+ * Maps a TaskGroup entity to the `TaskGroupDTO` wire shape. `recurrence` is the
+ * group's inline `recurrenceConfig` (ADR 0054) — no relation to load.
  */
 export const toTaskGroupDTO = (group: TaskGroup): TaskGroupDTO => ({
   id: group.id,
@@ -60,9 +61,9 @@ export const toTaskGroupDTO = (group: TaskGroup): TaskGroupDTO => ({
   color: group.color,
   icon: group.icon,
   sortOrder: group.sortOrder,
-  defaultRecurrenceRuleId: group.defaultRecurrenceRuleId,
-  recurrence: group.defaultRecurrenceRule
-    ? toRecurrenceRuleDTO(group.defaultRecurrenceRule)
+  requiresCompletion: group.requiresCompletion,
+  recurrence: group.recurrenceConfig
+    ? toRecurrenceConfigDTO(group.recurrenceConfig)
     : null,
   defaultNotificationStrategyId: group.defaultNotificationStrategyId,
   createdAt: group.createdAt.toISOString(),

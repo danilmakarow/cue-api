@@ -8,65 +8,48 @@ import { ChatType } from '@/modules/external-vendor/external-vendor.types';
 
 /**
  * Lifecycle phase of a live-status handle. The store owns only the state
- * transitions; Stories 12/13 drive the surface (cycling words, dots, streaming)
- * — this story does NOT animate anything.
+ * transitions; the animator (ADR 0053) drives the one real status message — this
+ * store does not edit anything.
  */
 export enum StatusSessionPhase {
-  /** Empty-text draft posted ("Thinking…"); awaiting the first real update. */
+  /** Initial loading line posted (e.g. "Thinking…"); awaiting the first real update. */
   Thinking = 'thinking',
   /**
-   * Cycling a loading word + dots / per-round recap (Story 12). The terminal
-   * phase: the answer is NOT streamed into the draft (ADR 0052), so the surface
-   * stays in `Working` until the turn finalizes and the real reply supersedes it.
+   * Editing the one real status message in place with per-round recaps (ADR
+   * 0053). The terminal live phase: the surface stays in `Working` until the turn
+   * finalizes and the SAME message is edited one last time into the real reply
+   * (the morph), so the user only ever sees one message.
    */
   Working = 'working',
 }
 
 /**
- * Whether the status surface is a private-chat ephemeral DRAFT (the
- * `sendMessageDraft` primitive, keyed by `draftId`) or a non-private real
- * MESSAGE that the degraded path edits (`editMessageText`, keyed by
- * `vendorMessageId`). Set once at create time from the chat kind so every later
- * update targets the right primitive.
- */
-export enum StatusSurfaceKind {
-  Draft = 'draft',
-  Message = 'message',
-}
-
-/**
- * The persisted live-status handle for one in-flight turn. Holds just enough to
- * re-target the animated surface idempotently: the surface kind + its identifier
- * (`draftId` for a private draft, `vendorMessageId` for the non-private edited
- * message), the chat + locale the animation needs, and the current phase.
+ * The persisted live-status handle for one in-flight turn (ADR 0053). The status
+ * surface is ALWAYS a single real message edited in place via `editMessageText`
+ * (no ephemeral draft) — so the handle holds the real `vendorMessageId` it
+ * re-targets, plus the chat + locale the animation needs and the current phase.
  */
 export interface StatusSession {
   vendorChatId: string;
   turnId: string;
   chatType: ChatType;
-  surfaceKind: StatusSurfaceKind;
-  /** Non-zero draft id when `surfaceKind === Draft`; else absent. */
-  draftId?: number;
-  /** Real vendor message id when `surfaceKind === Message`; else absent. */
+  /** Real vendor message id of the one per-turn status message (once posted). */
   vendorMessageId?: string;
   locale: string;
   phase: StatusSessionPhase;
 }
 
 /**
- * Inputs needed to open a status session for a turn. `chatType` selects the
- * surface kind (private ⇒ draft, else ⇒ edited message); `seedDraftId` /
- * `seedVendorMessageId` provide the freshly-minted surface identifier the caller
- * already created (or will create) for this turn.
+ * Inputs needed to open a status session for a turn. `seedVendorMessageId`
+ * carries the real message id the caller created for this turn's status surface
+ * (absent until the initial send lands).
  */
 export interface OpenStatusSessionInput {
   vendorChatId: string;
   turnId: string;
   chatType: ChatType;
   locale: string;
-  /** The non-zero draft id to use for a private-chat draft surface. */
-  seedDraftId?: number;
-  /** The real message id to edit for a non-private surface. */
+  /** The real message id to edit for this turn's status surface, when known. */
   seedVendorMessageId?: string;
 }
 
@@ -74,15 +57,15 @@ export interface OpenStatusSessionInput {
  * Redis-backed, IDEMPOTENT live-status handle store (L9, ADR 0012). Keyed per
  * chat + turn (`assistant:status:{chatId}:{turnId}`), it persists the
  * {@link StatusSession} for one turn so opening it twice for the SAME turn never
- * orphans a second draft/message — the second `open` re-reads and returns the
+ * orphans a second status message — the second `open` re-reads and returns the
  * existing handle. This idempotency is what keeps the surface safe if the BullMQ
  * `attempts` is ever raised above 1 (a replayed job re-enters with the same
  * `turnId`).
  *
- * This story builds the STORE + lifecycle only. The animation (cycling words,
- * dots, streaming) lands in Stories 12/13, which read/advance this handle.
+ * The store owns the handle + lifecycle only; the animator (ADR 0053) posts and
+ * edits the one real status message that this handle points at.
  *
- * See `docs/adr/0038-assistant-messenger-primitives-status-session.md`.
+ * See `docs/adr/0053-telegram-status-message-morph.md`.
  */
 @Injectable()
 export class StatusSessionStore {
@@ -92,34 +75,16 @@ export class StatusSessionStore {
   ) {}
 
   /**
-   * Selects the surface kind from the chat kind: a private chat gets the
-   * ephemeral draft surface; anything else gets the real-message (edited) surface.
+   * Builds the session object a fresh `open` persists from its input. The surface
+   * is always a single real message (ADR 0053), so it carries the seed message id
+   * when the caller already posted it.
    */
-  private surfaceKindFor(chatType: ChatType): StatusSurfaceKind {
-    return chatType === ChatType.Private
-      ? StatusSurfaceKind.Draft
-      : StatusSurfaceKind.Message;
-  }
-
-  /**
-   * Builds the session object a fresh `open` persists from its input + the chosen
-   * surface kind. Carries only the identifier matching the surface kind.
-   */
-  private buildSession(
-    input: OpenStatusSessionInput,
-    surfaceKind: StatusSurfaceKind,
-  ): StatusSession {
+  private buildSession(input: OpenStatusSessionInput): StatusSession {
     return {
       vendorChatId: input.vendorChatId,
       turnId: input.turnId,
       chatType: input.chatType,
-      surfaceKind,
-      draftId:
-        surfaceKind === StatusSurfaceKind.Draft ? input.seedDraftId : undefined,
-      vendorMessageId:
-        surfaceKind === StatusSurfaceKind.Message
-          ? input.seedVendorMessageId
-          : undefined,
+      vendorMessageId: input.seedVendorMessageId,
       locale: input.locale,
       phase: StatusSessionPhase.Thinking,
     };
@@ -130,13 +95,12 @@ export class StatusSessionStore {
    * Redis `SET NX` so the FIRST caller writes the handle and any concurrent /
    * replayed caller for the same `(chatId, turnId)` loses the race and reads back
    * the already-stored handle — never creating a second surface. Returns the live
-   * handle either way; the caller compares `session.turnId`/identifiers to know
-   * whether it must actually post the draft (won the race) or skip (reused).
+   * handle either way; the caller checks `session.vendorMessageId` to know whether
+   * it must post the status message (none yet) or reuse the existing one.
    */
   async open(input: OpenStatusSessionInput): Promise<StatusSession> {
     const key = statusSessionKey(input.vendorChatId, input.turnId);
-    const surfaceKind = this.surfaceKindFor(input.chatType);
-    const session = this.buildSession(input, surfaceKind);
+    const session = this.buildSession(input);
 
     const stored = await this.redis.set(
       key,
@@ -151,7 +115,7 @@ export class StatusSessionStore {
     }
 
     // Lost the NX race (concurrent or replayed open) — return the existing handle
-    // rather than orphaning a second draft/message.
+    // rather than orphaning a second status message.
     const existing = await this.get(input.vendorChatId, input.turnId);
 
     return existing ?? session;
@@ -204,11 +168,11 @@ export class StatusSessionStore {
   }
 
   /**
-   * Clears the status handle once the turn finalizes (the draft has been finalized
-   * with a real `sendMessage`, or the edited message is now the final answer).
-   * Idempotent — deleting an absent key is a harmless no-op. MUST be called in the
-   * turn's `finally` so a crashed turn leaves no stale handle (and the short TTL is
-   * the backstop if it is not).
+   * Clears the status handle once the turn finalizes (by which point the reply has
+   * morphed the one status message into the final answer). Idempotent — deleting an
+   * absent key is a harmless no-op. MUST be called in the turn's `finally` so a
+   * crashed turn leaves no stale handle (and the short TTL is the backstop if it is
+   * not).
    */
   async clear(vendorChatId: string, turnId: string): Promise<void> {
     await this.redis.del(statusSessionKey(vendorChatId, turnId));

@@ -63,7 +63,7 @@ const buildDispatcher = () => {
     remove: jest.fn().mockResolvedValue(undefined),
     findById: jest.fn().mockResolvedValue({
       id: 'task-1',
-      recurrenceRuleId: null,
+      recurrenceConfig: null,
       calendarId: 'cal-1',
     }),
     findOverlapping: jest.fn().mockResolvedValue([]),
@@ -86,6 +86,7 @@ const buildDispatcher = () => {
     findByName: jest.fn().mockResolvedValue([{ id: 'grp-1', name: 'Work' }]),
     findAllForUser: jest.fn().mockResolvedValue([]),
     create: jest.fn().mockResolvedValue({ id: 'grp-9', name: 'Home reno' }),
+    update: jest.fn().mockResolvedValue({ id: 'grp-1', name: 'Work' }),
   } as unknown as jest.Mocked<TaskGroupService>;
   const calendarService = {
     findPrimaryForOwner: jest.fn().mockResolvedValue({ id: 'cal-1' }),
@@ -1000,7 +1001,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1034,7 +1035,7 @@ describe('ToolDispatcherService', () => {
       // runs `findOverlapping` (which returns clear here) before the override.
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1083,7 +1084,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1134,7 +1135,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1185,7 +1186,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1230,7 +1231,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1268,7 +1269,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1312,7 +1313,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1351,7 +1352,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
         startAt: new Date('2026-06-03T09:00:00.000Z'),
         endAt: new Date('2026-06-03T09:30:00.000Z'),
@@ -1386,7 +1387,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1418,7 +1419,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       (harness.taskService.splitSeries as jest.Mock).mockResolvedValue({
@@ -1462,7 +1463,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       // resolveGroup finds the uniquely-named group (findByName spans every
@@ -1506,7 +1507,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       (harness.taskGroupService.findByName as jest.Mock).mockResolvedValue([
@@ -1540,7 +1541,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1568,7 +1569,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1601,7 +1602,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       (
@@ -1645,7 +1646,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       (
@@ -1683,7 +1684,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
       (
@@ -1723,7 +1724,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1755,7 +1756,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: null,
+        recurrenceConfig: null,
         calendarId: 'cal-1',
         startAt: null,
         endAt: null,
@@ -1789,7 +1790,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: null,
+        recurrenceConfig: null,
         calendarId: 'cal-1',
         startAt: null,
         endAt: null,
@@ -1841,7 +1842,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1872,7 +1873,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1906,7 +1907,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -1931,7 +1932,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -2024,7 +2025,7 @@ describe('ToolDispatcherService', () => {
 
       (harness.taskService.findById as jest.Mock).mockResolvedValue({
         id: 'task-1',
-        recurrenceRuleId: 'rule-1',
+        recurrenceConfig: { frequency: 'DAILY' },
         calendarId: 'cal-1',
       });
 
@@ -2106,8 +2107,58 @@ describe('ToolDispatcherService', () => {
         name: 'Home reno',
         color: undefined,
         icon: undefined,
+        requiresCompletion: undefined,
+        recurrence: undefined,
       });
       expect(outcome.content).toMatch(/created group/i);
+    });
+
+    it('creates a group with inherited defaults (color, recurrence, requiresCompletion)', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('create_group', {
+          name: 'Gym',
+          color: 'BLUE',
+          recurrence: { frequency: 'DAILY' },
+          requiresCompletion: true,
+        }),
+        buildContext(),
+      );
+
+      expect(harness.taskGroupService.create).toHaveBeenCalledWith('user-1', {
+        calendarId: 'cal-1',
+        name: 'Gym',
+        color: 'BLUE',
+        icon: undefined,
+        requiresCompletion: true,
+        recurrence: expect.objectContaining({ frequency: 'DAILY' }),
+      });
+      expect(outcome.content).toMatch(/created group/i);
+    });
+
+    it('updates a group by name through update_group', async () => {
+      const harness = buildDispatcher();
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_group', {
+          group: 'Work',
+          color: 'GREEN',
+          recurrence: null,
+        }),
+        buildContext(),
+      );
+
+      expect(harness.taskGroupService.findByName).toHaveBeenCalledWith(
+        'user-1',
+        'Work',
+      );
+      expect(harness.taskGroupService.update).toHaveBeenCalledWith(
+        'user-1',
+        'grp-1',
+        expect.objectContaining({ color: 'GREEN', recurrence: null }),
+      );
+      expect(outcome.content).toMatch(/updated group/i);
     });
   });
 

@@ -5,7 +5,6 @@ export { TelegramLinkDatabaseService } from './telegram-link-database.service';
 export { CalendarDatabaseService } from './calendar-database.service';
 export { TaskGroupDatabaseService } from './task-group-database.service';
 export { TaskDatabaseService } from './task-database.service';
-export { RecurrenceRuleDatabaseService } from './recurrence-rule-database.service';
 export { TaskOccurrenceExceptionDatabaseService } from './task-occurrence-exception-database.service';
 export { NotificationStrategyDatabaseService } from './notification-strategy-database.service';
 export { NotificationRuleDatabaseService } from './notification-rule-database.service';

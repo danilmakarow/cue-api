@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Redis } from 'ioredis';
 
 import { pendingQuestionKey } from '../../redis/redis.constants';
@@ -58,6 +58,8 @@ export interface PendingQuestionDraft {
  */
 @Injectable()
 export class PendingInteractionService implements PendingInteractionStore {
+  private readonly logger = new Logger(PendingInteractionService.name);
+
   constructor(
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: AssistantConfig,
@@ -108,6 +110,41 @@ export class PendingInteractionService implements PendingInteractionStore {
     );
 
     return saved;
+  }
+
+  /**
+   * Records the vendor message id of the QUESTION message a suspended `ask_user`
+   * row was sent on (R3 / ADR 0058), so a later button tap can morph that original
+   * message (strip its buttons + append the chosen answer). Loads the row, sets
+   * `payload.questionVendorMessageId`, and saves; short-circuits without a write
+   * when the row is gone or already carries the same id (idempotent). Degrade
+   * -never-throw: a write fault is swallowed with a log — the morph is cosmetic and
+   * the suspend itself already succeeded, so a failure here must not break the turn
+   * (the BullMQ queue is `attempts:1`).
+   */
+  async attachQuestionMessageId(
+    pendingId: string,
+    messageId: string,
+  ): Promise<void> {
+    try {
+      const row = await this.pendingQuestionDatabaseService.findOneBy({
+        id: pendingId,
+      });
+
+      if (!row || row.payload.questionVendorMessageId === messageId) {
+        return;
+      }
+
+      row.payload = { ...row.payload, questionVendorMessageId: messageId };
+
+      await this.pendingQuestionDatabaseService.save(row);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+
+      this.logger.warn(
+        `Failed to attach question message id ${messageId} to pending ${pendingId}: ${message}`,
+      );
+    }
   }
 
   /**

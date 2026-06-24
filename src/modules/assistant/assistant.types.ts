@@ -154,21 +154,25 @@ export interface ToolStepRecord {
 export type CorrectionReason = 'claim_without_writes' | 'writes_errored';
 
 /**
- * The L4-facing port the tool loop (Story 13 / ADR 0041, narrowed by ADR 0052)
- * uses to render progress into the live status surface, WITHOUT the loop knowing
- * about drafts / Redis / the vendor (the loop stays L9-blind). The turn runner
- * supplies a concrete implementation that wraps the per-turn
- * {@link StatusAnimation} (the method routes through the one draft throttle); a
- * turn with no live status passes a no-op sink.
+ * The L4-facing port the tool loop (Story 13 / ADR 0041, narrowed by ADR 0052,
+ * RE-WIDENED by R3 / ADR 0058) uses to render progress into the live status
+ * surface, WITHOUT the loop knowing about drafts / Redis / the vendor (the loop
+ * stays L9-blind). The turn runner supplies a concrete implementation that wraps
+ * the per-turn {@link StatusAnimation} (the methods route through the one
+ * serialized status-edit chain); a turn with no live status passes a no-op sink.
  *
- * The model's ANSWER is deliberately NOT streamed into this surface (ADR 0052):
- * the draft is status-only (cycling word + dots + per-round recap), and the
- * answer lands solely as the real `sendMessage`, which Telegram renders by
- * replacing the draft preview. So this port carries only the between-round recap.
+ * R3 / ADR 0058 RE-INTRODUCES answer token streaming on this surface (reversing
+ * the ADR-0052 "answer is not streamed" clause): the loop forwards the model's
+ * accumulated answer text via {@link onToken} so the morph message fills in as the
+ * model writes, and a per-round recap still lands between tool rounds via
+ * {@link showRecap}. The final FORMATTED answer is still delivered separately by
+ * the L9 reply morph (one last edit on the same message), so streaming + morph
+ * reconcile to the final HTML — the one-message / no-draft guarantee of ADR 0053
+ * is preserved.
  *
- * **Degrade-never-throw:** the method MUST swallow its own faults. The loop calls
- * it best-effort and never wraps the call in try/catch — a status fault must never
- * disturb the turn's answer (the webhook queue is `attempts:1`).
+ * **Degrade-never-throw:** both methods MUST swallow their own faults. The loop
+ * calls them best-effort and never wraps the call in try/catch — a status fault
+ * must never disturb the turn's answer (the webhook queue is `attempts:1`).
  */
 export interface TurnStreamSink {
   /**
@@ -177,6 +181,15 @@ export interface TurnStreamSink {
    * a missing/empty recap simply leaves the current frame.
    */
   showRecap(recap: string): void;
+  /**
+   * Streams the model's accumulated ANSWER text into the live status message (R3 /
+   * ADR 0058) as it is written. `snapshot` is the FULL answer text so far (not a
+   * delta), so the implementation can render it directly; it is called on every
+   * forwarded SDK delta, so the implementation MUST throttle/coalesce its edits to
+   * dodge Telegram edit flood-control. Optional so a no-op sink (or one built
+   * before R3) need not implement it; absent ⇒ the loop simply does not stream.
+   */
+  onToken?(snapshot: string): void;
 }
 
 /**

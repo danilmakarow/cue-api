@@ -38,20 +38,24 @@ describe('AddTaskUpdatedIndex1782700000000', () => {
     expect(composite).toContain('ON "task" ("calendarId", "updatedAt")');
   });
 
-  it('up creates the recurring-anchor index defensively (idempotent)', async () => {
+  it('up does NOT touch IDX_task_recurring_anchor (owned by migration 1781000000000)', async () => {
     const migration = new AddTaskUpdatedIndex1782700000000();
 
     const upStatements = await captureStatements((queryRunner) =>
       migration.up(queryRunner as never),
     );
 
-    const partial = upStatements.find((sql) =>
-      sql.includes('IDX_task_recurring_anchor'),
-    );
-
-    expect(partial).toBeDefined();
-    expect(partial).toContain('IF NOT EXISTS');
-    expect(partial).toContain('WHERE "recurrenceRuleId" IS NOT NULL');
+    // The recurring-anchor index is dropped+recreated against recurrenceConfig by
+    // 1781000000000; recreating it here with the dropped recurrenceRuleId column
+    // would abort the boot migration batch (42703). This migration owns only the
+    // composite updatedAt index.
+    expect(upStatements).toHaveLength(1);
+    expect(
+      upStatements.some((sql) => sql.includes('IDX_task_recurring_anchor')),
+    ).toBe(false);
+    expect(
+      upStatements.some((sql) => sql.includes('recurrenceRuleId')),
+    ).toBe(false);
   });
 
   it('down drops only the composite index it owns (reversible)', async () => {

@@ -7,12 +7,12 @@ import {
   Calendar,
   RecurrenceEndType,
   RecurrenceFrequency,
-  RecurrenceRule,
   Task,
   TaskGroup,
   TaskOccurrenceException,
 } from '@/modules/database/entities';
 import { RecurrenceRuleService } from '@/modules/recurrence-rule/recurrence-rule.service';
+import { RecurrenceConfig } from '@/modules/recurrence-rule/recurrence.types';
 
 /**
  * Minimal shape of a TypeORM FindOperator as seen from the test router — only
@@ -72,30 +72,31 @@ const makeTask = (overrides: Partial<Task> = {}): Task =>
     isAllDay: false,
     timezone: 'America/New_York',
     requiresCompletion: true,
+    color: null,
     completedAt: null,
     notificationStrategyId: null,
-    recurrenceRuleId: null,
-    recurrenceRule: null,
+    recurrenceConfig: null,
     deletedAt: null,
     ...overrides,
   }) as Task;
 
 /**
- * Builds a RecurrenceRule (DAILY / NEVER defaults).
+ * Builds an inline RecurrenceConfig (DAILY / NEVER defaults). Named `makeRule`
+ * for continuity, but it produces the inline config POJO the engine now reads.
  */
-const makeRule = (overrides: Partial<RecurrenceRule> = {}): RecurrenceRule =>
-  ({
-    id: 'rule-1',
-    frequency: RecurrenceFrequency.DAILY,
-    interval: 1,
-    byWeekday: null,
-    byMonthDay: null,
-    byMonth: null,
-    endType: RecurrenceEndType.NEVER,
-    endDate: null,
-    count: null,
-    ...overrides,
-  }) as RecurrenceRule;
+const makeRule = (
+  overrides: Partial<RecurrenceConfig> = {},
+): RecurrenceConfig => ({
+  frequency: RecurrenceFrequency.DAILY,
+  interval: 1,
+  byWeekday: null,
+  byMonthDay: null,
+  byMonth: null,
+  endType: RecurrenceEndType.NEVER,
+  endDate: null,
+  count: null,
+  ...overrides,
+});
 
 /**
  * The fixtures a routed `taskDatabaseService.findAll` may return, keyed by query
@@ -118,8 +119,8 @@ interface RangeFixtures {
  * by dropping completed rows, so that filter can be asserted end-to-end.
  *
  * Routing logic:
- * - `recurrenceRuleId: Not(IsNull())` → `recurring` (own-rule anchors)
- * - `recurrenceRuleId: IsNull()` + `groupId: Not(IsNull())` → `groupInherited`
+ * - `recurrenceConfig: Not(IsNull())` → `recurring` (own-config anchors)
+ * - `recurrenceConfig: IsNull()` + `groupId: Not(IsNull())` → `groupInherited`
  * - `startAt: IsNull()` → `todos`
  * - `endAt: IsNull()` → `timedNoEnd`
  * - otherwise → `timedWithEnd`
@@ -127,14 +128,14 @@ interface RangeFixtures {
 const routedFindAll = (fixtures: RangeFixtures) =>
   jest.fn((options?: FindManyOptions<Task>) => {
     const where = (options?.where ?? {}) as FindOptionsWhere<Task>;
-    const recurrenceTag = operatorType(where.recurrenceRuleId);
+    const recurrenceTag = operatorType(where.recurrenceConfig);
     const groupIdTag = operatorType(where.groupId);
     const excluded = excludedId(where);
     const dropsCompleted = operatorType(where.completedAt) === 'isNull';
 
     const bucket = (() => {
       if (recurrenceTag === 'not') return fixtures.recurring ?? [];
-      // group-inherited: recurrenceRuleId IS NULL + groupId IS NOT NULL
+      // group-inherited: recurrenceConfig IS NULL + groupId IS NOT NULL
       if (recurrenceTag === 'isNull' && groupIdTag === 'not')
         return fixtures.groupInherited ?? [];
       if (operatorType(where.startAt) === 'isNull') return fixtures.todos ?? [];
@@ -198,7 +199,7 @@ describe('TaskService.findOccurrencesInRange', () => {
   ) => {
     const taskDb = { findAll: routedFindAll(fixtures) };
     const calendarDb = buildCalendarDatabaseService();
-    const realEngine = new RecurrenceRuleService(null as never);
+    const realEngine = new RecurrenceRuleService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
@@ -244,8 +245,7 @@ describe('TaskService.findOccurrencesInRange', () => {
       id: 't-weekly',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const { service } = buildService({ recurring: [anchor] });
 
@@ -279,8 +279,7 @@ describe('TaskService.findOccurrencesInRange', () => {
       title: 'Daily 9am',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const { service } = buildService({
       timedWithEnd: [oneOff],
@@ -314,8 +313,7 @@ describe('TaskService.findOccurrencesInRange', () => {
       id: 't-weekly',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const exceptionService = buildExceptionService();
 
@@ -465,9 +463,9 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
       const where = (options?.where ?? {}) as FindOptionsWhere<Task>;
 
       // Only the timed-with-end clash query (startAt < endBound AND endAt >
-      // startBound, recurrenceRuleId IS NULL) reads the fixtures.
+      // startBound, recurrenceConfig IS NULL) reads the fixtures.
       if (
-        operatorType(where.recurrenceRuleId) !== 'isNull' ||
+        operatorType(where.recurrenceConfig) !== 'isNull' ||
         operatorType(where.startAt) !== 'lessThan' ||
         operatorType(where.endAt) !== 'moreThan'
       ) {
@@ -496,7 +494,7 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
       findOne: jest.fn().mockResolvedValue(anchorTask ?? null),
     };
     const calendarDb = buildCalendarDatabaseService();
-    const realEngine = new RecurrenceRuleService(null as never);
+    const realEngine = new RecurrenceRuleService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
@@ -593,8 +591,7 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
         id: 't-1',
         startAt: zoned('2026-06-01T09:00'),
         endAt: zoned('2026-06-01T09:30'),
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule({ frequency: RecurrenceFrequency.WEEKLY }),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.WEEKLY }),
       });
       const { service } = buildService([], anchor);
 
@@ -612,8 +609,7 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
         id: 't-1',
         startAt: zoned('2026-06-01T09:00'),
         endAt: zoned('2026-06-01T09:30'),
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule({
+        recurrenceConfig: makeRule({
           frequency: RecurrenceFrequency.WEEKLY,
           endType: RecurrenceEndType.COUNT,
           count: 2,
@@ -656,25 +652,24 @@ describe('TaskService.create', () => {
     };
     const calendarDb = buildCalendarDatabaseService();
     const groupDb = buildGroupDatabaseService();
-    const recurrenceRuleService = {
-      create: jest.fn().mockResolvedValue(makeRule({ id: 'rule-1' })),
-      update: jest.fn(),
-      remove: jest.fn(),
-    };
+    // Recurrence is inline now (ADR 0054) — the service maps the DTO to a config
+    // via the static `RecurrenceRuleService.toConfig`, so the real (pure) engine
+    // is wired and there is no rule-CRUD collaborator to mock.
+    const engine = new RecurrenceRuleService();
     const exceptionService = buildExceptionService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
       groupDb as never,
-      recurrenceRuleService as never,
+      engine as never,
       exceptionService as never,
     );
 
-    return { service, taskDb, calendarDb, groupDb, recurrenceRuleService };
+    return { service, taskDb, calendarDb, groupDb };
   };
 
-  it('creates ONE rule and ONE task for a recurring task (never N rows)', async () => {
-    const { service, taskDb, recurrenceRuleService } = buildService();
+  it('stores ONE inline config on ONE task for a recurring task (never N rows)', async () => {
+    const { service, taskDb } = buildService();
 
     const result = await service.create('user-1', {
       calendarId: 'cal-1',
@@ -684,16 +679,15 @@ describe('TaskService.create', () => {
       recurrence: { frequency: RecurrenceFrequency.DAILY },
     });
 
-    expect(recurrenceRuleService.create).toHaveBeenCalledTimes(1);
     expect(taskDb.save).toHaveBeenCalledTimes(1);
     expect(taskDb.createInstance).toHaveBeenCalledWith(
-      expect.objectContaining({ recurrenceRuleId: 'rule-1' }),
+      expect.objectContaining({ recurrenceConfig: makeRule() }),
     );
-    expect(result.recurrenceRuleId).toBe('rule-1');
+    expect(result.recurrenceConfig).toEqual(makeRule());
   });
 
   it('rejects a recurring task without an anchor startAt', async () => {
-    const { service, recurrenceRuleService } = buildService();
+    const { service, taskDb } = buildService();
 
     await expect(
       service.create('user-1', {
@@ -703,7 +697,7 @@ describe('TaskService.create', () => {
         recurrence: { frequency: RecurrenceFrequency.DAILY },
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    expect(recurrenceRuleService.create).not.toHaveBeenCalled();
+    expect(taskDb.save).not.toHaveBeenCalled();
   });
 
   it('creates a todo (no times) as a first-class path', async () => {
@@ -719,8 +713,10 @@ describe('TaskService.create', () => {
       expect.objectContaining({
         startAt: null,
         endAt: null,
-        recurrenceRuleId: null,
-        requiresCompletion: true,
+        recurrenceConfig: null,
+        // requiresCompletion defaults to null on the row now — the effective
+        // `false`/group-inherited value is resolved by the resolver (ADR 0054).
+        requiresCompletion: null,
       }),
     );
   });
@@ -769,8 +765,8 @@ describe('TaskService recurring-edit scopes', () => {
   const buildService = (task: Task) => {
     const taskDb = {
       findOneBy: jest.fn().mockResolvedValue(task),
-      // `applyOccurrenceOverride`'s membership guard re-loads the anchor with its
-      // `recurrenceRule` relation via `findOne`; the fixture already carries it.
+      // `findByIdWithRule` / the membership guard read the anchor via `findOne`;
+      // recurrence is the inline config on the row, so the fixture carries it.
       findOne: jest.fn().mockResolvedValue(task),
       createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
       save: jest.fn((entity: Task) =>
@@ -778,26 +774,23 @@ describe('TaskService recurring-edit scopes', () => {
       ),
     };
     const calendarDb = buildCalendarDatabaseService();
-    const recurrenceRuleService = {
-      create: jest.fn().mockResolvedValue(makeRule({ id: 'rule-2' })),
-      update: jest.fn().mockResolvedValue(makeRule()),
-      remove: jest.fn().mockResolvedValue(undefined),
-    };
+    // Inline recurrence (ADR 0054): the real (pure) engine, no rule-CRUD mock.
+    const engine = new RecurrenceRuleService();
     const exceptionService = buildExceptionService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
       buildGroupDatabaseService() as never,
-      recurrenceRuleService as never,
+      engine as never,
       exceptionService as never,
     );
 
-    return { service, taskDb, recurrenceRuleService, exceptionService };
+    return { service, taskDb, exceptionService };
   };
 
   describe('applyOccurrenceOverride', () => {
     it('upserts a skip exception for a recurring task (delete-one)', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const { service, exceptionService } = buildService(task);
       const originalStart = zoned('2026-06-02T09:00');
 
@@ -813,7 +806,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('collapses to a soft-delete for a non-recurring task skip', async () => {
-      const task = makeTask({ recurrenceRuleId: null });
+      const task = makeTask({ recurrenceConfig: null });
       const { service, taskDb, exceptionService } = buildService(task);
 
       await service.applyOccurrenceOverride(
@@ -848,7 +841,7 @@ describe('TaskService recurring-edit scopes', () => {
         taskDb as never,
         buildCalendarDatabaseService() as never,
         buildGroupDatabaseService() as never,
-        new RecurrenceRuleService(null as never) as never,
+        new RecurrenceRuleService() as never,
         exceptionService as never,
       );
 
@@ -857,8 +850,7 @@ describe('TaskService recurring-edit scopes', () => {
 
     const dailyAnchor = () =>
       makeTask({
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
         startAt: zoned('2026-06-01T09:00'),
         endAt: zoned('2026-06-01T09:30'),
         title: 'Standup',
@@ -922,7 +914,7 @@ describe('TaskService recurring-edit scopes', () => {
 
   describe('findOccurrenceException', () => {
     it('validates ownership then returns the delegated override row', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const { service, taskDb, exceptionService } = buildService(task);
       const originalStart = zoned('2026-06-02T09:00');
       const row = { id: 'exc-1' } as TaskOccurrenceException;
@@ -945,7 +937,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('returns null when the occurrence has no override', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const { service, exceptionService } = buildService(task);
 
       exceptionService.findOverride.mockResolvedValue(null);
@@ -962,7 +954,7 @@ describe('TaskService recurring-edit scopes', () => {
 
   describe('setOccurrenceCompleted', () => {
     it('writes a per-instance completedAt for a recurring task', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const { service, exceptionService } = buildService(task);
       const originalStart = zoned('2026-06-02T09:00');
 
@@ -984,7 +976,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('clears a per-instance completion with null when completed=false', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const { service, exceptionService } = buildService(task);
 
       await service.setOccurrenceCompleted(
@@ -1000,7 +992,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('collapses to master setCompleted for a non-recurring task', async () => {
-      const task = makeTask({ recurrenceRuleId: null, completedAt: null });
+      const task = makeTask({ recurrenceConfig: null, completedAt: null });
       const { service, taskDb, exceptionService } = buildService(task);
 
       await service.setOccurrenceCompleted(
@@ -1016,7 +1008,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('returns the persisted exception completedAt with isOccurrenceScoped true', async () => {
-      const task = makeTask({ recurrenceRuleId: 'rule-1' });
+      const task = makeTask({ recurrenceConfig: makeRule() });
       const persistedAt = zoned('2026-06-02T10:05');
       const exceptionService = buildExceptionService();
 
@@ -1052,7 +1044,7 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('returns the master completedAt with isOccurrenceScoped false for a non-recurring task', async () => {
-      const task = makeTask({ recurrenceRuleId: null, completedAt: null });
+      const task = makeTask({ recurrenceConfig: null, completedAt: null });
       const { service } = buildService(task);
 
       const result = await service.setOccurrenceCompleted(
@@ -1073,33 +1065,29 @@ describe('TaskService recurring-edit scopes', () => {
     it('short-circuits to a master update when originalStart equals the series start', async () => {
       const seriesStart = zoned('2026-06-01T09:00');
       const task = makeTask({
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule(),
+        recurrenceConfig: makeRule(),
         startAt: seriesStart,
         endAt: zoned('2026-06-01T09:30'),
       });
-      const { service, taskDb, recurrenceRuleService } = buildService(task);
+      const { service, taskDb } = buildService(task);
 
       await service.splitSeries('user-1', 'task-1', seriesStart, {
         title: 'Renamed all',
       });
 
-      // No new rule, no new anchor — this IS "all".
-      expect(recurrenceRuleService.create).not.toHaveBeenCalled();
+      // No new anchor — this IS "all" (a plain master update).
       expect(taskDb.createInstance).not.toHaveBeenCalled();
       expect(task.title).toBe('Renamed all');
       expect(taskDb.save).toHaveBeenCalledTimes(1);
     });
 
-    it('ends the old rule, creates a new rule + anchor, and copies forward exceptions', async () => {
+    it('ends the old inline config, creates a new anchor with its own config, and copies forward exceptions', async () => {
       const task = makeTask({
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
         startAt: zoned('2026-06-01T09:00'),
         endAt: zoned('2026-06-01T09:30'),
       });
-      const { service, taskDb, recurrenceRuleService, exceptionService } =
-        buildService(task);
+      const { service, taskDb, exceptionService } = buildService(task);
 
       exceptionService.findForTask.mockResolvedValue([
         {
@@ -1129,21 +1117,27 @@ describe('TaskService recurring-edit scopes', () => {
         title: 'New chapter',
       });
 
-      // Old rule ended the day before the split.
-      expect(recurrenceRuleService.update).toHaveBeenCalledWith('rule-1', {
-        endType: RecurrenceEndType.UNTIL_DATE,
-        endDate: '2026-06-04',
-      });
-      // A new rule + a new anchor task were created.
-      expect(recurrenceRuleService.create).toHaveBeenCalledTimes(1);
+      // The OLD anchor's inline config was ended the day before the split,
+      // in-place (mutate-and-save), not via a rule-CRUD call.
+      expect(task.recurrenceConfig).toEqual(
+        expect.objectContaining({
+          endType: RecurrenceEndType.UNTIL_DATE,
+          endDate: '2026-06-04',
+        }),
+      );
+      // A new anchor task with its OWN inline config was created.
       expect(taskDb.createInstance).toHaveBeenCalledWith(
         expect.objectContaining({
-          recurrenceRuleId: 'rule-2',
+          recurrenceConfig: expect.objectContaining({
+            frequency: RecurrenceFrequency.DAILY,
+          }),
           title: 'New chapter',
           startAt: splitAt,
         }),
       );
-      expect(newTask.recurrenceRuleId).toBe('rule-2');
+      expect(newTask.recurrenceConfig).toEqual(
+        expect.objectContaining({ frequency: RecurrenceFrequency.DAILY }),
+      );
 
       // Only the exception dated >= split is copied onto the new task.
       expect(exceptionService.upsertOverride).toHaveBeenCalledTimes(1);
@@ -1156,8 +1150,7 @@ describe('TaskService recurring-edit scopes', () => {
 
     it('preserves the anchor duration on the new series when endAt is not overridden', async () => {
       const task = makeTask({
-        recurrenceRuleId: 'rule-1',
-        recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
         startAt: zoned('2026-06-01T09:00'),
         endAt: zoned('2026-06-01T10:00'), // 1h duration
       });
@@ -1174,14 +1167,13 @@ describe('TaskService recurring-edit scopes', () => {
     });
 
     it('collapses to a plain update for a non-recurring task', async () => {
-      const task = makeTask({ recurrenceRuleId: null });
-      const { service, taskDb, recurrenceRuleService } = buildService(task);
+      const task = makeTask({ recurrenceConfig: null });
+      const { service, taskDb } = buildService(task);
 
       await service.splitSeries('user-1', 'task-1', zoned('2026-06-05T09:00'), {
         title: 'Renamed',
       });
 
-      expect(recurrenceRuleService.create).not.toHaveBeenCalled();
       expect(taskDb.createInstance).not.toHaveBeenCalled();
       expect(task.title).toBe('Renamed');
       expect(taskDb.save).toHaveBeenCalledTimes(1);
@@ -1199,16 +1191,11 @@ describe('TaskService.update (details scope)', () => {
       findOneBy: jest.fn().mockResolvedValue(task),
       save: jest.fn((entity: Task) => Promise.resolve(entity)),
     };
-    const recurrenceRuleService = {
-      create: jest.fn(),
-      update: jest.fn(),
-      remove: jest.fn(),
-    };
     const service = new TaskService(
       taskDb as never,
       buildCalendarDatabaseService() as never,
       buildGroupDatabaseService() as never,
-      recurrenceRuleService as never,
+      new RecurrenceRuleService() as never,
       buildExceptionService() as never,
     );
 
@@ -1282,7 +1269,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
   ) => {
     const taskDb = { findAll: routedFindAll(fixtures) };
     const calendarDb = buildCalendarDatabaseService();
-    const realEngine = new RecurrenceRuleService(null as never);
+    const realEngine = new RecurrenceRuleService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
@@ -1302,8 +1289,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       title: 'Daily standup',
       startAt: zoned('2026-05-01T09:00'),
       endAt: zoned('2026-05-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const { service } = buildService({ recurring: [anchor] });
 
@@ -1324,8 +1310,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       id: 't-weekly',
       startAt: zoned('2026-06-01T09:00'), // Monday
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.WEEKLY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.WEEKLY }),
     });
     const { service } = buildService({ recurring: [anchor] });
 
@@ -1344,8 +1329,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       id: 't-daily',
       startAt: zoned('2026-05-01T09:00'),
       endAt: zoned('2026-05-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const { service } = buildService({ recurring: [anchor] });
 
@@ -1393,7 +1377,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       taskDb as never,
       buildCalendarDatabaseService() as never,
       buildGroupDatabaseService() as never,
-      new RecurrenceRuleService(null as never) as never,
+      new RecurrenceRuleService() as never,
       buildExceptionService() as never,
     );
 
@@ -1454,8 +1438,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       title: 'Daily standup',
       startAt: zoned('2026-05-01T09:00'),
       endAt: zoned('2026-05-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const exceptionService = buildExceptionService();
 
@@ -1493,46 +1476,14 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
  * lets `splitSeries` run against the REAL expansion engine end-to-end (its CRUD
  * lands here) instead of a hand-populated mock that masks relation/COUNT bugs.
  */
-const buildFakeRecurrenceDb = (seedRules: RecurrenceRule[] = []) => {
-  const store = new Map<string, RecurrenceRule>();
-  let sequence = 0;
-
-  for (const rule of seedRules) store.set(rule.id, rule);
-
-  return {
-    store,
-    createInstance: jest.fn((partial: Partial<RecurrenceRule>) => ({
-      ...partial,
-    })),
-    save: jest.fn((rule: RecurrenceRule) => {
-      const withId = rule.id ? rule : { ...rule, id: `rule-new-${++sequence}` };
-
-      store.set(withId.id, withId);
-
-      return Promise.resolve(withId);
-    }),
-    findOneByOrThrow: jest.fn(({ id }: { id: string }) => {
-      const rule = store.get(id);
-
-      if (!rule) throw new Error(`rule ${id} not found`);
-
-      return Promise.resolve(rule);
-    }),
-    deleteOrThrow: jest.fn((id: string) => {
-      store.delete(id);
-
-      return Promise.resolve({ affected: 1 });
-    }),
-  };
-};
-
 /**
- * Expands a rule via the real engine using a throwaway anchor carrying the given
- * start/duration, returning the generated `originalStart` epoch-millis in order.
+ * Expands an inline config via the real engine using a throwaway anchor carrying
+ * the given start/duration, returning the generated `originalStart` epoch-millis
+ * in order.
  */
 const expandStarts = (
   engine: RecurrenceRuleService,
-  rule: RecurrenceRule,
+  config: RecurrenceConfig,
   startAt: Date,
   durationMs: number,
   from: Date,
@@ -1541,12 +1492,11 @@ const expandStarts = (
   const anchor = makeTask({
     startAt,
     endAt: new Date(startAt.getTime() + durationMs),
-    recurrenceRuleId: rule.id,
-    recurrenceRule: rule,
+    recurrenceConfig: config,
   });
 
   return engine
-    .expandOccurrences(anchor, rule, [], from, to)
+    .expandOccurrences(anchor, config, [], from, to)
     .map((occurrence) => (occurrence.originalStart as Date).getTime());
 };
 
@@ -1555,35 +1505,24 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
   const WIDE_TO = zoned('2027-01-01T00:00');
 
   /**
-   * Wires a TaskService with the REAL recurrence engine (backed by a Map fake DB
-   * so its CRUD works) and a task-database stub whose relation-loaded `findOne`
-   * returns the provided anchor. `groupDbOverride` lets a test exercise the
+   * Wires a TaskService with the REAL (pure) recurrence engine and a task-db stub
+   * whose `findOne` returns the provided anchor (recurrence is the inline config
+   * on the row). `taskDb.save` captures every saved entity in `savedTasks`: the
+   * first is the OLD anchor (its config mutated to the UNTIL boundary in-place),
+   * subsequent ones are the new master(s). `groupDbOverride` exercises the
    * cross-calendar group guard.
    */
   const buildSeamService = (
     anchor: Task,
     options: {
-      seedRules?: RecurrenceRule[];
       groupDbOverride?: { findOneBy: jest.Mock };
-      relationAbsentAnchor?: Task;
     } = {},
   ) => {
-    const recurrenceDb = buildFakeRecurrenceDb(
-      options.seedRules ??
-        (anchor.recurrenceRule ? [anchor.recurrenceRule] : []),
-    );
-    const engine = new RecurrenceRuleService(recurrenceDb as never);
+    const engine = new RecurrenceRuleService();
     const savedTasks: Task[] = [];
     const taskDb = {
-      // `findByIdWithRule` reads through `findOne` (relation hydrated). When a
-      // test supplies a relation-absent anchor for `findOneBy`, `findOne` still
-      // returns the rule-bearing one — mirroring the real ORM (relation only on
-      // the relations-eager load), so we can prove the split no longer reads the
-      // rule off the relation-less `findById`.
       findOne: jest.fn().mockResolvedValue(anchor),
-      findOneBy: jest
-        .fn()
-        .mockResolvedValue(options.relationAbsentAnchor ?? anchor),
+      findOneBy: jest.fn().mockResolvedValue(anchor),
       createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
       save: jest.fn((entity: Task) => {
         const withId = entity.id ? entity : { ...entity, id: 'new-task' };
@@ -1601,32 +1540,27 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       buildExceptionService() as never,
     );
 
-    return { service, engine, recurrenceDb, taskDb, savedTasks };
+    return { service, engine, taskDb, savedTasks };
   };
 
-  it('does NOT throw when the anchor is loaded without its recurrenceRule relation (C1)', async () => {
-    // The series rule exists, but a relation-LESS load (findOneBy) leaves
-    // `recurrenceRule` undefined — the exact shape a real `findById` returns.
-    // `splitSeries` must hydrate the relation itself and split, not 500.
-    const rule = makeRule({
-      id: 'rule-1',
-      frequency: RecurrenceFrequency.DAILY,
-    });
-    const relationAbsent = makeTask({
+  /**
+   * The new master's inline config from a completed split: the LAST saved task is
+   * the new anchor (the first save is the old anchor's in-place UNTIL mutation).
+   */
+  const newConfigOf = (savedTasks: Task[]): RecurrenceConfig =>
+    savedTasks[savedTasks.length - 1].recurrenceConfig as RecurrenceConfig;
+
+  it('splits off the inline config on the row (C1)', async () => {
+    // Recurrence is inline on the row now — the split reads `recurrenceConfig`
+    // straight off the anchor, ends it in-place, and gives the new master its own
+    // config. Proof the split ran: old config ended, new config present + distinct.
+    const anchor = makeTask({
       id: 'task-1',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: undefined as never, // relation NOT hydrated
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
-    const hydrated = makeTask({
-      ...relationAbsent,
-      recurrenceRule: rule,
-    });
-    const { service, recurrenceDb } = buildSeamService(hydrated, {
-      seedRules: [rule],
-      relationAbsentAnchor: relationAbsent,
-    });
+    const { service, savedTasks } = buildSeamService(anchor);
 
     const splitAt = zoned('2026-06-05T09:00');
     const newMaster = await service.splitSeries(
@@ -1636,19 +1570,19 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       {},
     );
 
-    // The old rule was ended and a brand-new rule created — proof the split ran.
-    expect(recurrenceDb.findOneByOrThrow).toHaveBeenCalledWith({
-      id: 'rule-1',
-    });
-    expect(newMaster.recurrenceRuleId).toBeDefined();
-    expect(newMaster.recurrenceRuleId).not.toBe('rule-1');
+    // The old anchor's inline config was ended in-place (UNTIL the day before).
+    expect(anchor.recurrenceConfig?.endType).toBe(RecurrenceEndType.UNTIL_DATE);
+    // The new master carries its own (still-DAILY) inline config.
+    expect(newMaster.recurrenceConfig?.frequency).toBe(
+      RecurrenceFrequency.DAILY,
+    );
+    expect(newConfigOf(savedTasks).frequency).toBe(RecurrenceFrequency.DAILY);
   });
 
   it('leaves no gap and no overlap across a weekly single-weekday split', async () => {
     // Weekly on Monday (the anchor day). Split at a later Monday: old side keeps
     // the earlier Mondays, new side carries the rest — contiguous, disjoint.
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.WEEKLY,
     });
     const anchorStart = zoned('2026-06-01T09:00'); // Monday
@@ -1656,10 +1590,9 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       id: 'task-1',
       startAt: anchorStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
-    const { service, engine, recurrenceDb } = buildSeamService(anchor);
+    const { service, engine, savedTasks } = buildSeamService(anchor);
 
     const fullBefore = expandStarts(
       engine,
@@ -1678,14 +1611,14 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       {},
     );
 
-    const oldRule = recurrenceDb.store.get('rule-1') as RecurrenceRule;
-    const newRule = recurrenceDb.store.get(
-      newMaster.recurrenceRuleId as string,
-    ) as RecurrenceRule;
+    // The OLD config is the anchor's now-UNTIL inline config; the NEW config is
+    // the new master's inline config (last saved task).
+    const oldConfig = anchor.recurrenceConfig as RecurrenceConfig;
+    const newConfig = newConfigOf(savedTasks);
 
     const oldStarts = expandStarts(
       engine,
-      oldRule,
+      oldConfig,
       anchorStart,
       30 * 60_000,
       WIDE_FROM,
@@ -1693,7 +1626,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     );
     const newStarts = expandStarts(
       engine,
-      newRule,
+      newConfig,
       newMaster.startAt as Date,
       30 * 60_000,
       WIDE_FROM,
@@ -1712,7 +1645,6 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     // Mon + Thu. Anchor is a Monday; split on a Thursday — the split boundary
     // falls mid-week, the trickiest case for the day-before UNTIL cut.
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.WEEKLY,
       byWeekday: [0, 3],
     });
@@ -1721,10 +1653,9 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       id: 'task-1',
       startAt: anchorStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
-    const { service, engine, recurrenceDb } = buildSeamService(anchor);
+    const { service, engine, savedTasks } = buildSeamService(anchor);
 
     const fullBefore = expandStarts(
       engine,
@@ -1743,13 +1674,11 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       {},
     );
 
-    const oldRule = recurrenceDb.store.get('rule-1') as RecurrenceRule;
-    const newRule = recurrenceDb.store.get(
-      newMaster.recurrenceRuleId as string,
-    ) as RecurrenceRule;
+    const oldConfig = anchor.recurrenceConfig as RecurrenceConfig;
+    const newConfig = newConfigOf(savedTasks);
     const oldStarts = expandStarts(
       engine,
-      oldRule,
+      oldConfig,
       anchorStart,
       30 * 60_000,
       WIDE_FROM,
@@ -1757,7 +1686,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     );
     const newStarts = expandStarts(
       engine,
-      newRule,
+      newConfig,
       newMaster.startAt as Date,
       30 * 60_000,
       WIDE_FROM,
@@ -1775,7 +1704,6 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
 
   it('leaves no gap and no overlap across an UNTIL_DATE split', async () => {
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.DAILY,
       endType: RecurrenceEndType.UNTIL_DATE,
       endDate: '2026-06-30',
@@ -1785,10 +1713,9 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       id: 'task-1',
       startAt: anchorStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
-    const { service, engine, recurrenceDb } = buildSeamService(anchor);
+    const { service, engine, savedTasks } = buildSeamService(anchor);
 
     const fullBefore = expandStarts(
       engine,
@@ -1807,19 +1734,17 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       {},
     );
 
-    const oldRule = recurrenceDb.store.get('rule-1') as RecurrenceRule;
-    const newRule = recurrenceDb.store.get(
-      newMaster.recurrenceRuleId as string,
-    ) as RecurrenceRule;
+    const oldConfig = anchor.recurrenceConfig as RecurrenceConfig;
+    const newConfig = newConfigOf(savedTasks);
 
     // The new side inherits the original UNTIL date (clone), so the tail ends
     // where the original did — no occurrences invented past 2026-06-30.
-    expect(newRule.endType).toBe(RecurrenceEndType.UNTIL_DATE);
-    expect(newRule.endDate).toBe('2026-06-30');
+    expect(newConfig.endType).toBe(RecurrenceEndType.UNTIL_DATE);
+    expect(newConfig.endDate).toBe('2026-06-30');
 
     const oldStarts = expandStarts(
       engine,
-      oldRule,
+      oldConfig,
       anchorStart,
       30 * 60_000,
       WIDE_FROM,
@@ -1827,7 +1752,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     );
     const newStarts = expandStarts(
       engine,
-      newRule,
+      newConfig,
       newMaster.startAt as Date,
       30 * 60_000,
       WIDE_FROM,
@@ -1843,7 +1768,6 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     // A COUNT=10 daily series split at the 5th occurrence. The old side keeps 4,
     // the new side must carry 6 — combined 10, never 14.
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.DAILY,
       endType: RecurrenceEndType.COUNT,
       count: 10,
@@ -1853,10 +1777,9 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       id: 'task-1',
       startAt: anchorStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
-    const { service, engine, recurrenceDb } = buildSeamService(anchor);
+    const { service, engine, savedTasks } = buildSeamService(anchor);
 
     const fullBefore = expandStarts(
       engine,
@@ -1877,17 +1800,15 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       {},
     );
 
-    const oldRule = recurrenceDb.store.get('rule-1') as RecurrenceRule;
-    const newRule = recurrenceDb.store.get(
-      newMaster.recurrenceRuleId as string,
-    ) as RecurrenceRule;
+    const oldConfig = anchor.recurrenceConfig as RecurrenceConfig;
+    const newConfig = newConfigOf(savedTasks);
 
     // New count recomputed to 10 − 4 = 6.
-    expect(newRule.count).toBe(6);
+    expect(newConfig.count).toBe(6);
 
     const oldStarts = expandStarts(
       engine,
-      oldRule,
+      oldConfig,
       anchorStart,
       30 * 60_000,
       WIDE_FROM,
@@ -1895,7 +1816,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     );
     const newStarts = expandStarts(
       engine,
-      newRule,
+      newConfig,
       newMaster.startAt as Date,
       30 * 60_000,
       WIDE_FROM,
@@ -1914,7 +1835,6 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     // it must copy that exception forward onto the new task at the same
     // coordinate (its first instance), not leave it stranded on the old series.
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const splitAt = zoned('2026-06-05T09:00');
@@ -1922,8 +1842,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       id: 'task-1',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
     const exceptionService = buildExceptionService();
 
@@ -1940,8 +1859,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       },
     ] as TaskOccurrenceException[]);
 
-    const recurrenceDb = buildFakeRecurrenceDb([rule]);
-    const engine = new RecurrenceRuleService(recurrenceDb as never);
+    const engine = new RecurrenceRuleService();
     const taskDb = {
       findOne: jest.fn().mockResolvedValue(anchor),
       findOneBy: jest.fn().mockResolvedValue(anchor),
@@ -1975,7 +1893,6 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
 
   it('rejects a cross-calendar group BEFORE any write (C3 — no partial split)', async () => {
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const anchor = makeTask({
@@ -1983,8 +1900,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       calendarId: 'cal-1',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
     // The group resolves but lives in a DIFFERENT calendar.
     const groupDbOverride = {
@@ -1992,7 +1908,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
         .fn()
         .mockResolvedValue({ id: 'grp-x', calendarId: 'other-cal' }),
     };
-    const { service, recurrenceDb, savedTasks } = buildSeamService(anchor, {
+    const { service, savedTasks } = buildSeamService(anchor, {
       groupDbOverride,
     });
 
@@ -2002,18 +1918,14 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
-    // Nothing was written: the old rule is untouched (still NEVER), no new rule,
-    // no new task. The guard ran before the first mutation.
-    const oldRule = recurrenceDb.store.get('rule-1') as RecurrenceRule;
-
-    expect(oldRule.endType).toBe(RecurrenceEndType.NEVER);
-    expect(recurrenceDb.store.size).toBe(1);
+    // Nothing was written: the anchor's inline config is untouched (still NEVER)
+    // and no task was saved. The guard ran before the first mutation.
+    expect(anchor.recurrenceConfig?.endType).toBe(RecurrenceEndType.NEVER);
     expect(savedTasks).toHaveLength(0);
   });
 
   it('applies a same-calendar group atomically on the new master (C3)', async () => {
     const rule = makeRule({
-      id: 'rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const anchor = makeTask({
@@ -2021,8 +1933,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       calendarId: 'cal-1',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: rule,
     });
     const groupDbOverride = {
       findOneBy: jest
@@ -2035,11 +1946,14 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       groupId: 'grp-1',
     });
 
-    // The group is set in the SAME createInstance — no follow-up update needed.
+    // The group is set in the SAME createInstance — no follow-up update needed,
+    // and the new master carries its own inline recurrence config.
     expect(taskDb.createInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         groupId: 'grp-1',
-        recurrenceRuleId: 'rule-new-1',
+        recurrenceConfig: expect.objectContaining({
+          frequency: RecurrenceFrequency.DAILY,
+        }),
       }),
     );
   });
@@ -2047,13 +1961,12 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
 
 describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
   /**
-   * Wires a TaskService with the real engine (Map-backed CRUD) so `endSeriesAt`
-   * truncates against the actual UNTIL-date conversion. `findOne` returns the
-   * rule-bearing anchor (relation-aware load).
+   * Wires a TaskService with the real (pure) engine so `endSeriesAt` truncates
+   * against the actual UNTIL-date conversion. Recurrence is the inline config on
+   * the row; `findOne` returns the anchor the service mutates and saves.
    */
-  const buildService = (anchor: Task, rule?: RecurrenceRule) => {
-    const recurrenceDb = buildFakeRecurrenceDb(rule ? [rule] : []);
-    const engine = new RecurrenceRuleService(recurrenceDb as never);
+  const buildService = (anchor: Task) => {
+    const engine = new RecurrenceRuleService();
     const taskDb = {
       findOne: jest.fn().mockResolvedValue(anchor),
       findOneBy: jest.fn().mockResolvedValue(anchor),
@@ -2068,38 +1981,31 @@ describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
       buildExceptionService() as never,
     );
 
-    return { service, engine, recurrenceDb, taskDb };
+    return { service, engine, taskDb };
   };
 
-  it('truncates the rule at the day before the occurrence, preserving past ones', async () => {
-    const rule = makeRule({
-      id: 'rule-1',
-      frequency: RecurrenceFrequency.DAILY,
-    });
+  it('truncates the inline config at the day before the occurrence, preserving past ones', async () => {
     const anchorStart = zoned('2026-06-01T09:00');
     const anchor = makeTask({
       id: 'task-1',
       startAt: anchorStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
-    const { service, engine, recurrenceDb, taskDb } = buildService(
-      anchor,
-      rule,
-    );
+    const { service, engine, taskDb } = buildService(anchor);
 
     const cutAt = zoned('2026-06-05T09:00');
 
     await service.endSeriesAt('user-1', 'task-1', cutAt);
 
-    // The rule was converted to UNTIL_DATE the day before — NOT a whole-series
-    // soft-delete (the task row is never stamped deletedAt).
-    const ended = recurrenceDb.store.get('rule-1') as RecurrenceRule;
+    // The inline config was converted to UNTIL_DATE the day before and saved on
+    // the row — NOT a whole-series soft-delete (deletedAt is never stamped).
+    const ended = anchor.recurrenceConfig as RecurrenceConfig;
 
     expect(ended.endType).toBe(RecurrenceEndType.UNTIL_DATE);
     expect(ended.endDate).toBe('2026-06-04');
-    expect(taskDb.save).not.toHaveBeenCalled();
+    expect(anchor.deletedAt).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
 
     const survivors = expandStarts(
       engine,
@@ -2120,32 +2026,25 @@ describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
   });
 
   it('soft-deletes the whole task when the cut equals the series start', async () => {
-    const rule = makeRule({
-      id: 'rule-1',
-      frequency: RecurrenceFrequency.DAILY,
-    });
     const seriesStart = zoned('2026-06-01T09:00');
     const anchor = makeTask({
       id: 'task-1',
       startAt: seriesStart,
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: rule,
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
-    const { service, recurrenceDb, taskDb } = buildService(anchor, rule);
+    const { service, taskDb } = buildService(anchor);
 
     await service.endSeriesAt('user-1', 'task-1', seriesStart);
 
-    // No past to keep — the whole task is soft-deleted, the rule left untouched.
+    // No past to keep — the whole task is soft-deleted, the config left untouched.
     expect(anchor.deletedAt).toBeInstanceOf(Date);
     expect(taskDb.save).toHaveBeenCalledTimes(1);
-    expect((recurrenceDb.store.get('rule-1') as RecurrenceRule).endType).toBe(
-      RecurrenceEndType.NEVER,
-    );
+    expect(anchor.recurrenceConfig?.endType).toBe(RecurrenceEndType.NEVER);
   });
 
-  it('soft-deletes a non-recurring task (no rule to truncate)', async () => {
-    const anchor = makeTask({ id: 'task-1', recurrenceRuleId: null });
+  it('soft-deletes a non-recurring task (no config to truncate)', async () => {
+    const anchor = makeTask({ id: 'task-1', recurrenceConfig: null });
     const { service, taskDb } = buildService(anchor);
 
     await service.endSeriesAt('user-1', 'task-1', zoned('2026-06-05T09:00'));
@@ -2170,7 +2069,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
   ) => {
     const taskDb = { findAll: routedFindAll(fixtures) };
     const calendarDb = buildCalendarDatabaseService();
-    const realEngine = new RecurrenceRuleService(null as never);
+    const realEngine = new RecurrenceRuleService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
@@ -2187,33 +2086,30 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
    */
   const makeGroupWithRule = (
     groupId: string,
-    rule: RecurrenceRule,
+    config: RecurrenceConfig,
   ): TaskGroup =>
     ({
       id: groupId,
       calendarId: 'cal-1',
       name: 'Test Group',
-      defaultRecurrenceRuleId: rule.id,
-      defaultRecurrenceRule: rule,
+      recurrenceConfig: config,
     }) as unknown as TaskGroup;
 
   it('expands a task that has no own rule via its group default rule', async () => {
     const groupRule = makeRule({
-      id: 'group-rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const group = makeGroupWithRule('group-1', groupRule);
 
-    // A task with no own recurrenceRuleId but assigned to a group with a default
-    // rule — it must expand using the group's rule.
+    // A task with no own recurrenceConfig but assigned to a group with a default
+    // config — it must expand using the group's config.
     const inherited = makeTask({
       id: 't-inherited',
       groupId: 'group-1',
       group,
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: null,
-      recurrenceRule: null,
+      recurrenceConfig: null,
     });
 
     const { service } = buildService({ groupInherited: [inherited] });
@@ -2231,12 +2127,11 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
 
   it('does not double-count a group-inherited recurring task surfaced by both reads', async () => {
     // Regression: a real Postgres returns the SAME row from the one-off query
-    // (`recurrenceRuleId IS NULL`, no group filter) AND the group-inherited query.
+    // (`recurrenceConfig IS NULL`, no group filter) AND the group-inherited query.
     // The bucket-routed mock only exposes that overlap when the task is placed in
     // BOTH buckets — mirroring the DB. Before the fix this produced a phantom flat
     // one-off at the anchor PLUS the expanded series (8); it must be just 7.
     const groupRule = makeRule({
-      id: 'group-rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const group = makeGroupWithRule('group-1', groupRule);
@@ -2246,8 +2141,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       group,
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: null,
-      recurrenceRule: null,
+      recurrenceConfig: null,
     });
 
     const { service } = buildService({
@@ -2270,11 +2164,9 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
 
   it("a task's own rule overrides the group default", async () => {
     const groupRule = makeRule({
-      id: 'group-rule-1',
       frequency: RecurrenceFrequency.DAILY,
     });
     const ownRule = makeRule({
-      id: 'own-rule-1',
       frequency: RecurrenceFrequency.WEEKLY,
       byWeekday: [0], // Monday only (0 = Mon in entity encoding)
     });
@@ -2289,8 +2181,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       group,
       startAt: zoned('2026-06-01T09:00'), // Monday Jun 1
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'own-rule-1',
-      recurrenceRule: ownRule,
+      recurrenceConfig: ownRule,
     });
 
     const { service } = buildService({ recurring: [ownRuleTask] });
@@ -2309,7 +2200,6 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
 
   it('changing the group default changes expansion for tasks without own rules', async () => {
     const weeklyMonRule = makeRule({
-      id: 'group-rule-1',
       frequency: RecurrenceFrequency.WEEKLY,
       byWeekday: [0], // Monday (0 = Mon in entity encoding)
     });
@@ -2322,8 +2212,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       group,
       startAt: zoned('2026-06-01T09:00'), // Monday Jun 1
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: null,
-      recurrenceRule: null,
+      recurrenceConfig: null,
     });
 
     const { service: weeklyService } = buildService({
@@ -2340,7 +2229,6 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
 
     // Now swap the group default to DAILY and confirm expansion changes.
     const dailyRule = makeRule({
-      id: 'group-rule-2',
       frequency: RecurrenceFrequency.DAILY,
     });
     const groupWithDailyRule = makeGroupWithRule('group-1', dailyRule);
@@ -2350,8 +2238,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       group: groupWithDailyRule,
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: null,
-      recurrenceRule: null,
+      recurrenceConfig: null,
     });
 
     const { service: dailyService } = buildService({
@@ -2368,12 +2255,11 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
   });
 
   it('ignores group-assigned tasks whose group has no default rule', async () => {
-    // A group with NO default rule.
+    // A group with NO default recurrence config.
     const groupNoRule = {
       id: 'group-1',
       calendarId: 'cal-1',
-      defaultRecurrenceRuleId: null,
-      defaultRecurrenceRule: null,
+      recurrenceConfig: null,
     } as unknown as TaskGroup;
 
     const task = makeTask({
@@ -2381,8 +2267,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       groupId: 'group-1',
       group: groupNoRule,
       startAt: zoned('2026-06-01T09:00'),
-      recurrenceRuleId: null,
-      recurrenceRule: null,
+      recurrenceConfig: null,
     });
 
     const { service } = buildService({ groupInherited: [task] });
@@ -2414,7 +2299,7 @@ describe('TaskService.getDailyCounts', () => {
     const taskDb = { findAll: routedFindAll(fixtures) };
     const calendarDb =
       options.calendarDbOverride ?? buildCalendarDatabaseService();
-    const realEngine = new RecurrenceRuleService(null as never);
+    const realEngine = new RecurrenceRuleService();
     const service = new TaskService(
       taskDb as never,
       calendarDb as never,
@@ -2483,8 +2368,7 @@ describe('TaskService.getDailyCounts', () => {
       id: 't-daily',
       startAt: zoned('2026-06-01T09:00'),
       endAt: zoned('2026-06-01T09:30'),
-      recurrenceRuleId: 'rule-1',
-      recurrenceRule: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
     });
     const { service } = buildService({ recurring: [anchor] });
 
@@ -2708,7 +2592,7 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
       taskDb as never,
       calendarDb as never,
       buildGroupDatabaseService() as never,
-      new RecurrenceRuleService(null as never) as never,
+      new RecurrenceRuleService() as never,
       exceptionService as never,
     );
 
@@ -2747,8 +2631,8 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
 
   const SINCE = new Date('2026-06-20T12:00:00.000Z');
 
-  it('returns the changed series rows with the recurrence relation requested', async () => {
-    const changed = [makeTask({ id: 'task-1', recurrenceRuleId: 'rule-1' })];
+  it('returns the changed series rows carrying their inline recurrence config', async () => {
+    const changed = [makeTask({ id: 'task-1', recurrenceConfig: makeRule() })];
     const { service, findAll } = buildService({ changed });
 
     const result = await service.findChangedSince('user-1', SINCE, 'cal-1');
@@ -2764,7 +2648,8 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
       ),
     );
 
-    expect(changedOptions.relations).toEqual({ recurrenceRule: true });
+    // Recurrence is the inline config on the row now — no relation to hydrate.
+    expect(changedOptions.relations).toBeUndefined();
     expect(changedWhere(findAll).calendarId).toBe('cal-1');
   });
 

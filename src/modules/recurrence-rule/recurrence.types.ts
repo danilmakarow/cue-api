@@ -1,4 +1,36 @@
-import type { Task } from '@/modules/database/entities';
+import type {
+  RecurrenceEndType,
+  RecurrenceFrequency,
+  Task,
+} from '@/modules/database/entities';
+
+/**
+ * Inline recurrence configuration stored as JSONB on a `Task` or `TaskGroup`
+ * (`recurrenceConfig`). A plain POJO — never a persisted entity row — mirroring
+ * `CreateRecurrenceRuleDto` field-for-field (RFC-5545-lite). It is the single
+ * value the expansion engine reads; the `Create/UpdateRecurrenceRuleDto` shapes
+ * remain only as the class-validator validation surface for the JSONB payload.
+ *
+ * Weekday encoding for `byWeekday`: 0 = Monday … 6 = Sunday (ISO-8601 ordering).
+ */
+export interface RecurrenceConfig {
+  /** How often the series repeats. */
+  frequency: RecurrenceFrequency;
+  /** Repeat every N periods of the frequency (>= 1). */
+  interval: number;
+  /** Weekday ordinals (0 = Monday … 6 = Sunday); null means no weekday restriction. */
+  byWeekday: number[] | null;
+  /** Days of the month (1-31); null means no month-day restriction. */
+  byMonthDay: number[] | null;
+  /** Months (1-12); null means no month restriction. */
+  byMonth: number[] | null;
+  /** How the series terminates. */
+  endType: RecurrenceEndType;
+  /** ISO date the series ends on; non-null only for `UNTIL_DATE`. */
+  endDate: string | null;
+  /** Number of occurrences; non-null only for `COUNT`. */
+  count: number | null;
+}
 
 /**
  * A single computed instance of a task within a query window.
@@ -31,9 +63,9 @@ export interface Occurrence {
   /** Per-instance completion for recurring tasks; `task.completedAt` for one-offs. */
   completedAt: Date | null;
   /**
-   * True when the occurrence was produced by a recurrence rule — whether the
-   * task's own (`task.recurrenceRuleId != null`) or one inherited from its group
-   * default (in which case `task.recurrenceRuleId` is null).
+   * True when the occurrence was produced by a recurrence config — whether the
+   * task's own (`task.recurrenceConfig != null`) or one inherited from its group
+   * default (in which case `task.recurrenceConfig` is null).
    */
   isRecurring: boolean;
   /** True when a `TaskOccurrenceException` row was applied to this instance. */

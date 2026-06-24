@@ -62,6 +62,29 @@ export const editScopeJsonSchema: ToolJsonSchema = {
     'For a repeating task: which instances to affect. Omit to be asked which scope; pass only when the user is unambiguous.',
 };
 
+/** Model-facing description of a task/group color (preset name or #RRGGBB hex). */
+const COLOR_DESCRIPTION =
+  'Color: a preset name (RED, ORANGE, YELLOW, GREEN, TEAL, BLUE, INDIGO, PURPLE, PINK, BROWN, GRAY) or a custom #RRGGBB hex.';
+
+/** Model-facing JSON-Schema fragment for a settable (non-nullable) color. */
+export const colorJsonSchema: ToolJsonSchema = {
+  type: 'string',
+  description: COLOR_DESCRIPTION,
+};
+
+/** Model-facing JSON-Schema fragment for a nullable (clearable) color. */
+export const nullableColorJsonSchema: ToolJsonSchema = {
+  type: ['string', 'null'],
+  description: `${COLOR_DESCRIPTION} Pass null to clear and inherit the group.`,
+};
+
+/** Model-facing JSON-Schema fragment for the group's nullable recurrence. */
+export const nullableRecurrenceJsonSchema: ToolJsonSchema = {
+  ...recurrenceJsonSchema,
+  description:
+    'New recurrence rule, or null to stop repeating. Makes the task repeat as ONE task with a single rule — never create copies for future dates.',
+};
+
 /**
  * Verbatim model-facing JSON-Schema `properties` for one create item, shared by
  * `create_task` (its top-level shape) and `create_tasks` (its array `items`).
@@ -92,6 +115,7 @@ export const createTaskProperties: ToolJsonSchema = {
     type: 'boolean',
     description: 'Whether the task must be completed (todos default true).',
   },
+  color: colorJsonSchema,
   timezone: {
     type: 'string',
     description:

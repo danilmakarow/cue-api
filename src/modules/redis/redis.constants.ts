@@ -61,13 +61,13 @@ export const pendingQuestionKey = (userId: string): string =>
   `${PENDING_QUESTION_KEY_PREFIX}:${userId}`;
 
 /**
- * Prefix for the live-status handle (`StatusSession`, Story 10 / ADR 0012),
- * keyed per chat + turn. It holds the JSON `{ draftId | messageId, chatType,
- * locale, phase }` for the in-flight turn's animated status surface so creating
- * it is IDEMPOTENT — a second create for the same turn re-reads the existing
- * handle instead of orphaning a second draft/message. Short-lived (TTL
- * `ASSISTANT_STATUS_SESSION_TTL_SECONDS`); cleared when the turn finalizes. The
- * surface Stories 12/13 animate; this story builds only the store + lifecycle.
+ * Prefix for the live-status handle (`StatusSession`, ADR 0053), keyed per chat
+ * + turn. It holds the JSON `{ vendorMessageId, chatType, locale, phase }` for
+ * the in-flight turn's ONE real status message so creating it is IDEMPOTENT — a
+ * second create for the same turn re-reads the existing handle instead of
+ * posting a second message. Short-lived (TTL
+ * `ASSISTANT_STATUS_SESSION_TTL_SECONDS`); cleared when the turn finalizes (by
+ * which point the reply has morphed that message into the answer).
  */
 export const STATUS_SESSION_KEY_PREFIX = 'assistant:status';
 
@@ -191,3 +191,52 @@ export const LAST_BUTTON_KEY_PREFIX = 'assistant:lastButton';
  */
 export const lastButtonKey = (userId: string): string =>
   `${LAST_BUTTON_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the last-message-language tracker (R2 / ADR 0055), keyed by the Cue
+ * user id. Its VALUE is the last turn's resolved loading-status locale (`en` /
+ * `uk` / `ru`) — written on every turn whose language we actually know (a typed
+ * message, a free-text answer, or a voice turn AFTER STT) and read on the NEXT
+ * turn. Unlike the per-turn status keys this one is per-USER and deliberately
+ * STICKY: it SURVIVES across turns (last-write-wins overwrite, plain `GET` on
+ * read — never `GETDEL`) so the very next turn can borrow it. Its sole consumer
+ * is the cosmetic loading-status surface: the voice PRE-STT "Listening…" line has
+ * no text to detect yet, so it falls back to this borrowed language instead of
+ * bare `en`. A long TTL (`ASSISTANT_LAST_MESSAGE_LANGUAGE_TTL_SECONDS`, ~7 days)
+ * is a self-cleaning backstop for a user who goes quiet. Disjoint keyspace from
+ * every other assistant key (lock / status / ask / debounce / active-keyboard /
+ * last-button) so the language tracker never collides with any other assistant
+ * state — see `docs/adr/0055-last-message-language-and-reply-language.md`.
+ */
+export const LAST_MESSAGE_LANGUAGE_KEY_PREFIX = 'assistant:lastLang';
+
+/**
+ * Builds the last-message-language key for a Cue user id. One key per user holds
+ * that user's most recently resolved loading-status locale, sticky across turns.
+ */
+export const lastMessageLanguageKey = (userId: string): string =>
+  `${LAST_MESSAGE_LANGUAGE_KEY_PREFIX}:${userId}`;
+
+/**
+ * Prefix for the last-menu-card message tracker (R4 / ADR 0056), keyed by the Cue
+ * user id. Its VALUE is the vendor message id of the LAST docked Menu card. The
+ * keyboard-action handler records it after sending a fresh menu card and reads-and-
+ * clears the prior id (`GETDEL`) to dedup-delete the stale card — send-new-first,
+ * delete-old-after, so the worst case is one extra bubble (never zero, since there
+ * is no per-user lock on this path). DURABLE on purpose: stored WITHOUT a TTL (like
+ * the active-keyboard flag), because a menu card lives in the chat indefinitely
+ * until the user opens a new one — a TTL would silently orphan a still-visible card.
+ * Cleared explicitly on Logout so a re-link starts clean. Disjoint keyspace from
+ * every other assistant key (lock / status / ask / debounce / active-keyboard /
+ * last-button / last-message-language) so the menu tracker never collides with any
+ * other assistant state — see `docs/adr/0056-assistant-reply-keyboard-menu.md`.
+ */
+export const ASSISTANT_MENU_KEY_PREFIX = 'assistant:menu';
+
+/**
+ * Builds the last-menu-card key for a Cue user id. One key per user holds the
+ * vendor message id of that user's most recently docked Menu card, awaiting dedup-
+ * deletion on the next [Open Menu].
+ */
+export const menuMessageKey = (userId: string): string =>
+  `${ASSISTANT_MENU_KEY_PREFIX}:${userId}`;

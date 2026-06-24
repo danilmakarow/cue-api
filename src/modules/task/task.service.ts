@@ -19,7 +19,6 @@ import { EntityNotFoundException } from '@/exceptions/entity-not-found.exception
 import {
   Calendar,
   RecurrenceEndType,
-  RecurrenceRule,
   Task,
   TaskGroup,
   TaskOccurrenceException,
@@ -34,7 +33,10 @@ import {
   ProposedSeries,
   RecurrenceRuleService,
 } from '@/modules/recurrence-rule/recurrence-rule.service';
-import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
+import {
+  Occurrence,
+  RecurrenceConfig,
+} from '@/modules/recurrence-rule/recurrence.types';
 import {
   OccurrenceOverrideChanges,
   TaskOccurrenceExceptionService,
@@ -42,11 +44,12 @@ import {
 
 /**
  * Fields the assistant may change on an existing event (the "all" / one-off
- * scope). `startAt`/`endAt`/`notes`/`groupId` accept `null` to clear; an omitted
- * key leaves the current value untouched. `recurrence` set to a DTO adds or
- * replaces the master rule; set to `null` removes recurrence entirely.
- * `isAllDay`/`requiresCompletion` are optional booleans — omitted keys default to
- * undefined, so existing callers (the assistant) are unaffected.
+ * scope). `startAt`/`endAt`/`notes`/`groupId`/`requiresCompletion`/`color` accept
+ * `null` to clear; an omitted key leaves the current value untouched.
+ * `recurrence` set to a DTO adds or replaces the inline config; set to `null`
+ * removes recurrence entirely. `isAllDay` is an optional boolean. Clearing
+ * `requiresCompletion` (null) drops the task's own value so the group default
+ * (then `false`) applies via the effective-settings resolver.
  */
 export interface UpdateTaskInput {
   title?: string;
@@ -54,7 +57,8 @@ export interface UpdateTaskInput {
   startAt?: string | null;
   endAt?: string | null;
   isAllDay?: boolean;
-  requiresCompletion?: boolean;
+  requiresCompletion?: boolean | null;
+  color?: string | null;
   groupId?: string | null;
   recurrence?: CreateRecurrenceRuleDto | null;
 }
@@ -136,11 +140,12 @@ export interface FindChangedOptions {
 
 /**
  * The precise delta returned by `findChangedSince`. `tasks` are the changed
- * series rows (recurrence relation hydrated), `deleted` the soft-deleted series
- * ids, `exceptions` the changed per-occurrence overrides, and `serverTime` the
- * opaque cursor the client echoes on its next call. On the first call (no
- * `since`), the service returns empty arrays and only the cursor, letting the
- * client fall back to a full per-window SWR sync.
+ * series rows (recurrence is the inline `recurrenceConfig` on each row — no
+ * relation to hydrate), `deleted` the soft-deleted series ids, `exceptions` the
+ * changed per-occurrence overrides, and `serverTime` the opaque cursor the client
+ * echoes on its next call. On the first call (no `since`), the service returns
+ * empty arrays and only the cursor, letting the client fall back to a full
+ * per-window SWR sync.
  */
 export interface ChangedSince {
   tasks: Task[];
@@ -167,8 +172,10 @@ export class TaskService {
    * Creates a new Task inside the Calendar identified by `dto.calendarId`.
    * Supports timed/all-day events, todos (null `startAt`/`endAt`), an optional
    * `groupId` (which must live in the same calendar), and an optional
-   * `recurrence` rule — which is persisted as a single linked `RecurrenceRule`,
-   * never as N materialized rows.
+   * `recurrence` rule — persisted inline as a single `recurrenceConfig` JSONB
+   * value on the row, never as N materialized rows (ADR 0054).
+   * `requiresCompletion` / `color` are stored as-is (nullable); when null the
+   * effective-settings resolver applies group inheritance + the hard default.
    * Throws 404 when the calendar is missing, 403 when it belongs to another user,
    * and 400 when `endAt` precedes `startAt`, the group is in another calendar, or
    * a recurrence is requested without an anchor `startAt`.
@@ -195,8 +202,8 @@ export class TaskService {
       await this.ensureGroupInCalendar(dto.groupId, dto.calendarId);
     }
 
-    const recurrenceRuleId = dto.recurrence
-      ? (await this.recurrenceRuleService.create(dto.recurrence)).id
+    const recurrenceConfig = dto.recurrence
+      ? RecurrenceRuleService.toConfig(dto.recurrence)
       : null;
 
     const task = this.taskDatabaseService.createInstance({
@@ -208,8 +215,9 @@ export class TaskService {
       endAt,
       isAllDay: dto.isAllDay ?? false,
       timezone: dto.timezone,
-      requiresCompletion: dto.requiresCompletion ?? true,
-      recurrenceRuleId,
+      requiresCompletion: dto.requiresCompletion ?? null,
+      color: dto.color ?? null,
+      recurrenceConfig,
     });
 
     return this.taskDatabaseService.save(task);
@@ -286,7 +294,6 @@ export class TaskService {
         updatedAt: MoreThan(since),
         ...(includeTodos ? {} : { startAt: Not(IsNull()) }),
       },
-      relations: { recurrenceRule: true },
       order: { updatedAt: 'ASC' },
     });
 
@@ -321,9 +328,9 @@ export class TaskService {
    * Returns the merged, time-sorted stream of occurrences intersecting the
    * half-open window `[from, to)` for the calendars the user owns: one-off tasks
    * wrapped as single occurrences, plus every recurring anchor expanded via
-   * `RecurrenceRuleService.expandOccurrences`. Each recurring anchor's rule is
-   * loaded through the `recurrenceRule` relation and its exceptions through
-   * `TaskOccurrenceExceptionService.findForTask`. Completed instances are dropped
+   * `RecurrenceRuleService.expandOccurrences`. Each recurring anchor's config is
+   * read inline off the row (or inherited from its group) and its exceptions
+   * through `TaskOccurrenceExceptionService.findForTask`. Completed instances are dropped
    * unless `includeCompleted`; timeless todos surface only when `includeTodos`.
    * Throws 404/403 when an explicit `calendarId` is missing or not owned, and 400
    * when the window is empty.
@@ -461,7 +468,7 @@ export class TaskService {
   ): Promise<OccurrenceCompletionResult> {
     const task = await this.findById(userId, taskId);
 
-    if (task.recurrenceRuleId === null) {
+    if (task.recurrenceConfig === null) {
       const updated = await this.setCompleted(taskId, completed);
 
       return { completedAt: updated.completedAt, isOccurrenceScoped: false };
@@ -497,14 +504,14 @@ export class TaskService {
   ): Promise<void> {
     const task = await this.findById(userId, taskId);
 
-    if (task.recurrenceRuleId === null) {
+    if (task.recurrenceConfig === null) {
       await this.collapseOverrideToMaster(userId, taskId, changes);
 
       return;
     }
 
     if (this.isOverrideMutation(changes)) {
-      await this.ensureGeneratedOccurrence(task, originalStart);
+      this.ensureGeneratedOccurrence(task, originalStart);
     }
 
     await this.taskOccurrenceExceptionService.upsertOverride(
@@ -553,16 +560,17 @@ export class TaskService {
   }
 
   /**
-   * Loads a single Task by id WITH its `recurrenceRule` relation hydrated and
-   * asserts ownership. Plain `findById` (a relation-less `findOneBy`) leaves
-   * `recurrenceRule` undefined for a real recurring task; callers that read the
-   * rule off the row (the series-split path) must use this instead.
+   * Loads a single Task by id WITH its `group` relation hydrated and asserts
+   * ownership. Recurrence now lives inline on the row (`recurrenceConfig`), so a
+   * plain `findById` already carries it; this variant additionally loads the
+   * group so callers that resolve effective (group-inherited) settings have it.
+   * Retained as a distinct entry point for the series-split / edit-conflict paths.
    * Throws 404 when the task is missing, 403 when owned by another user.
    */
   async findByIdWithRule(userId: string, taskId: string): Promise<Task> {
     const task = await this.taskDatabaseService.findOne({
       where: { id: taskId },
-      relations: { recurrenceRule: true },
+      relations: { group: true },
     });
 
     if (!task) {
@@ -607,8 +615,13 @@ export class TaskService {
     const nextGroupId =
       input.groupId !== undefined ? input.groupId : task.groupId;
     const nextIsAllDay = input.isAllDay ?? task.isAllDay;
+    // requiresCompletion / color are nullable: an explicit value (incl. null to
+    // clear) is taken, an omitted key keeps the current value.
     const nextRequiresCompletion =
-      input.requiresCompletion ?? task.requiresCompletion;
+      input.requiresCompletion !== undefined
+        ? input.requiresCompletion
+        : task.requiresCompletion;
+    const nextColor = input.color !== undefined ? input.color : task.color;
 
     if (
       input.groupId !== undefined &&
@@ -618,7 +631,7 @@ export class TaskService {
       await this.ensureGroupInCalendar(input.groupId, task.calendarId);
     }
 
-    const recurrenceChanged = await this.applyRecurrenceUpdate(task, input);
+    const recurrenceChanged = this.applyRecurrenceUpdate(task, input);
 
     const hasFieldChanges =
       nextTitle !== task.title ||
@@ -626,6 +639,7 @@ export class TaskService {
       nextGroupId !== task.groupId ||
       nextIsAllDay !== task.isAllDay ||
       nextRequiresCompletion !== task.requiresCompletion ||
+      nextColor !== task.color ||
       nextStartAt?.getTime() !== task.startAt?.getTime() ||
       nextEndAt?.getTime() !== task.endAt?.getTime();
 
@@ -638,6 +652,7 @@ export class TaskService {
     task.groupId = nextGroupId;
     task.isAllDay = nextIsAllDay;
     task.requiresCompletion = nextRequiresCompletion;
+    task.color = nextColor;
     task.startAt = nextStartAt;
     task.endAt = nextEndAt;
 
@@ -646,14 +661,15 @@ export class TaskService {
 
   /**
    * Splits a series at `originalStart` (the "this and following" scope): ends the
-   * existing rule the day before `originalStart`, then creates a new `Task` + new
-   * `RecurrenceRule` (the old rule cloned with `changes.recurrence` merged)
-   * anchored at `originalStart`. Exceptions dated `>= originalStart` are copied
-   * onto the new task. Returns the newly created series-master task.
+   * existing inline config the day before `originalStart`, then creates a new
+   * `Task` with its own inline `recurrenceConfig` (the old config cloned with
+   * `changes.recurrence` merged) anchored at `originalStart`. Exceptions dated
+   * `>= originalStart` are copied onto the new task. Returns the newly created
+   * series-master task.
    *
-   * The anchor is loaded WITH its `recurrenceRule` relation (plain `findById`
-   * does not hydrate it), so a real recurring series — whose `recurrenceRule` is
-   * `undefined` until eagerly loaded — splits correctly instead of throwing.
+   * The anchor is loaded via `findByIdWithRule` (its `group` relation hydrated);
+   * recurrence is the inline `recurrenceConfig` on the row, so a real recurring
+   * series splits correctly off that value.
    *
    * When `changes.groupId` is provided it is validated against the new master's
    * calendar BEFORE any write and applied in the same insert, so a cross-calendar
@@ -684,7 +700,7 @@ export class TaskService {
   ): Promise<Task> {
     const task = await this.findByIdWithRule(userId, taskId);
 
-    if (task.recurrenceRuleId === null || task.recurrenceRule == null) {
+    if (task.recurrenceConfig === null) {
       return this.update(userId, taskId, this.splitChangesAsUpdate(changes));
     }
 
@@ -701,21 +717,25 @@ export class TaskService {
       await this.ensureGroupInCalendar(changes.groupId, task.calendarId);
     }
 
-    const oldRule = task.recurrenceRule;
-    const recurrenceForNewRule = this.resolveSplitRecurrence(
+    const oldConfig = task.recurrenceConfig;
+    const newConfig = this.resolveSplitRecurrence(
       task,
-      oldRule,
+      oldConfig,
       originalStart,
       changes.recurrence,
     );
 
-    await this.recurrenceRuleService.update(oldRule.id, {
+    // End the OLD series the day before the split by cloning its config and
+    // setting the UNTIL boundary in-place — recurrence is inline now, so this is
+    // a mutate-and-save on the old anchor rather than a rule-CRUD call. `count`
+    // is left as-is (the expander honors it only while endType is COUNT, so a
+    // stale value under UNTIL_DATE is inert), matching the prior rule-update.
+    task.recurrenceConfig = {
+      ...oldConfig,
       endType: RecurrenceEndType.UNTIL_DATE,
       endDate: this.dayBefore(originalStart, task.timezone),
-    });
-
-    const newRule =
-      await this.recurrenceRuleService.create(recurrenceForNewRule);
+    };
+    await this.taskDatabaseService.save(task);
 
     const durationMillis =
       task.startAt && task.endAt
@@ -740,8 +760,9 @@ export class TaskService {
       isAllDay: task.isAllDay,
       timezone: task.timezone,
       requiresCompletion: task.requiresCompletion,
+      color: task.color,
       notificationStrategyId: task.notificationStrategyId,
-      recurrenceRuleId: newRule.id,
+      recurrenceConfig: newConfig,
     });
 
     const savedTask = await this.taskDatabaseService.save(newTask);
@@ -775,10 +796,10 @@ export class TaskService {
    * - **`originalStart` equals the series start** — there is no past to keep, so
    *   the whole task is soft-deleted via `remove` (equivalent to deleting `all`).
    * - **Non-recurring task** — collapses to a soft-delete (`remove`); there is no
-   *   rule to truncate.
+   *   config to truncate.
    *
-   * Loads the anchor WITH its `recurrenceRule` relation (plain `findById` does
-   * not hydrate it). Validates ownership first.
+   * Loads the anchor via `findByIdWithRule`; recurrence is the inline
+   * `recurrenceConfig` on the row. Validates ownership first.
    */
   async endSeriesAt(
     userId: string,
@@ -787,7 +808,7 @@ export class TaskService {
   ): Promise<void> {
     const task = await this.findByIdWithRule(userId, taskId);
 
-    if (task.recurrenceRuleId === null || task.recurrenceRule == null) {
+    if (task.recurrenceConfig === null) {
       await this.remove(userId, taskId);
 
       return;
@@ -802,10 +823,13 @@ export class TaskService {
       return;
     }
 
-    await this.recurrenceRuleService.update(task.recurrenceRule.id, {
+    // Truncate by setting the UNTIL boundary in-place on the inline config.
+    task.recurrenceConfig = {
+      ...task.recurrenceConfig,
       endType: RecurrenceEndType.UNTIL_DATE,
       endDate: this.dayBefore(originalStart, task.timezone),
-    });
+    };
+    await this.taskDatabaseService.save(task);
   }
 
   /**
@@ -834,7 +858,7 @@ export class TaskService {
     const timedClashes = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         completedAt: IsNull(),
         startAt: LessThan(endAt),
         endAt: MoreThan(startAt),
@@ -846,7 +870,7 @@ export class TaskService {
     const noEndClashes = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         completedAt: IsNull(),
         startAt: And(MoreThanOrEqual(startAt), LessThan(endAt)),
         endAt: IsNull(),
@@ -953,7 +977,7 @@ export class TaskService {
     const task = await this.findByIdWithRule(userId, taskId);
 
     const effectiveRecurrence =
-      proposal.recurrence ?? this.ruleToCreateDto(task.recurrenceRule ?? null);
+      proposal.recurrence ?? this.configToCreateDto(task.recurrenceConfig);
 
     // Not a recurring series after the edit ⇒ nothing series-shaped to check.
     if (!effectiveRecurrence) {
@@ -996,25 +1020,25 @@ export class TaskService {
   }
 
   /**
-   * Maps a persisted `RecurrenceRule` back to the `CreateRecurrenceRuleDto` shape
+   * Maps an inline `RecurrenceConfig` back to the `CreateRecurrenceRuleDto` shape
    * the conflict-preview expects, so an edit that changes only the TIME (not the
-   * rule) still expands the series against its CURRENT rule. Returns null when no
-   * rule is supplied (a non-recurring task).
+   * rule) still expands the series against its CURRENT config. Returns null when no
+   * config is supplied (a non-recurring task).
    */
-  private ruleToCreateDto(
-    rule: RecurrenceRule | null,
+  private configToCreateDto(
+    config: RecurrenceConfig | null,
   ): CreateRecurrenceRuleDto | null {
-    if (!rule) return null;
+    if (!config) return null;
 
     return {
-      frequency: rule.frequency,
-      interval: rule.interval,
-      byWeekday: rule.byWeekday ?? undefined,
-      byMonthDay: rule.byMonthDay ?? undefined,
-      byMonth: rule.byMonth ?? undefined,
-      endType: rule.endType,
-      endDate: rule.endDate ?? undefined,
-      count: rule.count ?? undefined,
+      frequency: config.frequency,
+      interval: config.interval,
+      byWeekday: config.byWeekday ?? undefined,
+      byMonthDay: config.byMonthDay ?? undefined,
+      byMonth: config.byMonth ?? undefined,
+      endType: config.endType,
+      endDate: config.endDate ?? undefined,
+      count: config.count ?? undefined,
     };
   }
 
@@ -1046,7 +1070,7 @@ export class TaskService {
    * owned by the recurring path and still surfaces through the todo read.
    */
   private inheritsGroupRecurrence(task: Task): boolean {
-    return task.startAt !== null && task.group?.defaultRecurrenceRuleId != null;
+    return task.startAt !== null && task.group?.recurrenceConfig != null;
   }
 
   /**
@@ -1070,7 +1094,7 @@ export class TaskService {
     const timedWithEnd = await this.taskDatabaseService.findAll({
       where: {
         calendarId: calendarScope,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         startAt: LessThan(to),
         endAt: MoreThan(from),
         ...groupScope,
@@ -1080,7 +1104,7 @@ export class TaskService {
     const timedNoEnd = await this.taskDatabaseService.findAll({
       where: {
         calendarId: calendarScope,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         startAt: And(MoreThanOrEqual(from), LessThan(to)),
         endAt: IsNull(),
         ...groupScope,
@@ -1099,7 +1123,7 @@ export class TaskService {
     const todos = await this.taskDatabaseService.findAll({
       where: {
         calendarId: calendarScope,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         startAt: IsNull(),
         ...groupScope,
       },
@@ -1109,13 +1133,15 @@ export class TaskService {
   }
 
   /**
-   * Loads every recurring anchor in scope (with its rule relation and group
-   * relation for inheritance) and expands each into `[from, to)`, loading
-   * per-anchor exceptions on demand.
+   * Loads every recurring anchor in scope and expands each into `[from, to)`,
+   * loading per-anchor exceptions on demand.
    *
-   * A task is a recurring anchor when EITHER it has its own `recurrenceRuleId`
-   * OR its group carries a `defaultRecurrenceRuleId` (group inheritance). The
-   * effective rule is resolved as `task.recurrenceRule ?? task.group.defaultRecurrenceRule`.
+   * A task is a recurring anchor when EITHER it has its own `recurrenceConfig`
+   * OR its group carries a `recurrenceConfig` (group inheritance). The effective
+   * config is resolved task-wins as
+   * `task.recurrenceConfig ?? task.group.recurrenceConfig`. Own-config anchors
+   * need no relation (the config is on the row); group-inherited anchors load the
+   * group to read its inline config.
    */
   private async readRecurringOccurrences(
     calendarIds: string[],
@@ -1123,32 +1149,31 @@ export class TaskService {
     to: Date,
     groupId?: string,
   ): Promise<Occurrence[]> {
-    // Own-rule anchors: tasks with their own recurrenceRuleId set.
+    // Own-config anchors: tasks with their own inline recurrenceConfig set.
     const ownRuleAnchors = await this.taskDatabaseService.findAll({
       where: {
         calendarId: In(calendarIds),
-        recurrenceRuleId: Not(IsNull()),
+        recurrenceConfig: Not(IsNull()),
         ...(groupId ? { groupId } : {}),
       },
-      relations: { recurrenceRule: true },
     });
 
-    // Group-inherited anchors: tasks with NO own rule but assigned to a group
-    // that has a defaultRecurrenceRuleId. Load both the group and its rule.
+    // Group-inherited anchors: tasks with NO own config but assigned to a group.
+    // Load the group so its inline recurrenceConfig can be read.
     const groupInheritedAnchors = await this.taskDatabaseService.findAll({
       where: {
         calendarId: In(calendarIds),
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         groupId: Not(IsNull()),
         ...(groupId ? { groupId } : {}),
       },
-      relations: { group: { defaultRecurrenceRule: true } },
+      relations: { group: true },
     });
 
     const occurrences: Occurrence[] = [];
 
     for (const anchor of ownRuleAnchors) {
-      if (!anchor.recurrenceRule) continue;
+      if (!anchor.recurrenceConfig) continue;
 
       const exceptions = await this.taskOccurrenceExceptionService.findForTask(
         anchor.id,
@@ -1157,7 +1182,7 @@ export class TaskService {
       occurrences.push(
         ...this.recurrenceRuleService.expandOccurrences(
           anchor,
-          anchor.recurrenceRule,
+          anchor.recurrenceConfig,
           exceptions,
           from,
           to,
@@ -1166,9 +1191,9 @@ export class TaskService {
     }
 
     for (const anchor of groupInheritedAnchors) {
-      const inheritedRule = anchor.group?.defaultRecurrenceRule ?? null;
+      const inheritedConfig = anchor.group?.recurrenceConfig ?? null;
 
-      if (!inheritedRule) continue;
+      if (!inheritedConfig) continue;
 
       const exceptions = await this.taskOccurrenceExceptionService.findForTask(
         anchor.id,
@@ -1177,7 +1202,7 @@ export class TaskService {
       occurrences.push(
         ...this.recurrenceRuleService.expandOccurrences(
           anchor,
-          inheritedRule,
+          inheritedConfig,
           exceptions,
           from,
           to,
@@ -1191,11 +1216,11 @@ export class TaskService {
   /**
    * Loads recurring anchors in a calendar and returns those with at least one
    * non-completed occurrence intersecting the bounded window. Includes both tasks
-   * with their own rule and tasks inheriting a rule from their group. The expander
-   * already window-clips to intersection (skipped occurrences are dropped by the
-   * engine), so any in-window occurrence is, by construction, a clash — except a
-   * per-instance-completed one, which is a finished item rather than a live
-   * conflict and is filtered out here (mirroring `findOccurrencesInRange`).
+   * with their own inline config and tasks inheriting a config from their group.
+   * The expander already window-clips to intersection (skipped occurrences are
+   * dropped by the engine), so any in-window occurrence is, by construction, a
+   * clash — except a per-instance-completed one, which is a finished item rather
+   * than a live conflict and is filtered out here (mirroring `findOccurrencesInRange`).
    */
   private async findClashingRecurringAnchors(
     calendarId: string,
@@ -1208,34 +1233,33 @@ export class TaskService {
     const ownRuleAnchors = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        recurrenceRuleId: Not(IsNull()),
+        recurrenceConfig: Not(IsNull()),
         ...excludeScope,
       },
-      relations: { recurrenceRule: true },
     });
 
     const groupInheritedAnchors = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        recurrenceRuleId: IsNull(),
+        recurrenceConfig: IsNull(),
         groupId: Not(IsNull()),
         ...excludeScope,
       },
-      relations: { group: { defaultRecurrenceRule: true } },
+      relations: { group: true },
     });
 
     const clashing: Task[] = [];
 
     const checkAnchor = async (
       anchor: Task,
-      effectiveRule: RecurrenceRule,
+      effectiveConfig: RecurrenceConfig,
     ): Promise<void> => {
       const exceptions = await this.taskOccurrenceExceptionService.findForTask(
         anchor.id,
       );
       const occurrences = this.recurrenceRuleService.expandOccurrences(
         anchor,
-        effectiveRule,
+        effectiveConfig,
         exceptions,
         startAt,
         endAt,
@@ -1251,17 +1275,17 @@ export class TaskService {
     };
 
     for (const anchor of ownRuleAnchors) {
-      if (!anchor.recurrenceRule) continue;
+      if (!anchor.recurrenceConfig) continue;
 
-      await checkAnchor(anchor, anchor.recurrenceRule);
+      await checkAnchor(anchor, anchor.recurrenceConfig);
     }
 
     for (const anchor of groupInheritedAnchors) {
-      const inheritedRule = anchor.group?.defaultRecurrenceRule ?? null;
+      const inheritedConfig = anchor.group?.recurrenceConfig ?? null;
 
-      if (!inheritedRule) continue;
+      if (!inheritedConfig) continue;
 
-      await checkAnchor(anchor, inheritedRule);
+      await checkAnchor(anchor, inheritedConfig);
     }
 
     return this.dedupeById(clashing);
@@ -1287,40 +1311,25 @@ export class TaskService {
   }
 
   /**
-   * Applies the recurrence portion of an update to the master: removes the rule
-   * when `recurrence` is explicitly null, updates it in place when one exists, or
-   * creates and links a fresh rule otherwise. Returns whether the task's
-   * `recurrenceRuleId` link changed (a rule field-only update does not).
+   * Applies the recurrence portion of an update to the master by mutating the
+   * inline `recurrenceConfig` on the task row: clears it when `recurrence` is
+   * explicitly null, sets/replaces it from the DTO otherwise. Returns whether the
+   * config actually changed (so the caller knows to `save` even when no other
+   * field did). The config lives on the row, so there is no separate rule
+   * lifecycle to create / delete (ADR 0054).
    */
-  private async applyRecurrenceUpdate(
-    task: Task,
-    input: UpdateTaskInput,
-  ): Promise<boolean> {
+  private applyRecurrenceUpdate(task: Task, input: UpdateTaskInput): boolean {
     if (input.recurrence === undefined) return false;
 
     if (input.recurrence === null) {
-      if (task.recurrenceRuleId === null) return false;
+      if (task.recurrenceConfig === null) return false;
 
-      const oldRuleId = task.recurrenceRuleId;
-
-      task.recurrenceRuleId = null;
-      await this.recurrenceRuleService.remove(oldRuleId);
+      task.recurrenceConfig = null;
 
       return true;
     }
 
-    if (task.recurrenceRuleId !== null) {
-      await this.recurrenceRuleService.update(
-        task.recurrenceRuleId,
-        input.recurrence,
-      );
-
-      return false;
-    }
-
-    const rule = await this.recurrenceRuleService.create(input.recurrence);
-
-    task.recurrenceRuleId = rule.id;
+    task.recurrenceConfig = RecurrenceRuleService.toConfig(input.recurrence);
 
     return true;
   }
@@ -1373,34 +1382,26 @@ export class TaskService {
   /**
    * Asserts that `originalStart` is a real occurrence the series actually
    * generates, by expanding a tight 1ms-bracketed window around it via the
-   * recurrence engine and matching the generated `originalStart`. Loads the rule
-   * through the `recurrenceRule` relation; throws when the rule is missing or no
-   * occurrence lands on the coordinate ("not an occurrence of this series"),
-   * preventing a phantom inert exception row. The window is deliberately bounded
-   * to a single instant so expansion stays cheap.
+   * recurrence engine and matching the generated `originalStart`. Reads the inline
+   * `recurrenceConfig` straight off the passed task (already loaded by the caller);
+   * throws when no config is set or no occurrence lands on the coordinate ("not an
+   * occurrence of this series"), preventing a phantom inert exception row. The
+   * window is deliberately bounded to a single instant so expansion stays cheap.
    */
-  private async ensureGeneratedOccurrence(
-    task: Task,
-    originalStart: Date,
-  ): Promise<void> {
-    const anchor = await this.taskDatabaseService.findOne({
-      where: { id: task.id },
-      relations: { recurrenceRule: true },
-    });
-
-    if (!anchor || !anchor.recurrenceRule) {
+  private ensureGeneratedOccurrence(task: Task, originalStart: Date): void {
+    if (!task.recurrenceConfig) {
       throw new BadRequestException(
         'originalStart is not an occurrence of this series',
       );
     }
 
-    // Membership is a property of the rule, not of current overrides — expand
+    // Membership is a property of the config, not of current overrides — expand
     // with NO exceptions so a pre-existing skip/override on this coordinate does
     // not hide the (otherwise valid) occurrence from the match.
     const originalStartMillis = originalStart.getTime();
     const occurrences = this.recurrenceRuleService.expandOccurrences(
-      anchor,
-      anchor.recurrenceRule,
+      task,
+      task.recurrenceConfig,
       [],
       new Date(originalStartMillis - 1),
       new Date(originalStartMillis + 1),
@@ -1466,49 +1467,49 @@ export class TaskService {
   }
 
   /**
-   * Builds the recurrence DTO for the new (post-split) series: the old rule
-   * cloned, then any `changes.recurrence` overlaid. For a `COUNT` old rule with
-   * no explicit `count` override, the new side's `count` is recomputed so the
+   * Builds the inline recurrence config for the new (post-split) series: the old
+   * config cloned, then any `changes.recurrence` overlaid. For a `COUNT` old config
+   * with no explicit `count` override, the new side's `count` is recomputed so the
    * combined old + new total equals the ORIGINAL count exactly — see
-   * `countOccurrencesBefore`. `UNTIL_DATE` / `NEVER` rules need no recount.
+   * `countOccurrencesBefore`. `UNTIL_DATE` / `NEVER` configs need no recount.
    */
   private resolveSplitRecurrence(
     task: Task,
-    oldRule: RecurrenceRule,
+    oldConfig: RecurrenceConfig,
     originalStart: Date,
     overrides?: CreateRecurrenceRuleDto,
-  ): CreateRecurrenceRuleDto {
-    const cloned = this.cloneRuleAsCreateDto(oldRule, overrides);
+  ): RecurrenceConfig {
+    const cloned = this.cloneConfigWithOverrides(oldConfig, overrides);
 
     const isCountRule =
-      oldRule.endType === RecurrenceEndType.COUNT && oldRule.count !== null;
+      oldConfig.endType === RecurrenceEndType.COUNT && oldConfig.count !== null;
     const overridesCount = overrides?.count !== undefined;
 
     if (!isCountRule || overridesCount) return cloned;
 
     const occurrencesBefore = this.countOccurrencesBefore(
       task,
-      oldRule,
+      oldConfig,
       originalStart,
     );
 
     return {
       ...cloned,
-      count: Math.max(0, (oldRule.count as number) - occurrencesBefore),
+      count: Math.max(0, (oldConfig.count as number) - occurrencesBefore),
     };
   }
 
   /**
-   * Counts how many occurrences the ORIGINAL rule generates in the half-open
+   * Counts how many occurrences the ORIGINAL config generates in the half-open
    * window `[seriesStart, originalStart)` — i.e. strictly before the split
    * boundary. Expansion runs with NO exceptions (membership is a property of the
-   * rule, not of overrides) over a window that starts 1ms before the anchor so
+   * config, not of overrides) over a window that starts 1ms before the anchor so
    * the very first occurrence is never dropped by the intersection clip. Used to
    * recompute the new side's `count` on a COUNT split.
    */
   private countOccurrencesBefore(
     task: Task,
-    oldRule: RecurrenceRule,
+    oldConfig: RecurrenceConfig,
     originalStart: Date,
   ): number {
     if (!task.startAt) return 0;
@@ -1517,7 +1518,7 @@ export class TaskService {
 
     return this.recurrenceRuleService.expandOccurrences(
       task,
-      oldRule,
+      oldConfig,
       [],
       windowFrom,
       originalStart,
@@ -1525,25 +1526,37 @@ export class TaskService {
   }
 
   /**
-   * Builds a `CreateRecurrenceRuleDto` from an existing rule, then overlays any
-   * provided recurrence changes (used to clone the old rule for the new series).
+   * Clones an existing inline config, then overlays ONLY the recurrence DTO fields
+   * the caller actually provided (used to build the new series' config on a split).
+   * Each absent DTO key leaves the old config's value intact — mirroring the prior
+   * `{ ...base, ...changes }` clone — so a partial `changes.recurrence` (e.g. just
+   * `frequency`) never resets the unmentioned axes to their defaults. Provided
+   * optional axes (`byWeekday`/`byMonthDay`/`byMonth`/`endDate`/`count`) collapse a
+   * value to null when the DTO carried it as such; an omitted key is untouched.
    */
-  private cloneRuleAsCreateDto(
-    rule: RecurrenceRule,
+  private cloneConfigWithOverrides(
+    config: RecurrenceConfig,
     changes?: CreateRecurrenceRuleDto,
-  ): CreateRecurrenceRuleDto {
-    const base: CreateRecurrenceRuleDto = {
-      frequency: rule.frequency,
-      interval: rule.interval,
-      byWeekday: rule.byWeekday ?? undefined,
-      byMonthDay: rule.byMonthDay ?? undefined,
-      byMonth: rule.byMonth ?? undefined,
-      endType: rule.endType,
-      endDate: rule.endDate ?? undefined,
-      count: rule.count ?? undefined,
-    };
+  ): RecurrenceConfig {
+    if (!changes) return { ...config };
 
-    return { ...base, ...(changes ?? {}) };
+    return {
+      ...config,
+      ...(changes.frequency !== undefined
+        ? { frequency: changes.frequency }
+        : {}),
+      ...(changes.interval !== undefined ? { interval: changes.interval } : {}),
+      ...(changes.byWeekday !== undefined
+        ? { byWeekday: changes.byWeekday }
+        : {}),
+      ...(changes.byMonthDay !== undefined
+        ? { byMonthDay: changes.byMonthDay }
+        : {}),
+      ...(changes.byMonth !== undefined ? { byMonth: changes.byMonth } : {}),
+      ...(changes.endType !== undefined ? { endType: changes.endType } : {}),
+      ...(changes.endDate !== undefined ? { endDate: changes.endDate } : {}),
+      ...(changes.count !== undefined ? { count: changes.count } : {}),
+    };
   }
 
   /**

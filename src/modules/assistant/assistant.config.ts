@@ -82,23 +82,13 @@ export class AssistantConfig {
   }
 
   /**
-   * Trailing-dot tick interval (ms) for the live status animation (Story 12, ADR
-   * 0012): how often the animated draft swaps `.` → `..` → `...`. Kept ≤ the
-   * draft-throttle window so every tick fits under the central ~2–5/s cap.
+   * Tick interval (ms) for the status-surface ASCII spinner (R1 / ADR 0057): how
+   * often the braille frame advances on the one live status message. Kept ~1000
+   * (never sub-second) so the repeated `editMessageText` calls stay clear of
+   * Telegram flood-control (429).
    */
-  get statusDotIntervalMs(): number {
-    return this.configService.get('ASSISTANT_STATUS_DOT_INTERVAL_MS', {
-      infer: true,
-    });
-  }
-
-  /**
-   * Loading-word swap interval (ms) for the live status animation (Story 12, ADR
-   * 0012): how often the evocative word changes (Appendix A vocab, no immediate
-   * repeat). The 5 s default is far under the throttle cap.
-   */
-  get statusWordIntervalMs(): number {
-    return this.configService.get('ASSISTANT_STATUS_WORD_INTERVAL_MS', {
+  get statusSpinnerIntervalMs(): number {
+    return this.configService.get('ASSISTANT_STATUS_SPINNER_INTERVAL_MS', {
       infer: true,
     });
   }
@@ -162,6 +152,22 @@ export class AssistantConfig {
     return this.configService.get('ASSISTANT_LAST_BUTTON_TTL_SECONDS', {
       infer: true,
     });
+  }
+
+  /**
+   * TTL (seconds) for the last-message-language tracker (R2 / ADR 0055): how long
+   * the per-user last resolved loading-status locale stays in Redis to be borrowed
+   * by the next turn's voice pre-STT "Listening…" line. Sticky (overwritten on each
+   * known-language turn, never read-cleared), so this is only a self-cleaning
+   * backstop for a user who goes quiet — kept long (~7 days).
+   */
+  get lastMessageLanguageTtlSeconds(): number {
+    return this.configService.get(
+      'ASSISTANT_LAST_MESSAGE_LANGUAGE_TTL_SECONDS',
+      {
+        infer: true,
+      },
+    );
   }
 
   /** TTL (seconds) for a single-use link nonce. */

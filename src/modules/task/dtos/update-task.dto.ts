@@ -8,9 +8,11 @@ import {
   IsUUID,
   MaxLength,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
+import { IsTaskColor } from './is-task-color.validator';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 
 /**
@@ -54,10 +56,18 @@ export class UpdateTaskDto {
   @IsBoolean()
   isAllDay?: boolean;
 
-  @ApiPropertyOptional()
+  /** Boolean to set the task's own value; null to clear it (then inherit). */
+  @ApiPropertyOptional({ nullable: true })
   @IsOptional()
   @IsBoolean()
-  requiresCompletion?: boolean;
+  requiresCompletion?: boolean | null;
+
+  /** Preset name / `#RRGGBB` hex to set; null to clear (then inherit). */
+  @ApiPropertyOptional({ nullable: true, example: 'BLUE' })
+  @IsOptional()
+  @ValidateIf((dto: UpdateTaskDto) => dto.color !== null)
+  @IsTaskColor()
+  color?: string | null;
 
   /** Set to a UUID to assign to a group; null to ungroup. */
   @ApiPropertyOptional({

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
+  isValidTaskColor,
 } from '@/modules/database/entities';
 
 /**
@@ -22,7 +23,30 @@ export const ToolName = {
   CREATE_GROUP: 'create_group',
   CHECK_AVAILABILITY: 'check_availability',
   ASK_USER: 'ask_user',
+  UPDATE_GROUP: 'update_group',
 } as const;
+
+/**
+ * Shared model-facing description of a task/group color, single-sourced for both
+ * the Zod validators' `.describe(...)` and the hand-written JSON schema.
+ */
+const COLOR_DESCRIPTION =
+  'Color: a preset name (RED, ORANGE, YELLOW, GREEN, TEAL, BLUE, INDIGO, PURPLE, PINK, BROWN, GRAY) or a custom #RRGGBB hex.';
+
+/**
+ * Zod validator for a task/group color: a known {@link TaskColor} preset name OR
+ * a `#RRGGBB` hex. Reuses the single-sourced {@link isValidTaskColor} predicate so
+ * the tool boundary accepts exactly the same shape as the REST DTOs. The
+ * dispatcher turns a failure here into a recoverable tool result the model can
+ * correct.
+ */
+export const colorInputSchema = z
+  .string()
+  .refine((value) => isValidTaskColor(value), {
+    message:
+      'color must be a known preset name (e.g. BLUE) or a #RRGGBB hex value.',
+  })
+  .describe(COLOR_DESCRIPTION);
 
 /** Union of the tool name literals. */
 export type ToolNameValue = (typeof ToolName)[keyof typeof ToolName];
@@ -177,6 +201,7 @@ export const createTaskInputSchema = z.object({
     .boolean()
     .optional()
     .describe('Whether the task must be completed (todos default true).'),
+  color: colorInputSchema.optional(),
   timezone: z
     .string()
     .optional()
@@ -231,7 +256,23 @@ export const updateTaskInputSchema = z.object({
     .optional()
     .describe('New ISO 8601 end datetime, or null to clear it.'),
   group: z.string().optional().describe('New group name.'),
-  recurrence: recurrenceInputSchema.optional(),
+  recurrence: recurrenceInputSchema
+    .nullable()
+    .optional()
+    .describe(
+      'New recurrence rule, or null to stop the task repeating (remove recurrence).',
+    ),
+  requiresCompletion: z
+    .boolean()
+    .nullable()
+    .optional()
+    .describe(
+      'Set whether the task must be completed, or null to clear and inherit the group default.',
+    ),
+  color: colorInputSchema
+    .nullable()
+    .optional()
+    .describe(`${COLOR_DESCRIPTION} Pass null to clear and inherit the group.`),
   editScope: editScopeSchema.optional().describe(EDIT_SCOPE_DESCRIPTION),
   confirmOverlap: z
     .boolean()
@@ -283,8 +324,52 @@ export const listGroupsInputSchema = z.object({});
 /** Zod schema validating `create_group` input. */
 export const createGroupInputSchema = z.object({
   name: z.string().min(1).describe('Group name.'),
-  color: z.string().optional().describe('Optional color.'),
+  color: colorInputSchema.optional(),
   icon: z.string().optional().describe('Optional icon.'),
+  recurrence: recurrenceInputSchema
+    .optional()
+    .describe(
+      'Default recurrence rule inherited by tasks in this group that have none of their own.',
+    ),
+  requiresCompletion: z
+    .boolean()
+    .optional()
+    .describe(
+      'Default completion requirement inherited by tasks in this group.',
+    ),
+});
+
+/** Zod schema validating `update_group` input. */
+export const updateGroupInputSchema = z.object({
+  group: z
+    .string()
+    .min(1)
+    .describe(
+      'Existing group name to update (resolve via list_groups first if unsure).',
+    ),
+  name: z.string().min(1).optional().describe('New group name (a rename).'),
+  color: colorInputSchema
+    .nullable()
+    .optional()
+    .describe(`${COLOR_DESCRIPTION} Pass null to clear the group default.`),
+  icon: z
+    .string()
+    .nullable()
+    .optional()
+    .describe('New icon, or null to clear it.'),
+  recurrence: recurrenceInputSchema
+    .nullable()
+    .optional()
+    .describe(
+      'New default recurrence rule for the group, or null to remove it.',
+    ),
+  requiresCompletion: z
+    .boolean()
+    .nullable()
+    .optional()
+    .describe(
+      'Set the group default completion requirement, or null to clear it.',
+    ),
 });
 
 /**

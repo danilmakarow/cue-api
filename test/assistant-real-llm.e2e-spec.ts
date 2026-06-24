@@ -49,7 +49,7 @@ describeRealLlm('Assistant pipeline (real Anthropic smoke)', () => {
     await harness.reset();
   });
 
-  /** Reads the text off a captured `sendMessage`. */
+  /** Reads the text off a captured reply (the morph `editMessageText`, ADR 0053). */
   const replyTextOf = (send: CapturedSend): string =>
     (send.payload as { text: string }).text;
 
@@ -63,11 +63,13 @@ describeRealLlm('Assistant pipeline (real Anthropic smoke)', () => {
         ),
       );
 
-      // Drain captured sends until the terminal text reply (the model may emit
-      // intermediate sends; the final sendMessage is the confirmation).
+      // Drain captured sends until the terminal text reply. Under ADR 0053 the
+      // confirmation MORPHS the loading line via editMessageText, so the terminal
+      // signal is the substantive editMessageText (the harness already filters
+      // out framing sends; nextSend only resolves on a substantive reply).
       let reply = await harness.vendor.nextSend();
 
-      while (reply.method !== 'sendMessage') {
+      while (reply.method !== 'editMessageText') {
         reply = await harness.vendor.nextSend();
       }
 
@@ -108,7 +110,7 @@ describeRealLlm('Assistant pipeline (real Anthropic smoke)', () => {
 
       let reply = await harness.vendor.nextSend();
 
-      while (reply.method !== 'sendMessage') {
+      while (reply.method !== 'editMessageText') {
         reply = await harness.vendor.nextSend();
       }
 

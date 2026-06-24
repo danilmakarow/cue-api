@@ -19,6 +19,25 @@ export type StatusLocale = 'en' | 'uk' | 'ru';
 export const DEFAULT_STATUS_LOCALE: StatusLocale = 'en';
 
 /**
+ * The terminal-style braille spinner frames (R1 / ADR 0057) cycled on the status
+ * surface to animate the loading line in place. The classic 10-frame set; index
+ * `frame mod 10` selects the current glyph. Authored here (next to the loading
+ * vocabulary) so the rendering helper stays pure and dependency-free.
+ */
+export const SPINNER_FRAMES = [
+  '⠋',
+  '⠙',
+  '⠹',
+  '⠸',
+  '⠼',
+  '⠴',
+  '⠦',
+  '⠧',
+  '⠇',
+  '⠏',
+] as const;
+
+/**
  * The localized "voice is being transcribed" line, shown on the status surface
  * while STT runs (before the normal loading animation begins).
  */
@@ -168,28 +187,37 @@ const mapCodeToLocale = (
 
 /**
  * Resolves a Telegram `language_code` (e.g. `en-US`, `uk`, `ru`) to one of the
- * three authored {@link StatusLocale}s. Matches on the primary subtag only and
- * falls back to {@link DEFAULT_STATUS_LOCALE} for anything unrecognized/absent.
- * The legacy `language_code`-only entry point — still the VOICE pre-STT resolver
- * (no text exists yet) and the fallback link of the text/voice-post-STT chains.
+ * three authored {@link StatusLocale}s. Matches on the primary subtag only; when
+ * the code is unrecognized/absent it falls back to the optional `fallbackLocale`
+ * — the prior turn's language borrowed for the VOICE pre-STT "Listening…" line,
+ * which has no text to detect yet (R2 / ADR 0055) — and finally to
+ * {@link DEFAULT_STATUS_LOCALE}. Still the fallback link of the
+ * text/voice-post-STT chains.
  */
 export const resolveStatusLocale = (
   languageCode: string | undefined,
-): StatusLocale => mapCodeToLocale(languageCode) ?? DEFAULT_STATUS_LOCALE;
+  fallbackLocale?: StatusLocale,
+): StatusLocale =>
+  mapCodeToLocale(languageCode) ?? fallbackLocale ?? DEFAULT_STATUS_LOCALE;
 
 /**
  * Resolves the loading-status locale for a TEXT turn (v2 Task 4 / ADR 0051), in
  * priority order: (1) the message's OWN detected language when conclusive — this
  * is what makes a Russian message show Russian loading words even under an English
  * `language_code` (the bug ADR 0051 fixes); (2) else the Telegram `language_code`
- * when it maps to a supported locale; (3) else `en`. `detect` is injected (the
- * vendored {@link detectMessageLanguage}) so the chain stays pure + unit-testable
- * with a stub and status-phrases keeps no hard import of the detector.
+ * when it maps to a supported locale; (3) else the optional `fallbackLocale` — the
+ * language the user wrote in on a PRIOR turn (R2 / ADR 0055), borrowed so a
+ * signal-poor message keeps the conversation's language instead of snapping to
+ * `en`; (4) else `en`. `detect` is injected (the vendored
+ * {@link detectMessageLanguage}) so the chain stays pure + unit-testable with a
+ * stub and status-phrases keeps no hard import of the detector. `fallbackLocale`
+ * is passed in (never imported from the store) so the chain stays pure.
  */
 export const resolveTextStatusLocale = (
   messageText: string | undefined,
   languageCode: string | undefined,
   detect: (text: string | undefined) => StatusLocale | null,
+  fallbackLocale?: StatusLocale,
 ): StatusLocale => {
   const detected = detect(messageText);
 
@@ -197,25 +225,31 @@ export const resolveTextStatusLocale = (
     return detected;
   }
 
-  return mapCodeToLocale(languageCode) ?? DEFAULT_STATUS_LOCALE;
+  return (
+    mapCodeToLocale(languageCode) ?? fallbackLocale ?? DEFAULT_STATUS_LOCALE
+  );
 };
 
 /**
  * Resolves the loading-status locale for a voice turn AFTER STT (v2 Task 4 / ADR
  * 0051), in priority order: (1) the STT-reported spoken language when it maps to a
  * supported locale; (2) else the language detected from the TRANSCRIPT when
- * conclusive; (3) else the Telegram `language_code` when supported; (4) else `en`.
- * This re-resolves the SAME idempotent status surface once the words are known, so
- * the ongoing loading animation switches to the spoken language. `detect` is
- * injected (the vendored {@link detectMessageLanguage}); the pre-STT "Listening…"
- * line still uses {@link resolveStatusLocale} on the `language_code` alone (no text
- * exists yet).
+ * conclusive; (3) else the Telegram `language_code` when supported; (4) else the
+ * optional `fallbackLocale` — the prior turn's language borrowed for a signal-poor
+ * turn (R2 / ADR 0055); (5) else `en`. This re-resolves the SAME idempotent status
+ * surface once the words are known, so the ongoing loading animation switches to
+ * the spoken language. `detect` is injected (the vendored
+ * {@link detectMessageLanguage}); the pre-STT "Listening…" line uses
+ * {@link resolveStatusLocale} on the `language_code` alone (no text exists yet),
+ * now with its OWN borrowed fallback (R2). `fallbackLocale` is passed in (never
+ * imported from the store) so the chain stays pure.
  */
 export const resolveVoiceStatusLocale = (
   sttLanguage: string | undefined,
   transcript: string | undefined,
   languageCode: string | undefined,
   detect: (text: string | undefined) => StatusLocale | null,
+  fallbackLocale?: StatusLocale,
 ): StatusLocale => {
   const fromStt = mapCodeToLocale(sttLanguage);
 
@@ -229,7 +263,9 @@ export const resolveVoiceStatusLocale = (
     return fromTranscript;
   }
 
-  return mapCodeToLocale(languageCode) ?? DEFAULT_STATUS_LOCALE;
+  return (
+    mapCodeToLocale(languageCode) ?? fallbackLocale ?? DEFAULT_STATUS_LOCALE
+  );
 };
 
 /**
@@ -262,4 +298,23 @@ export const nextLoadingWord = (
   const index = Math.min(pool.length - 1, Math.floor(random() * pool.length));
 
   return pool[index];
+};
+
+/**
+ * Builds the animated loading line for a given spinner tick (R1 / ADR 0057):
+ * prepends the current {@link SPINNER_FRAMES} glyph to the (already-localized)
+ * loading `word`. Pure + dependency-free like {@link nextLoadingWord} so the
+ * frame cadence is unit-testable; the caller animates ONE captured word across
+ * ticks rather than re-picking. NO trailing ellipsis — the rotating spinner
+ * frame replaces the old static dots, which fought Telegram's own indicator.
+ * `frameIndex` is wrapped modulo the frame count, so any monotonically growing
+ * tick counter is a valid input.
+ */
+export const spinnerLoadingLine = (
+  word: string,
+  frameIndex: number,
+): string => {
+  const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
+
+  return `${frame} ${word}`;
 };

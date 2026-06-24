@@ -1,8 +1,10 @@
 import { ExternalVendorConfig } from '@/modules/external-vendor/external-vendor.config';
 import {
   AcknowledgeOptions,
+  EditMessage,
   MessageDraft,
   OutboundActions,
+  OutboundFormat,
   OutboundKeyboardMessage,
   OutboundMessage,
   SendTarget,
@@ -16,6 +18,8 @@ export type CapturedSendMethod =
   | 'sendActions'
   | 'sendMessageWithKeyboard'
   | 'sendMessageDraft'
+  | 'editMessageText'
+  | 'deleteMessage'
   | 'acknowledgeCallback';
 
 /** One recorded outbound vendor call (the deterministic terminal turn signal). */
@@ -27,6 +31,7 @@ export interface CapturedSend {
     | OutboundActions
     | OutboundKeyboardMessage
     | MessageDraft
+    | EditMessage
     | AcknowledgeOptions
     | null;
 }
@@ -55,17 +60,23 @@ const createDeferred = (): Deferred => {
  * Ingress stays REAL: it inherits `acceptWebhook` (the constant-time secret
  * check) and `handleWebhook` (the Telegram → normalized-message parse) from the
  * base connector, so the controller's auth and the consumer's normalization run
- * exactly as in prod. Only the OUTBOUND side is replaced — `sendMessage` /
- * `sendActions` / `acknowledgeCallback` record the call into a `captured` log
- * and resolve the outstanding {@link nextSend} promise instead of hitting the
- * Telegram API. Because both `ExternalVendorConnectorFactory` (via its injected
+ * exactly as in prod. Only the OUTBOUND side is replaced — every send method
+ * records the call into a `captured` log instead of hitting the Telegram API.
+ * Because both `ExternalVendorConnectorFactory` (via its injected
  * `TelegramVendorConnector`) and the `ACTIVE_VENDOR_CONNECTOR` factory resolve
  * to the single `TelegramVendorConnector` provider, overriding that one provider
  * with this value points every ingress and egress path at this instance.
  *
- * `sendMessage` / `sendActions` are the deterministic terminal signal of a
- * finished turn (every reply / hold path ends in one), so a test awaits
- * {@link nextSend} to know the in-process worker has produced its reply.
+ * Terminal-signal rule (ADR 0053 "morph"): a turn no longer ends in a fresh
+ * `sendMessage`. It posts ONE real status message (`sendMessage`, the loading
+ * line), edits it with PLAIN per-round recaps (`editMessageText`, no format),
+ * then MORPHS it ONE last time into the answer / ask via `editMessageText`
+ * carrying `format === Html` or `buttons`. So a `nextSend()` waiter resolves
+ * ONLY on a SUBSTANTIVE reply: `sendActions`, `sendMessageWithKeyboard`,
+ * `acknowledgeCallback`, or an `editMessageText` with `format === Html` or
+ * `buttons`. A bare `sendMessage` (loading line), a PLAIN `editMessageText`
+ * (recap / voice line), a `sendMessageDraft`, and a `deleteMessage` (fallback
+ * cleanup) are all RECORDED for inspection but do NOT resolve `nextSend()`.
  */
 export class CapturingVendorConnector extends TelegramVendorConnector {
   private readonly captured: CapturedSend[] = [];
@@ -86,6 +97,18 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
    */
   private vendorMessageIdCounter = 900_000_000;
 
+  /**
+   * Whether a piece of outbound text is a single top-level `<pre>…</pre>` status
+   * frame (R1 / ADR 0057) — the signature the status surface (`toPreBlock`) wraps
+   * the loading line / per-round recap / voice line in. The final answer morph is
+   * HTML-CONVERTED markdown, which never wraps the WHOLE message in one `<pre>`
+   * block, so this cleanly separates framing status edits from the terminal reply.
+   * Tolerant of leading/trailing whitespace around the block.
+   */
+  private static isPreBlock(text: string): boolean {
+    return /^\s*<pre>[\s\S]*<\/pre>\s*$/.test(text);
+  }
+
   constructor(externalVendorConfig: ExternalVendorConfig) {
     super(externalVendorConfig);
   }
@@ -102,9 +125,9 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
-   * Records an outbound send and either hands it to a parked `nextSend()` waiter
-   * or buffers it for the next `nextSend()` call (so a send that arrives before
-   * the test awaits is never lost).
+   * Records a SUBSTANTIVE (turn-terminal) outbound send and either hands it to a
+   * parked `nextSend()` waiter or buffers it for the next `nextSend()` call (so a
+   * send that arrives before the test awaits is never lost).
    */
   private record(send: CapturedSend): void {
     this.captured.push(send);
@@ -119,6 +142,16 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
     }
 
     this.pending.push(send);
+  }
+
+  /**
+   * Records a NON-terminal framing send (the loading-line `sendMessage`, a plain
+   * recap / voice `editMessageText`, a draft, or a fallback `deleteMessage`) into
+   * `captured` for inspection ONLY — it never resolves a `nextSend()` waiter,
+   * because the substantive reply now arrives as a later morph `editMessageText`.
+   */
+  private recordFraming(send: CapturedSend): void {
+    this.captured.push(send);
   }
 
   /**
@@ -157,16 +190,75 @@ export class CapturingVendorConnector extends TelegramVendorConnector {
   }
 
   /**
-   * Captures a text reply instead of calling Telegram. Returns a synthetic
-   * message ref so the orchestrator's persistence path runs unchanged.
+   * Captures a `sendMessage` instead of calling Telegram. Under ADR 0053 this is
+   * the NON-terminal per-turn status loading line (e.g. `Crunching…`) whose id is
+   * captured so later recaps + the final answer can morph it via
+   * `editMessageText`; it is therefore framing, NOT a terminal turn signal, so it
+   * is recorded but does NOT resolve a `nextSend()` waiter. (The rare genuine
+   * fallback `sendMessage` — when an edit throws — is likewise non-terminal; its
+   * paired morph still arrives as the substantive `editMessageText`.) Returns a
+   * synthetic numeric message ref so the orchestrator's persistence path runs
+   * unchanged.
    */
   async sendMessage(
     target: SendTarget,
     message: OutboundMessage,
   ): Promise<VendorMessageRef> {
-    this.record({ method: 'sendMessage', target, payload: message });
+    this.recordFraming({ method: 'sendMessage', target, payload: message });
 
     return { vendorMessageId: this.nextVendorMessageId() };
+  }
+
+  /**
+   * Captures an `editMessageText` instead of calling Telegram. The morph surface
+   * (ADR 0053 + 0057): the live STATUS frames (the loading line, the per-round
+   * recap, the voice-listening line) are now ALL rendered as an HTML `<pre>…</pre>`
+   * code block (R1 / ADR 0057), so the old "framing == no format" heuristic no
+   * longer holds — a recap arrives as `format === Html`. The deterministic
+   * SUBSTANTIVE signal is therefore narrowed: a `<pre>…</pre>` status frame is
+   * FRAMING (recorded only), while a real reply — the final answer morph
+   * (`format === Html`, the model's HTML-converted text, never a bare `<pre>`
+   * wrapper), an `ask_user` morph (`buttons`), or the answered-question morph
+   * (`clearButtons`) — is the terminal turn signal that resolves a `nextSend()`
+   * waiter. A streamed partial-answer frame (HTML, NOT `<pre>`-wrapped) is the
+   * answer-in-progress, so treating it as substantive is correct (the final morph
+   * carries the same text). Returns nothing, matching the real connector.
+   */
+  async editMessageText(target: SendTarget, edit: EditMessage): Promise<void> {
+    const isStatusFrame =
+      edit.format === OutboundFormat.Html &&
+      CapturingVendorConnector.isPreBlock(edit.text);
+    const isSubstantive =
+      !isStatusFrame &&
+      (edit.format === OutboundFormat.Html ||
+        edit.buttons !== undefined ||
+        edit.clearButtons === true);
+    const send: CapturedSend = {
+      method: 'editMessageText',
+      target,
+      payload: edit,
+    };
+
+    if (isSubstantive) {
+      this.record(send);
+
+      return;
+    }
+
+    this.recordFraming(send);
+  }
+
+  /**
+   * Captures a `deleteMessage` instead of calling Telegram — the fallback path
+   * that tidies the stale loading line when an edit throws and a fresh
+   * `sendMessage`/`sendActions` is posted instead. Framing only: recorded for
+   * inspection, never a terminal turn signal. Returns nothing.
+   */
+  async deleteMessage(
+    target: SendTarget,
+    _vendorMessageId: string,
+  ): Promise<void> {
+    this.recordFraming({ method: 'deleteMessage', target, payload: null });
   }
 
   /**

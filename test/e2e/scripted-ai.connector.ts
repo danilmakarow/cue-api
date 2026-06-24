@@ -187,23 +187,30 @@ export class ScriptedAiConnector extends AiConnector {
   }
 
   /**
-   * Streaming variant used on the loop's final/answer round (Story 13). Consumes
-   * the SAME scripted queue as {@link complete}, emits the result's text to
-   * `onText` as a single delta (so an e2e assertion on streamed traffic sees it),
-   * and returns the identical result — preserving the never-throw contract by
-   * delegating the exhausted-script throw to `complete`'s deterministic failure.
+   * Streaming variant the loop drives every round (Story 13 / ADR 0058). It
+   * consumes the SAME scripted queue as {@link complete} and returns the identical
+   * result, so the streaming WIRING (the loop calling `completeStream`, the turn
+   * runner handing it a stream sink) is exercised end to end — but it deliberately
+   * emits NO `onText` deltas.
+   *
+   * Why no deltas: a streamed partial-answer frame morphs the one live status
+   * message via `editMessageText(format: Html)` — structurally identical at the
+   * vendor boundary to the L9 final-answer morph (ADR 0053). Emitting a delta per
+   * round would therefore surface an intermediate round's text (e.g. a narration
+   * round that is about to be re-driven) as a SUBSTANTIVE `nextSend()` signal,
+   * collapsing the deterministic "one terminal reply per turn" contract the e2e
+   * suite asserts on. Real streamed deltas are inherently nondeterministic and are
+   * covered by the opt-in real-LLM smoke (E2E_LLM=real); the deterministic suite
+   * asserts streaming WIRING via the loader + per-round recap frames that precede
+   * the morph instead. `onText` is referenced (no-op) to keep the signature exact.
    */
   async completeStream(
     request: CompletionRequest,
     onText: StreamTextHandler,
   ): Promise<CompletionResult> {
-    const result = await this.complete(request);
+    void onText;
 
-    if (result.text && result.text.length > 0) {
-      onText(result.text, result.text);
-    }
-
-    return result;
+    return this.complete(request);
   }
 
   /**

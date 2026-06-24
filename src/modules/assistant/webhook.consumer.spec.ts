@@ -144,6 +144,12 @@ const buildConsumer = (
   const statusAnimator = {
     begin: jest.fn().mockResolvedValue(statusAnimation),
   };
+  // R2 (ADR 0055): the consumer peeks the last-message language for the pre-STT
+  // "Listening…" line. Degrade-never-throw, so a null peek is the inert default.
+  const lastMessageLanguageStore = {
+    peek: jest.fn().mockResolvedValue(null),
+    record: jest.fn(),
+  };
 
   const consumer = new WebhookConsumer(
     redis as never,
@@ -158,6 +164,7 @@ const buildConsumer = (
     activeKeyboardStore as never,
     debounceCoordinator,
     statusAnimator as never,
+    lastMessageLanguageStore as never,
     config,
   );
 
@@ -175,6 +182,7 @@ const buildConsumer = (
     telegramLinkDatabaseService,
     statusAnimator,
     statusAnimation,
+    lastMessageLanguageStore,
   };
 };
 

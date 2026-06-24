@@ -12,16 +12,17 @@ import { findFreeSlotsTool } from './definitions/find-free-slots.tool';
 import { listGroupsTool } from './definitions/list-groups.tool';
 import { listTasksTool } from './definitions/list-tasks.tool';
 import { setReminderTool } from './definitions/set-reminder.tool';
+import { updateGroupTool } from './definitions/update-group.tool';
 import { updateTaskTool } from './definitions/update-task.tool';
 import { Tool, ToolHandlerHost, zodToJsonSchema } from './tool.contract';
 import { ToolCall, ToolSchema } from '@/modules/ai/ai.types';
 
 /**
- * The 12 tools in their STABLE, append-only registration order (ADR 0004): the
- * original nine, then `create_tasks`, `check_availability`, and `ask_user`
- * appended LAST so the derived schema array stays byte-order-stable and the
- * cached tool-defs prefix never shifts. New tools are ONLY ever appended, never
- * reordered.
+ * The 13 tools in their STABLE, append-only registration order (ADR 0004): the
+ * original nine, then `create_tasks`, `check_availability`, `ask_user`, and
+ * `update_group` appended LAST so the derived schema array stays byte-order-stable
+ * and the cached tool-defs prefix never shifts. New tools are ONLY ever appended,
+ * never reordered.
  */
 const REGISTERED_TOOLS: readonly Tool[] = [
   listTasksTool,
@@ -40,6 +41,8 @@ const REGISTERED_TOOLS: readonly Tool[] = [
   // `ask_user` (ADR 0010) appended after the read/write tools — it is the
   // suspend/resume clarifying-question tool, neither a write nor a fetch.
   askUserTool,
+  // `update_group` (FEATURE R5) appended last — a group-mutation write.
+  updateGroupTool,
 ] as const;
 
 /**

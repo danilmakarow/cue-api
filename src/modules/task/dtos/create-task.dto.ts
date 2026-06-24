@@ -11,6 +11,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+import { IsTaskColor } from './is-task-color.validator';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 
 /**
@@ -18,9 +19,9 @@ import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
  * Date fields arrive as ISO 8601 strings and are coerced to `Date` in the service layer.
  *
  * A task may be a timed event, an all-day event, or a todo (no `startAt`/`endAt`).
- * When `recurrence` is present the service creates one `RecurrenceRule` and links
- * the single anchor row to it — never N materialized rows. `groupId`, when set,
- * must reference a `TaskGroup` in the same calendar.
+ * When `recurrence` is present the service stores it inline on the single anchor
+ * row as `recurrenceConfig` — never N materialized rows (ADR 0054). `groupId`,
+ * when set, must reference a `TaskGroup` in the same calendar.
  */
 export class CreateTaskDto {
   @ApiProperty({ format: 'uuid', description: 'Calendar that owns this task.' })
@@ -75,6 +76,15 @@ export class CreateTaskDto {
   @IsBoolean()
   requiresCompletion?: boolean;
 
+  /** Optional color: a preset name (e.g. BLUE) or a custom `#RRGGBB` hex. */
+  @ApiPropertyOptional({
+    example: 'BLUE',
+    description: 'Color preset name or a custom #RRGGBB hex.',
+  })
+  @IsOptional()
+  @IsTaskColor()
+  color?: string;
+
   /** Optional group this task belongs to; must live in the same calendar. */
   @ApiPropertyOptional({
     format: 'uuid',
@@ -84,7 +94,7 @@ export class CreateTaskDto {
   @IsUUID()
   groupId?: string;
 
-  /** When present, makes the task recurring via a single linked RecurrenceRule. */
+  /** When present, makes the task recurring via a single inline recurrenceConfig. */
   @ApiPropertyOptional({
     type: () => CreateRecurrenceRuleDto,
     description: 'When present, makes the task recurring.',

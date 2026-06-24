@@ -87,6 +87,11 @@ const buildHarness = () => {
     sendActions: jest.fn().mockResolvedValue({ vendorMessageId: 'm-actions' }),
     acknowledgeCallback: jest.fn().mockResolvedValue(undefined),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
+    // ADR 0053: the reply MORPHS the one live status message in place. With a real
+    // ReplyPresenter wrapped around this mock, finishTurn/suspendAndAsk passing
+    // status.messageId routes the answer through editMessageText (not a fresh
+    // sendMessage), so the mock must expose it.
+    editMessageText: jest.fn().mockResolvedValue(undefined),
   };
   const alert = { capture: jest.fn() };
   const redis = { set: jest.fn().mockResolvedValue('OK'), getdel: jest.fn() };
@@ -135,6 +140,9 @@ const buildHarness = () => {
       .mockResolvedValue({ id: 'pq-1', payload: { optionLabels: [] } }),
     claimById: jest.fn().mockResolvedValue(null),
     claimHotByUser: jest.fn().mockResolvedValue(null),
+    // R3 / ADR 0058: the suspend tail records the question message id onto the
+    // pending row. Inert spy so existing ask suites are unaffected.
+    attachQuestionMessageId: jest.fn().mockResolvedValue(undefined),
   };
   // Story 8 (L9 reply/egress): the turn runner no longer holds the vendor
   // connector — it delegates every send to the ReplyPresenter, the sole caller of
@@ -161,25 +169,45 @@ const buildHarness = () => {
   // observes the identical persistence / send / loop calls. (Story 15 / ADR 0011
   // removed the deterministic held-conflict hold — a conflict is now a recoverable
   // tool result the loop handles, so there is no conflict store/resolver here.)
-  // Story 12 (L9 live status): the runner opens a status animation per turn and
-  // finalizes it in a `finally`. We stub the animator with an inert handle whose
+  // Story 12 (L9 live status, ADR 0053): the runner opens a status animation per
+  // turn and finalizes it in a `finally`. The status surface is now ONE real
+  // message that morphs in place (no draft); the handle exposes its `messageId`
+  // so the runner can thread it through finishTurn/suspendAndAsk and the reply
+  // MORPHS that message into the final answer. We stub an inert handle whose
   // open/startLoading/finalize are no-ops so every existing assertion (which
-  // targets the reply/persistence seams, not the status surface) is unaffected;
-  // the status-surface behaviour is covered in status-animator.service.spec.ts.
+  // targets the reply/persistence seams) is unaffected; the surface behaviour
+  // itself is covered in status-animator.service.spec.ts.
   const statusAnimation = {
     open: jest.fn().mockResolvedValue(undefined),
     showVoiceListening: jest.fn().mockResolvedValue(undefined),
     startLoading: jest.fn().mockResolvedValue(undefined),
-    // Story 13 (ADR 0041, narrowed by ADR 0052): the runner wraps the animation
-    // as the loop's stream sink; showRecap is an inert no-op here so existing reply
-    // assertions are unaffected (surface behaviour is covered in
-    // status-animator.service.spec.ts). The answer is no longer streamed into the
-    // draft (ADR 0052), so there is no streamAnswer.
+    // Story 13 (ADR 0041): the runner wraps the animation as the loop's stream
+    // sink; showRecap is an inert no-op here so existing reply assertions are
+    // unaffected (surface behaviour is covered in status-animator.service.spec.ts).
     showRecap: jest.fn().mockResolvedValue(undefined),
+    // ADR 0053: the runner drains in-flight recap edits via settle() before the
+    // reply morph; inert no-op here.
+    settle: jest.fn().mockResolvedValue(undefined),
+    // R3 (ADR 0058): the runner wraps the animation's streamAnswer as the loop
+    // sink's onToken; inert spy so existing reply assertions are unaffected (the
+    // throttling/stop behaviour is covered in status-animator.service.spec.ts).
+    streamAnswer: jest.fn(),
     finalize: jest.fn().mockResolvedValue(undefined),
+    // ADR 0053: the real per-turn status message id. The runner reads this and
+    // passes it to the presenter so the answer edits (morphs) the same message.
+    messageId: 'status-msg-1',
   };
   const statusAnimator = {
     begin: jest.fn().mockResolvedValue(statusAnimation),
+  };
+  // R2 (ADR 0055): the runner records the turn's resolved locale (fire-and-forget)
+  // as the user's last-message language. An inert spy so existing assertions are
+  // unaffected; the tracker's own behaviour is covered in
+  // last-message-language.store.spec.ts. `peek` is present for completeness but the
+  // runner only ever records here (the consumer is the peek caller).
+  const lastMessageLanguageStore = {
+    record: jest.fn().mockResolvedValue(undefined),
+    peek: jest.fn().mockResolvedValue(null),
   };
 
   const service = new TurnRunnerService(
@@ -192,6 +220,7 @@ const buildHarness = () => {
     pendingInteraction as never,
     replyPresenter as never,
     statusAnimator as never,
+    lastMessageLanguageStore as never,
   );
 
   return {
@@ -211,6 +240,7 @@ const buildHarness = () => {
     statusAnimator,
     statusAnimation,
     roundRecap,
+    lastMessageLanguageStore,
   };
 };
 
@@ -264,13 +294,18 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       toolCallId: call.id,
       content: '09:00 Standup',
     });
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // ADR 0053: the answer morphs the live status message in place.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'You have one event.', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'You have one event.',
+        format: OutboundFormat.Html,
+      },
     );
   });
 
-  it('streams the final-round answer into the status draft through the sink, then finalizes with the real sendMessage (Story 13 / ADR 0041)', async () => {
+  it('morphs the live status message into the final-round answer (recaps drove the same message), then finalizes (ADR 0053)', async () => {
     const harness = buildHarness();
     const call = toolCall('list_tasks', {
       from: '2026-06-01T00:00:00Z',
@@ -302,29 +337,32 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     });
 
     // The loop drove the model via the STREAMING entry point on every round
-    // (kept for its never-throw resilience; the answer is no longer rendered into
-    // the draft — ADR 0052).
+    // (kept for its never-throw resilience).
     expect(harness.ai.completeStream).toHaveBeenCalledTimes(2);
 
-    // The answer is NOT streamed into the draft (ADR 0052) — it lands only as the
-    // real persisted reply (asserted below).
-
-    // The per-round recap (BACKGROUND model) was rendered into the draft.
+    // The per-round recap (BACKGROUND model) was rendered into the status message.
     expect(harness.roundRecap.recapRound).toHaveBeenCalledTimes(1);
     expect(harness.statusAnimation.showRecap).toHaveBeenCalledWith(
       'Checking today',
     );
 
-    // Finalize: the ephemeral draft is superseded by the real persisted reply.
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // ADR 0053: the final answer MORPHS the one live status message in place —
+    // finishTurn threaded status.messageId through the presenter, so the reply is
+    // an editMessageText against that id, NOT a fresh sendMessage.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'You have one event today.', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'You have one event today.',
+        format: OutboundFormat.Html,
+      },
     );
+    expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
     expect(
       assistantReplies(harness.conversationMessageDatabaseService),
     ).toEqual(['You have one event today.']);
 
-    // The status animation was finalized in the `finally` (no interval leak).
+    // The status animation was finalized in the `finally`.
     expect(harness.statusAnimation.finalize).toHaveBeenCalledTimes(1);
   });
 
@@ -457,9 +495,14 @@ describe('TurnRunnerService (turn lifecycle)', () => {
 
     expect(harness.ai.complete).toHaveBeenCalledTimes(1);
     expect(harness.toolDispatcher.dispatch).not.toHaveBeenCalled();
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // ADR 0053: the clarifying question morphs the live status message in place.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'When, and how long?', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'When, and how long?',
+        format: OutboundFormat.Html,
+      },
     );
   });
 
@@ -492,7 +535,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
 
     expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(1);
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the answer morphs the live status message in place.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toBe('Created your lesson.');
   });
@@ -516,7 +560,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the honest truncated reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).not.toMatch(/cut off mid-sen/);
     expect(reply.text).toMatch(/cut that short/i);
@@ -543,7 +588,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the honest decline morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/not able to help/i);
   });
@@ -570,7 +616,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
 
     expect(harness.ai.complete).toHaveBeenCalledTimes(3);
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the graceful ceiling reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/more steps than i can take/i);
   });
@@ -635,7 +682,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: even the AI-failure line morphs the live status message in place.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/having trouble/i);
     // No assistant turn persisted on a terminal error (only the user turn).
@@ -667,7 +715,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     // The model was never even reached.
     expect(harness.ai.complete).not.toHaveBeenCalled();
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the AI-failure line morphs the live status message in place.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/having trouble/i);
     // No assistant turn persisted on a terminal error (only the user turn).
@@ -724,10 +773,12 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(harness.vendor.sendActions).not.toHaveBeenCalled();
     expect(harness.redis.set).not.toHaveBeenCalled();
 
-    // The turn ends with a normal text reply.
-    expect(harness.vendor.sendMessage).toHaveBeenCalledTimes(1);
+    // The turn ends with a normal text reply that morphs the live status message
+    // (ADR 0053) — one edit in place, no fresh send.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledTimes(1);
+    expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/Lesson 2 clashes/);
   });
@@ -775,7 +826,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     // No tool choice was ever forced (committedWrites > 0 ⇒ genuine).
     expect(harness.ai.complete.mock.calls[1][0].toolChoice).toBeUndefined();
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the genuine success reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     // The genuine success reply is sent verbatim, NOT masked as a false success.
     expect(reply.text).toBe('Создал оба урока.');
@@ -807,7 +859,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(harness.toolDispatcher.dispatch).not.toHaveBeenCalled();
     expect(harness.alert.capture).not.toHaveBeenCalled();
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the corrected reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     // The false success is replaced with an honest "nothing changed" reply.
     expect(reply.text).not.toMatch(/Создаю/);
@@ -873,7 +926,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(harness.toolDispatcher.dispatch).toHaveBeenCalledTimes(1);
     expect(harness.alert.capture).not.toHaveBeenCalled();
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the genuine success reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toBe('Done — created all seven.');
   });
@@ -964,7 +1018,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(event.context.corrections).toBe(2);
 
     // The user gets an honest "nothing was saved" reply, and it is persisted.
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: it morphs the live status message in place.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toMatch(/nothing was saved|wasn't able to make/i);
     expect(
@@ -1001,7 +1056,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the genuine success reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).toBe('Created your lesson.');
   });
@@ -1038,7 +1094,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the corrected reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     expect(reply.text).not.toMatch(/added your lesson/i);
     expect(reply.text).toMatch(/nothing was changed|didn't .* save/i);
@@ -1072,7 +1129,8 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    const [, reply] = harness.vendor.sendMessage.mock.calls[0];
+    // ADR 0053: the honest failure reply morphs the live status message.
+    const [, reply] = harness.vendor.editMessageText.mock.calls[0];
 
     // The model already told the truth — do not clobber it.
     expect(reply.text).toBe("I couldn't add that — the time was invalid.");
@@ -1123,11 +1181,18 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       ),
     ).toBe(false);
 
-    // No options ⇒ plain text question sent (no keyboard), and persisted.
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // No options ⇒ plain text question, which (ADR 0053) MORPHS the live status
+    // message in place (suspendAndAsk threaded status.messageId through), and is
+    // persisted. No keyboard, no fresh send.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'When works for you?', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'When works for you?',
+        format: OutboundFormat.Html,
+      },
     );
+    expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
     expect(harness.vendor.sendActions).not.toHaveBeenCalled();
     expect(
       assistantReplies(harness.conversationMessageDatabaseService),
@@ -1165,13 +1230,18 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       vendorMessageId: null,
     });
 
-    expect(harness.vendor.sendActions).toHaveBeenCalledTimes(1);
+    // ADR 0053: with a live status message, the question + inline keyboard MORPH
+    // that message in place (editMessageText carrying the buttons) — no fresh
+    // sendActions / sendMessage bubble.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledTimes(1);
+    expect(harness.vendor.sendActions).not.toHaveBeenCalled();
     expect(harness.vendor.sendMessage).not.toHaveBeenCalled();
 
-    const [, actions] = harness.vendor.sendActions.mock.calls[0];
+    const [, edit] = harness.vendor.editMessageText.mock.calls[0];
 
-    expect(actions.text).toBe('Which day?');
-    expect(actions.buttons[0]).toEqual([
+    expect(edit.vendorMessageId).toBe('status-msg-1');
+    expect(edit.text).toBe('Which day?');
+    expect(edit.buttons[0]).toEqual([
       { label: 'Friday', callbackData: 'ask:pq-77:fri' },
       { label: 'Saturday', callbackData: 'ask:pq-77:sat' },
     ]);
@@ -1238,10 +1308,15 @@ describe('TurnRunnerService (turn lifecycle)', () => {
       content: 'Friday',
     });
 
-    // The continued reply is sent.
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // The continued reply MORPHS the resume's live status message (ADR 0053):
+    // resumeAnswer threaded status.messageId through finishTurn.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Booked Friday.', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'Booked Friday.',
+        format: OutboundFormat.Html,
+      },
     );
   });
 
@@ -1288,9 +1363,14 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(request.toolRounds[0].toolResults).toEqual([
       { toolCallId: 'ask-tuid-2', content: 'around 3pm' },
     ]);
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // ADR 0053: the continued reply morphs the resume's live status message.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Got it — 3pm.', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'Got it — 3pm.',
+        format: OutboundFormat.Html,
+      },
     );
   });
 
@@ -1360,9 +1440,356 @@ describe('TurnRunnerService (turn lifecycle)', () => {
     expect(
       harness.pendingInteraction.createPendingQuestion,
     ).toHaveBeenCalledTimes(1);
-    expect(harness.vendor.sendMessage).toHaveBeenCalledWith(
+    // ADR 0053: the follow-up question (no options) morphs the resume's live
+    // status message in place.
+    expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
       { vendorChatId: CHAT_ID },
-      { text: 'Morning or evening?', format: OutboundFormat.Html },
+      {
+        vendorMessageId: 'status-msg-1',
+        text: 'Morning or evening?',
+        format: OutboundFormat.Html,
+      },
     );
+  });
+
+  describe('answered-question morph + resume streaming (R3 / ADR 0058)', () => {
+    /** Builds a claimable pending row carrying the captured question message id. */
+    const buildClaimedPending = (
+      over: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      id: 'pq-1',
+      askToolUseId: 'ask-tuid',
+      payload: {
+        question: 'Which day?',
+        optionLabels: [
+          { id: 'fri', label: 'Friday' },
+          { id: 'sat', label: 'Saturday' },
+        ],
+        toolRounds: [
+          {
+            toolCalls: [{ id: 'ask-tuid', name: 'ask_user', input: {} }],
+            toolResults: [],
+          },
+        ],
+        correlationId: 'cid-1',
+        vendorChatId: CHAT_ID,
+        questionVendorMessageId: 'q-msg-7',
+        ...over,
+      },
+    });
+
+    it('captures the question message id onto the pending row when ask_user has options', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.createPendingQuestion.mockResolvedValueOnce({
+        id: 'pq-opts',
+        payload: { optionLabels: [] },
+      });
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.TOOL_USE,
+          toolCalls: [toolCall('ask_user', { question: 'Which day?' })],
+        }),
+      );
+      harness.toolDispatcher.dispatch.mockResolvedValue({
+        content: 'suspended',
+        askUser: {
+          question: 'Which day?',
+          options: [{ id: 'fri', label: 'Friday' }],
+        },
+      });
+
+      await harness.service.handleText(USER, {
+        text: 'when?',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        vendorMessageId: null,
+      });
+
+      // The question morphed the status message (id 'status-msg-1'); that id is
+      // captured onto the pending row so a later tap can morph it.
+      expect(
+        harness.pendingInteraction.attachQuestionMessageId,
+      ).toHaveBeenCalledWith('pq-opts', 'status-msg-1');
+    });
+
+    it('on a button tap, morphs the ORIGINAL question message (clear buttons + append the answer) before the loop', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.claimById.mockResolvedValueOnce(
+        buildClaimedPending(),
+      );
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Booked Friday.',
+        }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'callback',
+        text: 'ask:pq-1:fri',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: 'cb-1',
+      });
+
+      // The original question message (q-msg-7) was edited: buttons cleared, the
+      // localized "User selected" line appended — a distinct edit from the answer
+      // morph (which targets the status message id).
+      expect(harness.vendor.editMessageText).toHaveBeenCalledWith(
+        { vendorChatId: CHAT_ID },
+        {
+          vendorMessageId: 'q-msg-7',
+          text: 'Which day?\n\nUser selected: Friday',
+          format: OutboundFormat.Html,
+          clearButtons: true,
+        },
+      );
+    });
+
+    it('SKIPS the question morph when the row has no captured questionVendorMessageId (old in-flight row)', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.claimById.mockResolvedValueOnce(
+        buildClaimedPending({ questionVendorMessageId: undefined }),
+      );
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Booked Friday.',
+        }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'callback',
+        text: 'ask:pq-1:fri',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: 'cb-1',
+      });
+
+      // No edit ever targeted a 'q-msg-*' id — only the answer morph (status id).
+      const editedIds = harness.vendor.editMessageText.mock.calls.map(
+        (call) => call[1].vendorMessageId,
+      );
+
+      expect(editedIds).not.toContain('q-msg-7');
+      // The resume still answered (morphing the status message).
+      expect(editedIds).toContain('status-msg-1');
+    });
+
+    it('does NOT morph a question on a FREE-TEXT resume (callback-only feature)', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.claimHotByUser.mockResolvedValueOnce(
+        buildClaimedPending({ optionLabels: [] }),
+      );
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({ stopReason: AiStopReason.END_TURN, text: 'Got it.' }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'text',
+        text: 'friday please',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: null,
+      });
+
+      const editedIds = harness.vendor.editMessageText.mock.calls.map(
+        (call) => call[1].vendorMessageId,
+      );
+
+      expect(editedIds).not.toContain('q-msg-7');
+    });
+
+    it('passes a stream sink on resume so the continued answer streams (Feature 2 + onToken wired)', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.claimById.mockResolvedValueOnce(
+        buildClaimedPending(),
+      );
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Booked Friday.',
+        }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'callback',
+        text: 'ask:pq-1:fri',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: 'cb-1',
+      });
+
+      // The harness completeStream replays the answer text through onText, which
+      // the runner's sink forwards to the animation's streamAnswer (onToken wired).
+      // A resume now gets a sink (Feature 2) — was none before R3.
+      expect(harness.statusAnimation.streamAnswer).toHaveBeenCalledWith(
+        'Booked Friday.',
+      );
+    });
+  });
+
+  describe('answer token streaming wiring (R3 / ADR 0058)', () => {
+    it('wires the loop onText through to the animation streamAnswer on a fresh turn', async () => {
+      const harness = buildHarness();
+
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({ stopReason: AiStopReason.END_TURN, text: 'Hello there.' }),
+      );
+
+      await harness.service.handleText(USER, {
+        text: 'hi',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        vendorMessageId: null,
+      });
+
+      // The streamed answer snapshot reached the live status animation.
+      expect(harness.statusAnimation.streamAnswer).toHaveBeenCalledWith(
+        'Hello there.',
+      );
+    });
+  });
+
+  describe('last-message-language tracking + recap locale (R2 / ADR 0055)', () => {
+    it("records the text turn's detected language (a Russian message under an English code → ru)", async () => {
+      const harness = buildHarness();
+      // One tool round so the loop renders a recap, exercising the recap-locale
+      // path: the BACKGROUND recap model is asked in the detected language.
+      const call = toolCall('list_tasks', { from: 'a', to: 'b' });
+
+      harness.ai.complete
+        .mockResolvedValueOnce(
+          completion({ stopReason: AiStopReason.TOOL_USE, toolCalls: [call] }),
+        )
+        .mockResolvedValueOnce(
+          completion({ stopReason: AiStopReason.END_TURN, text: 'Готово.' }),
+        );
+      harness.toolDispatcher.dispatch.mockResolvedValue({ content: 'ok' });
+
+      await harness.service.handleText(USER, {
+        // A Russian message — detected as `ru`, recorded + used as the recap locale.
+        text: 'перенеси встречу на завтра',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        vendorMessageId: 'in-1',
+        languageCode: 'en',
+      });
+
+      expect(harness.lastMessageLanguageStore.record).toHaveBeenCalledWith(
+        USER.id,
+        'ru',
+      );
+      // The recap was asked in the detected language (recapLocale threaded through).
+      expect(harness.roundRecap.recapRound).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        'ru',
+      );
+    });
+
+    it("records the voice transcript turn's locale from the STT-reported language", async () => {
+      const harness = buildHarness();
+
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({ stopReason: AiStopReason.END_TURN, text: 'Done.' }),
+      );
+
+      await harness.service.handleText(USER, {
+        text: 'move my meeting', // transcript; STT language wins
+        contentType: ConversationMessageContentType.VOICE_TRANSCRIPT,
+        vendorChatId: CHAT_ID,
+        vendorMessageId: null,
+        languageCode: 'en',
+        sttLanguage: 'uk',
+      });
+
+      // STT language (uk) is the highest-priority signal for a voice transcript.
+      expect(harness.lastMessageLanguageStore.record).toHaveBeenCalledWith(
+        USER.id,
+        'uk',
+      );
+    });
+
+    it("records a free-text answer's locale on resume but NOT a button callback", async () => {
+      const harness = buildHarness();
+
+      // Free-text resume: claims the hot window, records the typed answer's locale.
+      harness.pendingInteraction.claimHotByUser.mockResolvedValueOnce({
+        id: 'pq-lang',
+        askToolUseId: 'ask-lang',
+        payload: {
+          question: 'Когда?',
+          optionLabels: [],
+          toolRounds: [
+            {
+              toolCalls: [{ id: 'ask-lang', name: 'ask_user', input: {} }],
+              toolResults: [],
+            },
+          ],
+          correlationId: 'cid-lang',
+          vendorChatId: CHAT_ID,
+        },
+      });
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({ stopReason: AiStopReason.END_TURN, text: 'Готово.' }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'text',
+        text: 'давай завтра утром', // Russian free text
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: null,
+        languageCode: 'en',
+      });
+
+      expect(harness.lastMessageLanguageStore.record).toHaveBeenCalledWith(
+        USER.id,
+        'ru',
+      );
+    });
+
+    it('does NOT record on a button-callback resume (callback data is not natural language)', async () => {
+      const harness = buildHarness();
+
+      harness.pendingInteraction.claimById.mockResolvedValueOnce({
+        id: 'pq-btn',
+        askToolUseId: 'ask-btn',
+        payload: {
+          question: 'Which day?',
+          optionLabels: [{ id: 'fri', label: 'Friday' }],
+          toolRounds: [
+            {
+              toolCalls: [{ id: 'ask-btn', name: 'ask_user', input: {} }],
+              toolResults: [],
+            },
+          ],
+          correlationId: 'cid-btn',
+          vendorChatId: CHAT_ID,
+        },
+      });
+      harness.ai.complete.mockResolvedValueOnce(
+        completion({
+          stopReason: AiStopReason.END_TURN,
+          text: 'Booked Friday.',
+        }),
+      );
+
+      await harness.service.resumeAnswer(USER, {
+        source: 'callback',
+        text: 'ask:pq-btn:fri',
+        contentType: ConversationMessageContentType.TEXT,
+        vendorChatId: CHAT_ID,
+        callbackId: 'cb-btn',
+      });
+
+      expect(harness.lastMessageLanguageStore.record).not.toHaveBeenCalled();
+    });
   });
 });

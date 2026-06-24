@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ConversationStore } from './conversation.store';
+import { LastMessageLanguageStore } from './last-message-language.store';
 import { PendingInteractionService } from './pending-interaction.store';
 import { TurnAuditStore } from './turn-audit.store';
 import { ToolRoundAuditPayload, TurnStreamSink } from '../assistant.types';
@@ -14,11 +15,17 @@ import {
   ToolLoopResult,
   ToolLoopService,
 } from '../orchestration/tool-loop.service';
+import { detectMessageLanguage } from '../reply/detect-message-language';
 import { ReplyPresenter } from '../reply/reply-presenter.service';
 import {
   StatusAnimation,
   StatusAnimatorService,
 } from '../reply/status-animator.service';
+import {
+  resolveTextStatusLocale,
+  resolveVoiceStatusLocale,
+  StatusLocale,
+} from '../reply/status-phrases';
 import { ToolName } from '../tools/tool-schemas';
 import { ToolRound, ToolResultBlock } from '@/modules/ai/ai.types';
 import { AlertConnector } from '@/modules/alert/alert-connector.abstract';
@@ -206,6 +213,7 @@ export class TurnRunnerService {
     private readonly pendingInteraction: PendingInteractionService,
     private readonly replyPresenter: ReplyPresenter,
     private readonly statusAnimator: StatusAnimatorService,
+    private readonly lastMessageLanguageStore: LastMessageLanguageStore,
   ) {}
 
   /**
@@ -264,6 +272,7 @@ export class TurnRunnerService {
     vendorChatId: string,
     suspension: AskSuspension,
     correlationId: string,
+    statusMessageId: string | null,
   ): Promise<void> {
     const pending = await this.pendingInteraction.createPendingQuestion(
       user.id,
@@ -286,7 +295,19 @@ export class TurnRunnerService {
       suspension.optionLabels,
       pending.id,
       correlationId,
+      statusMessageId,
     );
+
+    // Capture the question message's id onto the pending row (R3 / ADR 0058) so a
+    // later button tap can morph that original message (strip buttons + append the
+    // answer). Only when there ARE options (a plain free-text question has no
+    // buttons to clear) and the send returned an id. Degrade-never-throw.
+    if (suspension.optionLabels.length > 0 && vendorMessageId) {
+      await this.pendingInteraction.attachQuestionMessageId(
+        pending.id,
+        vendorMessageId,
+      );
+    }
 
     await this.persistMessage(
       conversation,
@@ -311,11 +332,13 @@ export class TurnRunnerService {
   }
 
   /**
-   * Opens the live-status animation for a turn and starts the cycling-word + dots
-   * loading loop (Story 12 / ADR 0012), keyed by the correlation id so it shares
-   * the surface with any voice notice already shown for this turn. Degrades
-   * never-throw — a status fault returns a no-op handle the caller still
-   * finalizes. The `correlationId` doubles as the per-turn `turnId` for the
+   * Opens the live-status surface for a turn (ADR 0053): posts the one real
+   * "loading" message and advances it to Working, keyed by the correlation id so
+   * it shares the surface with any voice notice already shown for this turn. That
+   * one message is later edited with per-round recaps and finally morphed into the
+   * reply. Degrades never-throw — a status fault returns a handle whose
+   * {@link StatusAnimation.messageId} is null and the reply just sends a fresh
+   * message. The `correlationId` doubles as the per-turn `turnId` for the
    * idempotent StatusSession.
    */
   private async beginStatus(
@@ -346,20 +369,67 @@ export class TurnRunnerService {
   }
 
   /**
+   * Resolves the turn's loading-status {@link StatusLocale} once (R2 / ADR 0055) —
+   * the SINGLE language we both (a) RECORD as the user's last-message language and
+   * (b) pass to the loop so per-round recaps are written in it. A voice transcript
+   * (`VOICE_TRANSCRIPT`) follows the STT-first chain (STT language → transcript →
+   * `language_code` → `en`); a typed message follows the text chain (message-text
+   * detection → `language_code` → `en`). Pure (the detector is injected), so the
+   * computed locale is deterministic for a given input.
+   */
+  private resolveTurnLocale(
+    text: string,
+    contentType: ConversationMessageContentType,
+    languageCode: string | undefined,
+    sttLanguage: string | undefined,
+  ): StatusLocale {
+    if (contentType === ConversationMessageContentType.VOICE_TRANSCRIPT) {
+      return resolveVoiceStatusLocale(
+        sttLanguage,
+        text,
+        languageCode,
+        detectMessageLanguage,
+      );
+    }
+
+    return resolveTextStatusLocale(text, languageCode, detectMessageLanguage);
+  }
+
+  /**
+   * Fire-and-forget records the turn's resolved locale as the user's last-message
+   * language (R2 / ADR 0055) so the NEXT turn's voice pre-STT "Listening…" line can
+   * borrow it. Degrade-never-throw: the store swallows its own Redis fault, and the
+   * `void` keeps it off the critical path — a record must never block or break the
+   * `attempts:1` turn. Called ONLY on turns whose language we actually know (a
+   * typed message, a free-text answer, or a voice turn that transcribed
+   * successfully); never on an STT-fail early return.
+   */
+  private recordLastMessageLanguage(
+    userId: string,
+    locale: StatusLocale,
+  ): void {
+    void this.lastMessageLanguageStore.record(userId, locale);
+  }
+
+  /**
    * Wraps a {@link StatusAnimation} as the loop-facing {@link TurnStreamSink}
-   * (Story 13 / ADR 0041, narrowed by ADR 0052) so the L4 loop can render
-   * per-round recaps into the live draft WITHOUT knowing about the draft / Redis /
-   * vendor (the loop stays L9-blind). The answer is NOT streamed into the draft
-   * (ADR 0052 — it lands as the real `sendMessage`), so the sink carries only the
-   * recap. The method fires-and-forgets the animation's async push (which routes
-   * through the one draft throttle and swallows its own fault), so the sink's
-   * contract — synchronous, degrade-never-throw — holds. Used only on a fresh
-   * model-driven turn; an `ask_user` resume passes no sink.
+   * (ADR 0053) so the L4 loop can render progress onto the live status message
+   * WITHOUT knowing about Redis / the vendor (the loop stays L9-blind). Carries
+   * BOTH the per-round recap (`showRecap`) and — re-enabled in R3 / ADR 0058 — the
+   * streamed answer text (`onToken`, throttled inside the animation), which fills
+   * the morph message in as the model writes before the final formatted morph
+   * supersedes it. Each method fires-and-forgets the animation's edit (which
+   * swallows its own fault), so the sink's contract — synchronous,
+   * degrade-never-throw — holds. Used on a fresh model-driven turn AND (R3) on an
+   * `ask_user` resume, so a resumed answer streams + recaps like a fresh turn.
    */
   private streamSinkFor(status: StatusAnimation): TurnStreamSink {
     return {
       showRecap: (recap: string): void => {
         void status.showRecap(recap);
+      },
+      onToken: (snapshot: string): void => {
+        status.streamAnswer(snapshot);
       },
     };
   }
@@ -382,6 +452,21 @@ export class TurnRunnerService {
       params.sttLanguage,
     );
 
+    // Resolve the turn's language ONCE (R2 / ADR 0055): we both record it as the
+    // user's last-message language (so the next voice pre-STT line can borrow it)
+    // and pass it as the recap language so the BACKGROUND recaps speak the user's
+    // language. The language is known here (a typed message, or a voice transcript
+    // that already succeeded — STT failure returned in the consumer), so we always
+    // record on this path. Recording is fire-and-forget — never blocks the turn.
+    const recapLocale = this.resolveTurnLocale(
+      params.text,
+      params.contentType,
+      params.languageCode,
+      params.sttLanguage,
+    );
+
+    this.recordLastMessageLanguage(user.id, recapLocale);
+
     try {
       const conversation = await this.getOrCreateConversation(user.id);
 
@@ -398,11 +483,18 @@ export class TurnRunnerService {
         conversationId: conversation.id,
         currentMessageText: params.text,
         correlationId,
+        // The user's language drives the per-round recaps (R2 / ADR 0055): the
+        // BACKGROUND recap model is told to write the line in this language.
+        recapLocale,
         // Stream the final answer + per-round recaps into the live status draft
         // (Story 13 / ADR 0041). The sink wraps this turn's StatusAnimation and is
         // degrade-never-throw; the real reply below still persists the answer.
         streamSink: this.streamSinkFor(status),
       });
+
+      // Drain any in-flight recap edit before the reply morphs the SAME message,
+      // so a late recap can't land after — and revert — the answer (ADR 0053).
+      await status.settle();
 
       await this.finishTurn(
         user,
@@ -410,6 +502,7 @@ export class TurnRunnerService {
         params.vendorChatId,
         result,
         correlationId,
+        status.messageId,
       );
     } finally {
       await status.finalize();
@@ -435,6 +528,7 @@ export class TurnRunnerService {
     vendorChatId: string,
     result: ToolLoopResult,
     correlationId: string,
+    statusMessageId: string | null,
   ): Promise<void> {
     const { outcome, rounds, committedWrites, attemptedWrites } = result;
 
@@ -448,6 +542,7 @@ export class TurnRunnerService {
         vendorChatId,
         outcome.suspension,
         correlationId,
+        statusMessageId,
       );
 
       return;
@@ -458,6 +553,7 @@ export class TurnRunnerService {
         vendorChatId,
         AI_FAILURE_REPLY,
         correlationId,
+        statusMessageId,
       );
 
       return;
@@ -486,6 +582,7 @@ export class TurnRunnerService {
         vendorChatId,
         CORRECTION_EXHAUSTED_REPLY,
         correlationId,
+        statusMessageId,
       );
 
       await this.persistMessage(
@@ -525,6 +622,7 @@ export class TurnRunnerService {
       vendorChatId,
       replyText,
       correlationId,
+      statusMessageId,
     );
 
     await this.persistMessage(
@@ -571,6 +669,16 @@ export class TurnRunnerService {
       return;
     }
 
+    // On the WINNING claim of a BUTTON tap (R3 / ADR 0058), morph the ORIGINAL
+    // question message: strip its now-answered buttons and append the chosen
+    // answer, so the card stops being tappable. Only for a callback source, only
+    // when the question's message id was captured (absent on old in-flight rows —
+    // skipped gracefully). The double-tap loser got a null claim above and never
+    // reaches here, so the keyboard is cleared exactly once. Best-effort — the
+    // presenter swallows its own fault — and done BEFORE beginStatus so it never
+    // delays the loading surface's appearance.
+    await this.maybeMarkQuestionAnswered(claim.pending, params, correlationId);
+
     // A claimed resume re-invokes the model and produces a reply, so it gets the
     // same live-status animation as a fresh turn — finalized in the `finally`. The
     // user's answer text drives the loading-word locale (v2 Task 4 / ADR 0051),
@@ -583,6 +691,22 @@ export class TurnRunnerService {
       params.text,
       params.sttLanguage,
     );
+
+    // Resolve the answer's language ONCE (R2 / ADR 0055) for the recaps. RECORD it
+    // as the user's last-message language ONLY for a TYPED answer (free text /
+    // voice transcript) — a button callback's `text` is the `ask:` callback data,
+    // not natural language, so recording it would track a meaningless locale. The
+    // computed locale still drives any recap language for either source.
+    const recapLocale = this.resolveTurnLocale(
+      params.text,
+      params.contentType,
+      params.languageCode,
+      params.sttLanguage,
+    );
+
+    if (params.source === 'text') {
+      this.recordLastMessageLanguage(user.id, recapLocale);
+    }
 
     try {
       const conversation = await this.getOrCreateConversation(user.id);
@@ -607,7 +731,18 @@ export class TurnRunnerService {
         currentMessageText: '',
         correlationId,
         resumeRounds: resumedRounds,
+        // The answer's language drives any per-round recaps (R2 / ADR 0055).
+        recapLocale,
+        // R3 / ADR 0058 + Feature 2: a resume now gets the SAME live-status sink as
+        // a fresh turn, so the continued answer streams + per-round recaps render
+        // onto the resume's morph message (was none — the resume looked silent
+        // mid-flight). Degrade-never-throw, same as the fresh-turn path.
+        streamSink: this.streamSinkFor(status),
       });
+
+      // Drain any in-flight recap edit before the reply morphs the SAME message
+      // (ADR 0053) — same race guard as the fresh-turn path.
+      await status.settle();
 
       await this.finishTurn(
         user,
@@ -615,6 +750,7 @@ export class TurnRunnerService {
         params.vendorChatId,
         result,
         correlationId,
+        status.messageId,
       );
     } finally {
       await status.finalize();
@@ -671,6 +807,57 @@ export class TurnRunnerService {
     );
 
     return { pending, answerLabel: params.text };
+  }
+
+  /**
+   * On the WINNING claim of a button tap (R3 / ADR 0058), morphs the ORIGINAL
+   * `ask_user` question message via the presenter: strips the answered buttons and
+   * appends a localized "User selected: <label>" line. A no-op unless the source is
+   * a callback AND the captured `questionVendorMessageId` is present (absent on
+   * rows suspended before R3 — skipped gracefully). The prefix locale is detected
+   * from the QUESTION text (the model's own language) via the text-locale chain.
+   * Best-effort — the presenter swallows its own fault — so it never breaks the
+   * resume.
+   */
+  private async maybeMarkQuestionAnswered(
+    pending: PendingQuestion,
+    params: ResumeAnswerParams,
+    correlationId: string,
+  ): Promise<void> {
+    if (params.source !== 'callback') {
+      return;
+    }
+
+    const questionMessageId = pending.payload.questionVendorMessageId;
+
+    if (!questionMessageId) {
+      return;
+    }
+
+    const { pendingQuestionId, optionId } = this.parseAskCallback(params.text);
+
+    if (!pendingQuestionId) {
+      return;
+    }
+
+    const matched = pending.payload.optionLabels.find(
+      (option) => option.id === optionId,
+    );
+    const answerLabel = matched?.label ?? optionId;
+    const locale = resolveTextStatusLocale(
+      pending.payload.question,
+      params.languageCode,
+      detectMessageLanguage,
+    );
+
+    await this.replyPresenter.markQuestionAnswered(
+      params.vendorChatId,
+      questionMessageId,
+      pending.payload.question,
+      answerLabel,
+      locale,
+      correlationId,
+    );
   }
 
   /**

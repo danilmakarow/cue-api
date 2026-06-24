@@ -324,4 +324,102 @@ describe('classifyFlow (inbound router taxonomy)', () => {
     // The active-surface lookup is never even consulted for a voice transcript.
     expect(keyboard.getActiveSurface).not.toHaveBeenCalled();
   });
+
+  // --- R4 / ADR 0056: 'Open Menu' is globally owned across docked surfaces ---
+
+  it("routes 'Open Menu' to OpenMenu when the MAIN keyboard is the active surface", async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Main);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.openMenu }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(flow).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.OpenMenu,
+    });
+  });
+
+  it("routes 'Open Menu' to OpenMenu when the SETTINGS keyboard is the active surface (globally owned)", async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Settings);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.openMenu }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(flow).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.OpenMenu,
+    });
+  });
+
+  it("routes 'Open Menu' to OpenMenu when the MENU keyboard is the active surface (idempotent re-open)", async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Menu);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.openMenu }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(flow).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.OpenMenu,
+    });
+  });
+
+  it("does NOT hijack a literally-typed 'Open Menu' when NO keyboard is the active surface — it stays a fresh turn", async () => {
+    const keyboard = buildActiveKeyboardStore(null);
+    const flow = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.openMenu }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(flow).toEqual({
+      kind: 'simple_message',
+      text: KEYBOARD_LABELS.openMenu,
+      contentType: InboundKind.Text,
+    });
+  });
+
+  it('routes the Menu-surface labels to their menu actions only when the menu keyboard is active', async () => {
+    const keyboard = buildActiveKeyboardStore(KeyboardSurface.Menu);
+    const settings = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.settings }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+    const logout = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.logout }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+    const close = await classifyFlow(
+      normalize({ kind: InboundKind.Text, text: KEYBOARD_LABELS.back }),
+      USER,
+      buildPendingStore(false),
+      keyboard,
+    );
+
+    expect(settings).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.MenuSettings,
+    });
+    expect(logout).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.Logout,
+    });
+    expect(close).toEqual({
+      kind: 'keyboard_action',
+      action: KeyboardAction.CloseMenu,
+    });
+  });
 });

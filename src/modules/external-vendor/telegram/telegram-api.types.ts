@@ -50,12 +50,22 @@ export interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery;
 }
 
+/**
+ * Optional response parameters Telegram attaches to some errors. On a 429
+ * (`Too Many Requests`) `retry_after` is the suggested back-off in seconds.
+ */
+export interface TelegramResponseParameters {
+  retry_after?: number;
+  migrate_to_chat_id?: number;
+}
+
 /** Generic Telegram API response envelope. */
 export interface TelegramApiResponse<TResult> {
   ok: boolean;
   result?: TResult;
   description?: string;
   error_code?: number;
+  parameters?: TelegramResponseParameters;
 }
 
 /** Result of `getFile`: the path used to build the file download URL. */

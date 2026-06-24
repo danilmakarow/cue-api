@@ -1,8 +1,4 @@
-import {
-  StatusSessionPhase,
-  StatusSessionStore,
-  StatusSurfaceKind,
-} from './status-session.store';
+import { StatusSessionPhase, StatusSessionStore } from './status-session.store';
 import { statusSessionKey } from '../../redis/redis.constants';
 import { ChatType } from '@/modules/external-vendor/external-vendor.types';
 
@@ -64,17 +60,22 @@ const PRIVATE_INPUT = {
   turnId: 'turn-1',
   chatType: ChatType.Private,
   locale: 'en',
-  seedDraftId: 42,
+  seedVendorMessageId: 'msg-42',
 };
 
-describe('StatusSessionStore (live-status handle, ADR 0012)', () => {
-  it('open writes the handle under a per-chat/turn key with NX + TTL', async () => {
+describe('StatusSessionStore (live-status handle, ADR 0053)', () => {
+  it('open persists the Message-only handle under a per-chat/turn key with NX + TTL', async () => {
     const { service, redis, setCalls } = buildStore();
 
     const session = await service.open(PRIVATE_INPUT);
 
-    expect(session.surfaceKind).toBe(StatusSurfaceKind.Draft);
-    expect(session.draftId).toBe(42);
+    // The status surface is always one real message edited in place (ADR 0053):
+    // the handle carries the seed message id, locale, chat type, and Thinking.
+    expect(session.vendorMessageId).toBe('msg-42');
+    expect(session.locale).toBe('en');
+    expect(session.chatType).toBe(ChatType.Private);
+    expect(session.vendorChatId).toBe('chat-1');
+    expect(session.turnId).toBe('turn-1');
     expect(session.phase).toBe(StatusSessionPhase.Thinking);
 
     const [key, , ...opts] = setCalls[0] as [string, string, ...unknown[]];
@@ -87,48 +88,50 @@ describe('StatusSessionStore (live-status handle, ADR 0012)', () => {
     expect(redis.set).toHaveBeenCalledTimes(1);
   });
 
+  it('open without a seed message id leaves vendorMessageId undefined', async () => {
+    const { service } = buildStore();
+
+    const session = await service.open({
+      vendorChatId: 'chat-2',
+      turnId: 'turn-2',
+      chatType: ChatType.Private,
+      locale: 'en',
+    });
+
+    // The real message id is absent until the initial send lands.
+    expect(session.vendorMessageId).toBeUndefined();
+    expect(session.phase).toBe(StatusSessionPhase.Thinking);
+  });
+
   it('IDEMPOTENCY: opening twice for the SAME turn does NOT orphan a second handle', async () => {
     const { service, store } = buildStore();
 
     const first = await service.open(PRIVATE_INPUT);
     // A second open for the same turn — e.g. a replayed BullMQ job — with a
-    // DIFFERENT seed draft id must NOT overwrite or create a new surface.
-    const second = await service.open({ ...PRIVATE_INPUT, seedDraftId: 999 });
+    // DIFFERENT seed message id must NOT overwrite or create a new surface.
+    const second = await service.open({
+      ...PRIVATE_INPUT,
+      seedVendorMessageId: 'msg-999',
+    });
 
     // Exactly one handle persisted, and it is the first one (NX lost on retry).
     expect(store.size).toBe(1);
-    expect(second.draftId).toBe(first.draftId);
-    expect(second.draftId).toBe(42);
+    expect(second.vendorMessageId).toBe(first.vendorMessageId);
+    expect(second.vendorMessageId).toBe('msg-42');
   });
 
   it('IDEMPOTENCY under concurrency: two simultaneous opens yield one shared handle', async () => {
     const { service, store } = buildStore();
 
-    const [a, b] = await Promise.all([
+    const [first, second] = await Promise.all([
       service.open(PRIVATE_INPUT),
-      service.open({ ...PRIVATE_INPUT, seedDraftId: 777 }),
+      service.open({ ...PRIVATE_INPUT, seedVendorMessageId: 'msg-777' }),
     ]);
 
     expect(store.size).toBe(1);
-    // Both callers observe the SAME draft id (whichever won the NX race),
+    // Both callers observe the SAME message id (whichever won the NX race),
     // never two distinct surfaces.
-    expect(a.draftId).toBe(b.draftId);
-  });
-
-  it('non-private chat opens a real-message (edit) surface, not a draft', async () => {
-    const { service } = buildStore();
-
-    const session = await service.open({
-      vendorChatId: 'group-1',
-      turnId: 'turn-9',
-      chatType: ChatType.Group,
-      locale: 'en',
-      seedVendorMessageId: 'msg-55',
-    });
-
-    expect(session.surfaceKind).toBe(StatusSurfaceKind.Message);
-    expect(session.vendorMessageId).toBe('msg-55');
-    expect(session.draftId).toBeUndefined();
+    expect(first.vendorMessageId).toBe(second.vendorMessageId);
   });
 
   it('get returns the open handle and null after clear', async () => {
@@ -141,10 +144,30 @@ describe('StatusSessionStore (live-status handle, ADR 0012)', () => {
     expect(await service.get('chat-1', 'turn-1')).toBeNull();
   });
 
-  it('advancePhase mutates phase in place and refreshes the handle', async () => {
+  it('get returns null when no session was ever opened', async () => {
     const { service } = buildStore();
 
+    expect(await service.get('chat-x', 'turn-x')).toBeNull();
+  });
+
+  it('clear deletes the per-chat/turn key', async () => {
+    const { service, store } = buildStore();
+
     await service.open(PRIVATE_INPUT);
+    expect(store.size).toBe(1);
+
+    await service.clear('chat-1', 'turn-1');
+
+    expect(store.size).toBe(0);
+    expect(store.has(statusSessionKey('chat-1', 'turn-1'))).toBe(false);
+  });
+
+  it('advancePhase moves Thinking → Working in place and refreshes the handle', async () => {
+    const { service } = buildStore();
+
+    const opened = await service.open(PRIVATE_INPUT);
+
+    expect(opened.phase).toBe(StatusSessionPhase.Thinking);
 
     const advanced = await service.advancePhase(
       'chat-1',

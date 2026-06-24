@@ -13,14 +13,17 @@ import { RecurrenceRuleService } from '@/modules/recurrence-rule/recurrence-rule
 
 /**
  * Fields the REST layer may change on an existing task group.
- * `recurrence` set to a DTO adds or replaces the group's default rule;
- * set to `null` removes it. All keys are optional.
+ * `recurrence` set to a DTO adds or replaces the group's default inline config;
+ * set to `null` removes it. `requiresCompletion` set to a boolean is the group
+ * default inherited by tasks (task-wins); `null` clears the group default.
+ * `color` set to a value sets the default; `null` clears it. All keys optional.
  */
 export interface UpdateTaskGroupInput {
   name?: string;
   color?: string | null;
   icon?: string | null;
   sortOrder?: number;
+  requiresCompletion?: boolean | null;
   recurrence?: CreateRecurrenceRuleDto | null;
 }
 
@@ -36,21 +39,20 @@ export class TaskGroupService {
   constructor(
     private readonly taskGroupDatabaseService: TaskGroupDatabaseService,
     private readonly calendarDatabaseService: CalendarDatabaseService,
-    private readonly recurrenceRuleService: RecurrenceRuleService,
   ) {}
 
   /**
    * Creates a TaskGroup inside the calendar named by `dto.calendarId` after
    * asserting the calendar belongs to the user. When `dto.recurrence` is provided,
-   * a `RecurrenceRule` is created and linked as the group default. Built via
-   * `createInstance` and persisted with `.save()`. Returns the group with its
-   * `defaultRecurrenceRule` relation loaded.
+   * it is stored inline as the group's default `recurrenceConfig` (ADR 0054).
+   * `requiresCompletion` / `color` are stored as the group defaults. Built via
+   * `createInstance` and persisted with `.save()`.
    */
   async create(userId: string, dto: CreateTaskGroupDto): Promise<TaskGroup> {
     await this.ensureCalendarOwnedByUser(dto.calendarId, userId);
 
-    const defaultRecurrenceRuleId = dto.recurrence
-      ? (await this.recurrenceRuleService.create(dto.recurrence)).id
+    const recurrenceConfig = dto.recurrence
+      ? RecurrenceRuleService.toConfig(dto.recurrence)
       : null;
 
     const group = this.taskGroupDatabaseService.createInstance({
@@ -58,23 +60,21 @@ export class TaskGroupService {
       name: dto.name,
       color: dto.color ?? null,
       icon: dto.icon ?? null,
+      requiresCompletion: dto.requiresCompletion ?? null,
       defaultNotificationStrategyId: dto.defaultNotificationStrategyId ?? null,
-      defaultRecurrenceRuleId,
+      recurrenceConfig,
       sortOrder: dto.sortOrder ?? 0,
     });
 
-    const saved = await this.taskGroupDatabaseService.save(group);
-
-    return this.findOwnedGroupWithRule(userId, saved.id);
+    return this.taskGroupDatabaseService.save(group);
   }
 
   /**
-   * Updates a TaskGroup's mutable fields (name, color, icon, sortOrder) and its
-   * default recurrence rule. When `changes.recurrence` is a DTO, the existing
-   * rule is updated in place (or a new one created); when `null`, the rule is
-   * removed; when `undefined`, the rule is left unchanged. Short-circuits when
-   * nothing changed. Returns the group with its `defaultRecurrenceRule` relation
-   * loaded.
+   * Updates a TaskGroup's mutable fields (name, color, icon, sortOrder,
+   * requiresCompletion) and its default inline recurrence config. When
+   * `changes.recurrence` is a DTO the config is set/replaced; when `null` it is
+   * cleared; when `undefined` it is left unchanged (ADR 0054). Short-circuits when
+   * nothing changed.
    */
   async update(
     userId: string,
@@ -88,33 +88,40 @@ export class TaskGroupService {
     const nextIcon = changes.icon !== undefined ? changes.icon : group.icon;
     const nextSortOrder =
       changes.sortOrder !== undefined ? changes.sortOrder : group.sortOrder;
+    const nextRequiresCompletion =
+      changes.requiresCompletion !== undefined
+        ? changes.requiresCompletion
+        : group.requiresCompletion;
 
-    const recurrenceChanged = await this.applyRecurrenceUpdate(group, changes);
+    const recurrenceChanged = this.applyRecurrenceUpdate(group, changes);
 
     const hasFieldChanges =
       nextName !== group.name ||
       nextColor !== group.color ||
       nextIcon !== group.icon ||
-      nextSortOrder !== group.sortOrder;
+      nextSortOrder !== group.sortOrder ||
+      nextRequiresCompletion !== group.requiresCompletion;
 
     if (hasFieldChanges) {
       group.name = nextName;
       group.color = nextColor;
       group.icon = nextIcon;
       group.sortOrder = nextSortOrder;
+      group.requiresCompletion = nextRequiresCompletion;
     }
 
     if (hasFieldChanges || recurrenceChanged) {
       await this.taskGroupDatabaseService.save(group);
     }
 
-    return this.findOwnedGroupWithRule(userId, groupId);
+    return group;
   }
 
   /**
    * Returns every group across all calendars the user owns, ordered by
-   * `sortOrder` ascending, with `defaultRecurrenceRule` loaded. Returns an empty
-   * array when the user owns no calendars.
+   * `sortOrder` ascending. Recurrence is the inline `recurrenceConfig` on each
+   * row (no relation to load). Returns an empty array when the user owns no
+   * calendars.
    */
   async findAllForUser(userId: string): Promise<TaskGroup[]> {
     const calendarIds = await this.ownedCalendarIds(userId);
@@ -124,13 +131,12 @@ export class TaskGroupService {
     return this.taskGroupDatabaseService.findAll({
       where: { calendarId: In(calendarIds) },
       order: { sortOrder: 'ASC' },
-      relations: { defaultRecurrenceRule: true },
     });
   }
 
   /**
    * Returns the groups in a single calendar (ownership asserted), ordered by
-   * `sortOrder` ascending, with `defaultRecurrenceRule` loaded.
+   * `sortOrder` ascending. Recurrence is the inline `recurrenceConfig` on each row.
    */
   async findAllByCalendar(
     userId: string,
@@ -141,7 +147,6 @@ export class TaskGroupService {
     return this.taskGroupDatabaseService.findAll({
       where: { calendarId },
       order: { sortOrder: 'ASC' },
-      relations: { defaultRecurrenceRule: true },
     });
   }
 
@@ -190,41 +195,27 @@ export class TaskGroupService {
   }
 
   /**
-   * Applies the recurrence portion of a group update: removes the rule when
-   * `changes.recurrence` is explicitly `null`, updates it in place when one
-   * already exists, or creates and links a fresh rule otherwise. Returns whether
-   * the group's `defaultRecurrenceRuleId` link changed (a rule field-only update
-   * does not change the FK).
+   * Applies the recurrence portion of a group update by mutating the inline
+   * `recurrenceConfig` on the group row: clears it when `changes.recurrence` is
+   * explicitly `null`, sets/replaces it from the DTO otherwise. Returns whether
+   * the config actually changed (so the caller knows to `save`). No separate rule
+   * lifecycle — the config lives on the row (ADR 0054).
    */
-  private async applyRecurrenceUpdate(
+  private applyRecurrenceUpdate(
     group: TaskGroup,
     changes: UpdateTaskGroupInput,
-  ): Promise<boolean> {
+  ): boolean {
     if (changes.recurrence === undefined) return false;
 
     if (changes.recurrence === null) {
-      if (group.defaultRecurrenceRuleId === null) return false;
+      if (group.recurrenceConfig === null) return false;
 
-      const oldRuleId = group.defaultRecurrenceRuleId;
-
-      group.defaultRecurrenceRuleId = null;
-      await this.recurrenceRuleService.remove(oldRuleId);
+      group.recurrenceConfig = null;
 
       return true;
     }
 
-    if (group.defaultRecurrenceRuleId !== null) {
-      await this.recurrenceRuleService.update(
-        group.defaultRecurrenceRuleId,
-        changes.recurrence,
-      );
-
-      return false;
-    }
-
-    const rule = await this.recurrenceRuleService.create(changes.recurrence);
-
-    group.defaultRecurrenceRuleId = rule.id;
+    group.recurrenceConfig = RecurrenceRuleService.toConfig(changes.recurrence);
 
     return true;
   }
@@ -239,28 +230,6 @@ export class TaskGroupService {
   ): Promise<TaskGroup> {
     const group = await this.taskGroupDatabaseService.findOneBy({
       id: groupId,
-    });
-
-    if (!group) {
-      throw new EntityNotFoundException(TaskGroup);
-    }
-
-    await this.ensureCalendarOwnedByUser(group.calendarId, userId);
-
-    return group;
-  }
-
-  /**
-   * Loads a group by id WITH its `defaultRecurrenceRule` relation and asserts
-   * ownership. Used after writes to return the fully-populated DTO.
-   */
-  private async findOwnedGroupWithRule(
-    userId: string,
-    groupId: string,
-  ): Promise<TaskGroup> {
-    const group = await this.taskGroupDatabaseService.findOne({
-      where: { id: groupId },
-      relations: { defaultRecurrenceRule: true },
     });
 
     if (!group) {

@@ -3,18 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
-import { LinkingService } from '../linking.service';
+import { LinkingService, TelegramLinkStatus } from '../linking.service';
 import { renderAsciiCalendar } from '../reply/ascii-calendar';
 import {
   KeyboardAction,
   KeyboardSurface,
   MAIN_KEYBOARD,
+  MENU_KEYBOARD,
   SETTINGS_KEYBOARD,
 } from '../reply/reply-keyboard.layout';
 import { ReplyPresenter } from '../reply/reply-presenter.service';
 import { ScheduleReaderService } from '../schedule-reader.service';
 import { ActiveKeyboardStore } from '../session/active-keyboard.store';
 import { LastButtonStore } from '../session/last-button.store';
+import { LastMenuStore } from '../session/last-menu.store';
 import { User } from '@/modules/database/entities';
 import { OutboundFormat } from '@/modules/external-vendor/external-vendor.types';
 
@@ -37,13 +39,25 @@ const SCHEDULE_UNAVAILABLE_REPLY =
 const DISCONNECT_REPLY =
   "You're disconnected. I won't see your Telegram messages until you reconnect from the Cue app.";
 
+/** Reply shown after a successful Logout from the menu (keyboard removed alongside). */
+const LOGOUT_REPLY =
+  "You're logged out. I won't see your Telegram messages until you reconnect from the Cue app.";
+
+/** Status line shown in the menu card when the Telegram link is healthy. */
+const MENU_STATUS_CONNECTED = '🟢 Connected';
+
+/** Status line shown in the menu card when no Telegram link is present. */
+const MENU_STATUS_NOT_CONNECTED = '🔴 Not connected';
+
 /**
  * The deterministic, no-LLM reply-keyboard action surface (Story 16 / ADR 0045) —
  * the keyboard sibling of {@link AssistantService}'s slash-command facade. Every
  * action here resolves WITHOUT the model: render today's / next-week's ASCII
  * calendar from {@link ScheduleReaderService} (a direct read), swap between the
- * main and settings keyboards, or Disconnect (unlink via {@link LinkingService} +
- * remove the keyboard). After each action it overwrites the latest-button line in
+ * main / settings / menu keyboards, open the account+status Menu card (R4 / ADR
+ * 0056, dedup-deleting the prior card), or Disconnect / Logout (unlink via
+ * {@link LinkingService} + remove the keyboard). After each action it overwrites
+ * the latest-button line in
  * Redis ({@link LastButtonStore}) so the NEXT model turn sees what the user just
  * did — injected into the volatile tail only (ADR 0004 cache stability), never the
  * cached prefix. Sends + Redis writes all degrade never-throw, preserving the
@@ -61,6 +75,7 @@ export class KeyboardActionService {
     private readonly linkingService: LinkingService,
     private readonly activeKeyboard: ActiveKeyboardStore,
     private readonly lastButton: LastButtonStore,
+    private readonly lastMenu: LastMenuStore,
   ) {}
 
   /**
@@ -122,6 +137,33 @@ export class KeyboardActionService {
 
     if (params.action === KeyboardAction.Back) {
       await this.goBackToMain(user, params.vendorChatId, correlationId);
+
+      return;
+    }
+
+    if (params.action === KeyboardAction.OpenMenu) {
+      await this.openMenu(user, params.vendorChatId, correlationId);
+
+      return;
+    }
+
+    // The Menu surface re-uses the [Settings] label to open the settings keyboard,
+    // and [Close] (the [Back] label) to return to the main keyboard — both delegate
+    // to the existing main/settings swap handlers (R4 / ADR 0056).
+    if (params.action === KeyboardAction.MenuSettings) {
+      await this.openSettings(user, params.vendorChatId, correlationId);
+
+      return;
+    }
+
+    if (params.action === KeyboardAction.CloseMenu) {
+      await this.goBackToMain(user, params.vendorChatId, correlationId);
+
+      return;
+    }
+
+    if (params.action === KeyboardAction.Logout) {
+      await this.logout(user, params.vendorChatId, correlationId);
 
       return;
     }
@@ -265,6 +307,112 @@ export class KeyboardActionService {
       correlationId,
     );
     await this.lastButton.record(user.id, 'Returned to the main menu.');
+  }
+
+  /**
+   * Opens the persistent Menu surface (R4 / ADR 0056): renders the account/status
+   * card from the user's display name + email and the Telegram link status (🟢
+   * Connected when linked, 🔴 Not connected otherwise), docks the menu keyboard,
+   * and DEDUP-DELETES the prior menu card so the chat never accumulates stale cards.
+   *
+   * Send-new-FIRST, delete-old-AFTER (no per-user lock on this path): the new card
+   * is sent and its id captured, THEN the prior id is read-and-cleared and — only
+   * when present AND different from the new one — the prior card is deleted. So a
+   * delete-replace race leaves at most one extra bubble, never zero. Marks Menu the
+   * active surface so its labels route as taps, and records the outcome line. Every
+   * send / Redis call degrades never-throw.
+   */
+  private async openMenu(
+    user: User,
+    vendorChatId: string,
+    correlationId: string,
+  ): Promise<void> {
+    const status = await this.linkingService.getStatus(user.id);
+    const body = this.buildMenuBody(user, status);
+
+    const newMenuId = await this.replyPresenter.sendTextWithKeyboard(
+      vendorChatId,
+      body,
+      MENU_KEYBOARD,
+      undefined,
+      correlationId,
+    );
+
+    // Retire the prior menu card ONLY once the new one actually landed
+    // (send-new-first, delete-old-after): if the send was swallowed (newMenuId is
+    // null) we keep the old card rather than orphaning the chat to zero menus.
+    // Skip too when there is no prior id (first open) or it is identical to the new
+    // id (nothing fresh to dedup against). The take() read-and-clears regardless so
+    // a stale id never lingers.
+    const priorMenuId = await this.lastMenu.take(user.id);
+
+    if (newMenuId) {
+      if (priorMenuId && priorMenuId !== newMenuId) {
+        await this.replyPresenter.deleteMessageQuietly(
+          vendorChatId,
+          priorMenuId,
+          correlationId,
+        );
+      }
+
+      await this.lastMenu.record(user.id, newMenuId);
+    }
+
+    await this.activeKeyboard.setActiveSurface(user.id, KeyboardSurface.Menu);
+    await this.lastButton.record(user.id, 'Opened the menu.');
+  }
+
+  /**
+   * Logs the user out from the menu (R4 / ADR 0056): re-uses the existing disconnect
+   * path (unlink via {@link LinkingService} + clear the active surface +
+   * `ReplyKeyboardRemove`) and additionally clears the tracked menu-card id so a
+   * later re-link starts with no stale card to dedup-delete. Records its own outcome
+   * line. The unlink runs first so even if the keyboard send fails the binding is
+   * gone. Degrades never-throw.
+   */
+  private async logout(
+    user: User,
+    vendorChatId: string,
+    correlationId: string,
+  ): Promise<void> {
+    await this.linkingService.unlink(user.id);
+    await this.activeKeyboard.clear(user.id);
+    await this.lastMenu.clear(user.id);
+    await this.replyPresenter.sendTextRemovingKeyboard(
+      vendorChatId,
+      LOGOUT_REPLY,
+      correlationId,
+    );
+    await this.lastButton.record(user.id, 'Logged out of Telegram.');
+  }
+
+  /**
+   * Builds the menu card body (R4 / ADR 0056): the connection-status line (🟢
+   * Connected when the Telegram link is present, 🔴 Not connected otherwise) plus
+   * the account lines derived from the user's display name and email. There is no
+   * firstName/lastName column, so the display name is split on whitespace into a
+   * first/rest pair for display; a missing name/email simply renders a dash.
+   */
+  private buildMenuBody(user: User, status: TelegramLinkStatus): string {
+    const statusLine = status.linked
+      ? MENU_STATUS_CONNECTED
+      : MENU_STATUS_NOT_CONNECTED;
+
+    const trimmedName = user.displayName?.trim() ?? '';
+    const nameParts = trimmedName.length > 0 ? trimmedName.split(/\s+/) : [];
+    const firstName = nameParts[0] ?? '—';
+    const lastName = nameParts.slice(1).join(' ') || '—';
+    const email = user.email ?? '—';
+
+    return [
+      'Menu',
+      '',
+      statusLine,
+      '',
+      `First name: ${firstName}`,
+      `Last name: ${lastName}`,
+      `Email: ${email}`,
+    ].join('\n');
   }
 
   /**

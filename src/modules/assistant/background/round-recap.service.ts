@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { ROUND_RECAP_SYSTEM_PROMPT } from '../assistant.prompts';
+import { roundRecapSystemPrompt } from '../assistant.prompts';
 import { ToolStepRecord } from '../assistant.types';
+import { StatusLocale } from '../reply/status-phrases';
 import { AiConnector } from '@/modules/ai/ai-connector.abstract';
 import { ACTIVE_AI_CONNECTOR } from '@/modules/ai/ai.module';
 import { AiModelRole, PromptRole } from '@/modules/ai/ai.types';
@@ -48,12 +49,15 @@ export class RoundRecapService {
   /**
    * Generates a one-sentence recap for a just-completed tool round, or `null`
    * when there is nothing to narrate or the background model fails. Trims and caps
-   * the output so a verbose model reply can't overflow the draft. Best-effort: a
-   * fault is logged at debug and swallowed (returns `null`).
+   * the output so a verbose model reply can't overflow the draft. The recap is
+   * written in the user's language (`locale`, R2 / ADR 0055; English when absent)
+   * by instructing the BACKGROUND model accordingly. Best-effort: a fault is logged
+   * at debug and swallowed (returns `null`).
    */
   async recapRound(
     steps: ToolStepRecord[],
     correlationId: string,
+    locale?: StatusLocale,
   ): Promise<string | null> {
     if (steps.length === 0) {
       return null;
@@ -62,7 +66,9 @@ export class RoundRecapService {
     try {
       const result = await this.ai.complete({
         modelRole: AiModelRole.BACKGROUND,
-        system: [{ role: PromptRole.USER, content: ROUND_RECAP_SYSTEM_PROMPT }],
+        system: [
+          { role: PromptRole.USER, content: roundRecapSystemPrompt(locale) },
+        ],
         messages: [
           {
             role: PromptRole.USER,

@@ -1,16 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
-import { CreateRecurrenceRuleDto, UpdateRecurrenceRuleDto } from './dtos';
-import { Occurrence } from './recurrence.types';
+import { CreateRecurrenceRuleDto } from './dtos';
+import { Occurrence, RecurrenceConfig } from './recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
-  RecurrenceRule,
   Task,
   TaskOccurrenceException,
 } from '@/modules/database/entities';
-import { RecurrenceRuleDatabaseService } from '@/modules/database/services';
 
 /**
  * Hard ceiling on occurrences returned from a single expansion call. A window
@@ -183,7 +181,7 @@ const yearlyCandidates = (
 const passesLimitFilters = (
   candidate: DateTime,
   frequency: RecurrenceFrequency,
-  rule: RecurrenceRule,
+  config: RecurrenceConfig,
 ): boolean => {
   const limitsWeekday = frequency !== RecurrenceFrequency.WEEKLY;
   const limitsMonthDay =
@@ -193,27 +191,27 @@ const passesLimitFilters = (
 
   if (
     limitsWeekday &&
-    rule.byWeekday &&
-    rule.byWeekday.length > 0 &&
-    !rule.byWeekday.includes(luxonWeekdayToEntity(candidate.weekday))
+    config.byWeekday &&
+    config.byWeekday.length > 0 &&
+    !config.byWeekday.includes(luxonWeekdayToEntity(candidate.weekday))
   ) {
     return false;
   }
 
   if (
     limitsMonthDay &&
-    rule.byMonthDay &&
-    rule.byMonthDay.length > 0 &&
-    !rule.byMonthDay.includes(candidate.day)
+    config.byMonthDay &&
+    config.byMonthDay.length > 0 &&
+    !config.byMonthDay.includes(candidate.day)
   ) {
     return false;
   }
 
   if (
     limitsMonth &&
-    rule.byMonth &&
-    rule.byMonth.length > 0 &&
-    !rule.byMonth.includes(candidate.month)
+    config.byMonth &&
+    config.byMonth.length > 0 &&
+    !config.byMonth.includes(candidate.month)
   ) {
     return false;
   }
@@ -229,22 +227,27 @@ const passesLimitFilters = (
 const candidatesForPeriod = (
   periodStart: DateTime,
   seed: DateTime,
-  rule: RecurrenceRule,
+  config: RecurrenceConfig,
 ): DateTime[] => {
   const raw = (() => {
-    if (rule.frequency === RecurrenceFrequency.DAILY) {
+    if (config.frequency === RecurrenceFrequency.DAILY) {
       return dailyCandidates(periodStart);
     }
 
-    if (rule.frequency === RecurrenceFrequency.WEEKLY) {
-      return weeklyCandidates(periodStart, rule.byWeekday);
+    if (config.frequency === RecurrenceFrequency.WEEKLY) {
+      return weeklyCandidates(periodStart, config.byWeekday);
     }
 
-    if (rule.frequency === RecurrenceFrequency.MONTHLY) {
-      return monthlyCandidates(periodStart, seed, rule.byMonthDay);
+    if (config.frequency === RecurrenceFrequency.MONTHLY) {
+      return monthlyCandidates(periodStart, seed, config.byMonthDay);
     }
 
-    return yearlyCandidates(periodStart, seed, rule.byMonth, rule.byMonthDay);
+    return yearlyCandidates(
+      periodStart,
+      seed,
+      config.byMonth,
+      config.byMonthDay,
+    );
   })();
 
   const seedMillis = seed.toMillis();
@@ -256,7 +259,7 @@ const candidatesForPeriod = (
 
     if (millis < seedMillis) continue;
     if (seen.has(millis)) continue;
-    if (!passesLimitFilters(candidate, rule.frequency, rule)) continue;
+    if (!passesLimitFilters(candidate, config.frequency, config)) continue;
 
     seen.add(millis);
     filtered.push(candidate);
@@ -266,32 +269,30 @@ const candidatesForPeriod = (
 };
 
 /**
- * Service for RecurrenceRule CRUD and the pure on-read expansion engine.
- * Expansion never materializes occurrences and carries no DB dependency.
+ * Pure on-read recurrence expansion engine (ADR 0054). Recurrence is an inline
+ * {@link RecurrenceConfig} on the anchor row, so this service carries NO database
+ * dependency and owns no CRUD — it only expands a config into occurrences. It
+ * never materializes occurrences (ADR 0002).
  */
 @Injectable()
 export class RecurrenceRuleService {
   private readonly logger = new Logger(RecurrenceRuleService.name);
 
-  constructor(
-    private readonly recurrenceRuleDatabaseService: RecurrenceRuleDatabaseService,
-  ) {}
-
   /**
    * Advances a period cursor by one `frequency × interval` step.
    */
-  private stepPeriod(cursor: DateTime, rule: RecurrenceRule): DateTime {
-    const interval = rule.interval >= 1 ? rule.interval : 1;
+  private stepPeriod(cursor: DateTime, config: RecurrenceConfig): DateTime {
+    const interval = config.interval >= 1 ? config.interval : 1;
 
-    if (rule.frequency === RecurrenceFrequency.DAILY) {
+    if (config.frequency === RecurrenceFrequency.DAILY) {
       return cursor.plus({ days: interval });
     }
 
-    if (rule.frequency === RecurrenceFrequency.WEEKLY) {
+    if (config.frequency === RecurrenceFrequency.WEEKLY) {
       return cursor.plus({ weeks: interval });
     }
 
-    if (rule.frequency === RecurrenceFrequency.MONTHLY) {
+    if (config.frequency === RecurrenceFrequency.MONTHLY) {
       return cursor.plus({ months: interval });
     }
 
@@ -299,18 +300,18 @@ export class RecurrenceRuleService {
   }
 
   /**
-   * Resolves the inclusive UNTIL boundary (end of the rule's `endDate` day) in
-   * the anchor timezone, or null when the rule does not terminate by date.
+   * Resolves the inclusive UNTIL boundary (end of the config's `endDate` day) in
+   * the anchor timezone, or null when the config does not terminate by date.
    */
   private untilBoundaryMillis(
-    rule: RecurrenceRule,
+    config: RecurrenceConfig,
     zone: string,
   ): number | null {
-    if (rule.endType !== RecurrenceEndType.UNTIL_DATE || !rule.endDate) {
+    if (config.endType !== RecurrenceEndType.UNTIL_DATE || !config.endDate) {
       return null;
     }
 
-    const boundary = DateTime.fromISO(rule.endDate, { zone });
+    const boundary = DateTime.fromISO(config.endDate, { zone });
 
     if (!boundary.isValid) return null;
 
@@ -363,7 +364,7 @@ export class RecurrenceRuleService {
    */
   expandOccurrences(
     anchor: Task,
-    rule: RecurrenceRule,
+    config: RecurrenceConfig,
     exceptions: TaskOccurrenceException[],
     windowFrom: Date,
     windowTo: Date,
@@ -382,10 +383,10 @@ export class RecurrenceRuleService {
     const exceptionsByOriginalStart = this.indexExceptions(exceptions);
     const windowFromMillis = windowFrom.getTime();
     const windowToMillis = windowTo.getTime();
-    const untilMillis = this.untilBoundaryMillis(rule, zone);
+    const untilMillis = this.untilBoundaryMillis(config, zone);
     const hasCount =
-      rule.endType === RecurrenceEndType.COUNT && rule.count !== null;
-    const countLimit = hasCount ? (rule.count as number) : null;
+      config.endType === RecurrenceEndType.COUNT && config.count !== null;
+    const countLimit = hasCount ? (config.count as number) : null;
 
     const occurrences: Occurrence[] = [];
     let periodCursor = seed;
@@ -394,7 +395,7 @@ export class RecurrenceRuleService {
     let truncated = false;
 
     while (generationSteps < MAX_GENERATION_STEPS) {
-      const candidates = candidatesForPeriod(periodCursor, seed, rule);
+      const candidates = candidatesForPeriod(periodCursor, seed, config);
 
       for (const candidate of candidates) {
         const candidateMillis = candidate.toMillis();
@@ -442,7 +443,7 @@ export class RecurrenceRuleService {
 
       if (truncated) break;
 
-      const next = this.stepPeriod(periodCursor, rule);
+      const next = this.stepPeriod(periodCursor, config);
 
       if (next.toMillis() <= periodCursor.toMillis()) break;
 
@@ -452,7 +453,7 @@ export class RecurrenceRuleService {
 
     if (truncated) {
       this.logger.warn(
-        `expandOccurrences truncated at ${MAX_OCCURRENCES_PER_WINDOW} occurrences for task ${anchor.id} (rule ${rule.id}); window [${windowFrom.toISOString()}, ${windowTo.toISOString()}) is likely too wide`,
+        `expandOccurrences truncated at ${MAX_OCCURRENCES_PER_WINDOW} occurrences for task ${anchor.id}; window [${windowFrom.toISOString()}, ${windowTo.toISOString()}) is likely too wide`,
       );
 
       return occurrences;
@@ -465,7 +466,7 @@ export class RecurrenceRuleService {
     // window, yielding an empty result — log it so it is never a silent drop.
     if (generationSteps >= MAX_GENERATION_STEPS) {
       this.logger.warn(
-        `expandOccurrences hit the ${MAX_GENERATION_STEPS}-step generation backstop for task ${anchor.id} (rule ${rule.id}) before reaching window [${windowFrom.toISOString()}, ${windowTo.toISOString()}); returning ${occurrences.length} occurrence(s) — the anchor's startAt is likely far in the past`,
+        `expandOccurrences hit the ${MAX_GENERATION_STEPS}-step generation backstop for task ${anchor.id} before reaching window [${windowFrom.toISOString()}, ${windowTo.toISOString()}); returning ${occurrences.length} occurrence(s) — the anchor's startAt is likely far in the past`,
       );
     }
 
@@ -488,11 +489,11 @@ export class RecurrenceRuleService {
    * miss (see {@link PREVIEW_SERIES_HORIZON_DAYS}).
    */
   previewSeriesOccurrences(proposal: ProposedSeries): Occurrence[] {
-    // Non-persisted in-memory rule + anchor — `expandOccurrences` reads only
-    // these fields and performs no I/O, so the proposal needs no DB round-trip
-    // (the method stays pure, like the rest of the expansion engine).
-    const rule = {
-      id: 'preview-rule',
+    // In-memory recurrence config built straight from the proposed DTO (no cast
+    // needed now that the engine takes a plain `RecurrenceConfig`). The anchor is
+    // a non-persisted in-memory `Task` — `expandOccurrences` reads only these
+    // fields and performs no I/O, so the method stays pure.
+    const config: RecurrenceConfig = {
       frequency: proposal.recurrence.frequency,
       interval: proposal.recurrence.interval ?? 1,
       byWeekday: proposal.recurrence.byWeekday ?? null,
@@ -501,7 +502,7 @@ export class RecurrenceRuleService {
       endType: proposal.recurrence.endType ?? RecurrenceEndType.NEVER,
       endDate: proposal.recurrence.endDate ?? null,
       count: proposal.recurrence.count ?? null,
-    } as RecurrenceRule;
+    };
     const anchor = {
       id: 'preview',
       title: proposal.title,
@@ -517,7 +518,7 @@ export class RecurrenceRuleService {
     );
 
     // No exceptions exist for a series that does not yet exist.
-    return this.expandOccurrences(anchor, rule, [], windowFrom, windowTo);
+    return this.expandOccurrences(anchor, config, [], windowFrom, windowTo);
   }
 
   /**
@@ -537,10 +538,15 @@ export class RecurrenceRuleService {
   }
 
   /**
-   * Persists a new RecurrenceRule from a validated DTO and returns the saved row.
+   * Normalizes a validated {@link CreateRecurrenceRuleDto} into the inline
+   * {@link RecurrenceConfig} POJO stored on a Task / TaskGroup row. Optional DTO
+   * fields collapse to their canonical stored form (`interval` defaults to 1, the
+   * `by*` axes and `endDate`/`count` default to null, `endType` to NEVER), so the
+   * persisted config is always fully-populated and the expander reads it directly.
+   * Static and pure — recurrence no longer touches the database (ADR 0054).
    */
-  async create(dto: CreateRecurrenceRuleDto): Promise<RecurrenceRule> {
-    const rule = this.recurrenceRuleDatabaseService.createInstance({
+  static toConfig(dto: CreateRecurrenceRuleDto): RecurrenceConfig {
+    return {
       frequency: dto.frequency,
       interval: dto.interval ?? 1,
       byWeekday: dto.byWeekday ?? null,
@@ -549,73 +555,6 @@ export class RecurrenceRuleService {
       endType: dto.endType ?? RecurrenceEndType.NEVER,
       endDate: dto.endDate ?? null,
       count: dto.count ?? null,
-    });
-
-    return this.recurrenceRuleDatabaseService.save(rule);
-  }
-
-  /**
-   * Applies a partial update to an existing RecurrenceRule. Mutates only the
-   * provided fields and short-circuits when nothing actually changes.
-   */
-  async update(
-    id: string,
-    dto: UpdateRecurrenceRuleDto,
-  ): Promise<RecurrenceRule> {
-    const rule = await this.recurrenceRuleDatabaseService.findOneByOrThrow({
-      id,
-    });
-    let changed = false;
-
-    if (dto.frequency !== undefined && dto.frequency !== rule.frequency) {
-      rule.frequency = dto.frequency;
-      changed = true;
-    }
-
-    if (dto.interval !== undefined && dto.interval !== rule.interval) {
-      rule.interval = dto.interval;
-      changed = true;
-    }
-
-    if (dto.byWeekday !== undefined) {
-      rule.byWeekday = dto.byWeekday;
-      changed = true;
-    }
-
-    if (dto.byMonthDay !== undefined) {
-      rule.byMonthDay = dto.byMonthDay;
-      changed = true;
-    }
-
-    if (dto.byMonth !== undefined) {
-      rule.byMonth = dto.byMonth;
-      changed = true;
-    }
-
-    if (dto.endType !== undefined && dto.endType !== rule.endType) {
-      rule.endType = dto.endType;
-      changed = true;
-    }
-
-    if (dto.endDate !== undefined && dto.endDate !== rule.endDate) {
-      rule.endDate = dto.endDate;
-      changed = true;
-    }
-
-    if (dto.count !== undefined && dto.count !== rule.count) {
-      rule.count = dto.count;
-      changed = true;
-    }
-
-    if (!changed) return rule;
-
-    return this.recurrenceRuleDatabaseService.save(rule);
-  }
-
-  /**
-   * Deletes a RecurrenceRule by id, throwing when no row matched.
-   */
-  async remove(id: string): Promise<void> {
-    await this.recurrenceRuleDatabaseService.deleteOrThrow(id);
+    };
   }
 }

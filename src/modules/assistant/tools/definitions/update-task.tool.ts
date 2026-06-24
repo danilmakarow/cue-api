@@ -2,7 +2,8 @@ import { ToolName, updateTaskInputSchema } from '../tool-schemas';
 import { buildTool } from '../tool.contract';
 import {
   editScopeJsonSchema,
-  recurrenceJsonSchema,
+  nullableColorJsonSchema,
+  nullableRecurrenceJsonSchema,
 } from './shared-json-schema';
 
 /** Model-facing description for `update_task`. */
@@ -35,7 +36,13 @@ export const updateTaskTool = buildTool({
         description: 'New ISO 8601 end datetime, or null to clear it.',
       },
       group: { type: 'string', description: 'New group name.' },
-      recurrence: recurrenceJsonSchema,
+      recurrence: nullableRecurrenceJsonSchema,
+      requiresCompletion: {
+        type: ['boolean', 'null'],
+        description:
+          'Set whether the task must be completed, or null to clear and inherit the group default.',
+      },
+      color: nullableColorJsonSchema,
       editScope: editScopeJsonSchema,
       confirmOverlap: {
         type: 'boolean',

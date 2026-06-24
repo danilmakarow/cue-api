@@ -5,11 +5,8 @@ export { TelegramLink } from './telegram-link.entity';
 export { Calendar } from './calendar.entity';
 export { TaskGroup } from './task-group.entity';
 export { Task } from './task.entity';
-export {
-  RecurrenceRule,
-  RecurrenceFrequency,
-  RecurrenceEndType,
-} from './recurrence-rule.entity';
+export { RecurrenceFrequency, RecurrenceEndType } from './recurrence-enums';
+export { TaskColor, isValidTaskColor } from './task-color';
 export { TaskOccurrenceException } from './task-occurrence-exception.entity';
 export { NotificationStrategy } from './notification-strategy.entity';
 export {

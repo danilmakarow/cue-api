@@ -5,6 +5,8 @@ import {
   resolveStatusLocale,
   resolveTextStatusLocale,
   resolveVoiceStatusLocale,
+  SPINNER_FRAMES,
+  spinnerLoadingLine,
   voiceListeningPhrase,
 } from './status-phrases';
 
@@ -28,6 +30,17 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
     it('is case-insensitive on the language tag', () => {
       expect(resolveStatusLocale('RU')).toBe('ru');
       expect(resolveStatusLocale('Uk-Ua')).toBe('uk');
+    });
+
+    it('borrows the fallback locale when the language_code is unsupported/absent (R2 / ADR 0055)', () => {
+      // The voice pre-STT line has no text — an unsupported/absent code falls back
+      // to the prior turn's borrowed locale instead of bare en.
+      expect(resolveStatusLocale('fr', 'ru')).toBe('ru');
+      expect(resolveStatusLocale(undefined, 'uk')).toBe('uk');
+      // A SUPPORTED code still wins over the borrowed fallback.
+      expect(resolveStatusLocale('ru', 'uk')).toBe('ru');
+      // No fallback ⇒ still en.
+      expect(resolveStatusLocale('fr')).toBe('en');
     });
   });
 
@@ -77,6 +90,29 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
       expect(
         resolveTextStatusLocale('???', undefined, detectMessageLanguage),
       ).toBe('en');
+    });
+
+    it('borrows the fallback locale below the language_code when both are inconclusive (R2 / ADR 0055)', () => {
+      // Inconclusive text + unsupported/absent code ⇒ borrow the prior turn locale.
+      expect(
+        resolveTextStatusLocale('123', 'fr', detectMessageLanguage, 'ru'),
+      ).toBe('ru');
+      expect(
+        resolveTextStatusLocale('???', undefined, detectMessageLanguage, 'uk'),
+      ).toBe('uk');
+      // A SUPPORTED language_code still wins over the borrowed fallback.
+      expect(
+        resolveTextStatusLocale('123', 'uk', detectMessageLanguage, 'ru'),
+      ).toBe('uk');
+      // Conclusive message text still wins over everything.
+      expect(
+        resolveTextStatusLocale(
+          'перенеси встречу',
+          'fr',
+          detectMessageLanguage,
+          'uk',
+        ),
+      ).toBe('ru');
     });
   });
 
@@ -130,6 +166,40 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
         resolveVoiceStatusLocale(undefined, '123', 'fr', detectMessageLanguage),
       ).toBe('en');
     });
+
+    it('borrows the fallback locale below the language_code when STT/transcript/code are all inconclusive (R2 / ADR 0055)', () => {
+      // The most important case for R2: a voice note where nothing else resolves
+      // borrows the prior turn's language instead of snapping to en.
+      expect(
+        resolveVoiceStatusLocale(
+          undefined,
+          '123',
+          'fr',
+          detectMessageLanguage,
+          'ru',
+        ),
+      ).toBe('ru');
+      // A SUPPORTED language_code still wins over the borrowed fallback.
+      expect(
+        resolveVoiceStatusLocale(
+          undefined,
+          '123',
+          'uk',
+          detectMessageLanguage,
+          'ru',
+        ),
+      ).toBe('uk');
+      // The STT language still wins over everything.
+      expect(
+        resolveVoiceStatusLocale(
+          'ru',
+          '123',
+          'fr',
+          detectMessageLanguage,
+          'uk',
+        ),
+      ).toBe('ru');
+    });
   });
 
   describe('voiceListeningPhrase', () => {
@@ -177,6 +247,60 @@ describe('status-phrases (Story 12 / Appendix A)', () => {
       const word = nextLoadingWord('en', undefined, () => 1);
 
       expect(word).toBe('Manifesting'); // last en word
+    });
+  });
+
+  describe('spinnerLoadingLine (R1 / ADR 0057)', () => {
+    it('prepends the frame-0 glyph to the word with NO trailing ellipsis', () => {
+      expect(spinnerLoadingLine('Thinking', 0)).toBe(
+        `${SPINNER_FRAMES[0]} Thinking`,
+      );
+      // The spinner replaces the old static dots — no trailing ellipsis remains.
+      expect(spinnerLoadingLine('Thinking', 0)).not.toMatch(/…$/);
+    });
+
+    it('advances through the frame set as the index grows', () => {
+      expect(spinnerLoadingLine('Готую', 1)).toBe(`${SPINNER_FRAMES[1]} Готую`);
+      expect(spinnerLoadingLine('Готую', 4)).toBe(`${SPINNER_FRAMES[4]} Готую`);
+    });
+
+    it('wraps the frame index modulo the frame count (monotonic counters are fine)', () => {
+      const frameCount = SPINNER_FRAMES.length;
+
+      // Index frameCount wraps back to frame 0, frameCount+2 to frame 2.
+      expect(spinnerLoadingLine('Cooking', frameCount)).toBe(
+        `${SPINNER_FRAMES[0]} Cooking`,
+      );
+      expect(spinnerLoadingLine('Cooking', frameCount + 2)).toBe(
+        `${SPINNER_FRAMES[2]} Cooking`,
+      );
+    });
+
+    it('animates the SAME word across ticks (only the leading frame changes)', () => {
+      const lines = [0, 1, 2, 3].map((frame) =>
+        spinnerLoadingLine('Brewing', frame),
+      );
+
+      // Every line ends in the same word; only the leading glyph rotates.
+      lines.forEach((line) => expect(line.endsWith('Brewing')).toBe(true));
+      expect(new Set(lines).size).toBe(4);
+    });
+  });
+
+  describe('SPINNER_FRAMES', () => {
+    it('is the classic 10-frame braille set', () => {
+      expect(SPINNER_FRAMES).toEqual([
+        '⠋',
+        '⠙',
+        '⠹',
+        '⠸',
+        '⠼',
+        '⠴',
+        '⠦',
+        '⠧',
+        '⠇',
+        '⠏',
+      ]);
     });
   });
 });

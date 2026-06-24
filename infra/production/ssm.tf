@@ -71,10 +71,14 @@ locals {
     ASSISTANT_USER_LOCK_TTL_MS   = "30000"
     ASSISTANT_USER_LOCK_RENEW_MS = "10000"
 
-    # v2 live-status / streaming surface (Waves A-B).
+    # v2 live-status surface — one real message edited in place (ADR 0053). TTL of
+    # the per-turn Redis StatusSession pointer. (The former dot/word animation
+    # intervals were removed with the draft surface.)
     ASSISTANT_STATUS_SESSION_TTL_SECONDS = "120"
-    ASSISTANT_STATUS_DOT_INTERVAL_MS     = "500"
-    ASSISTANT_STATUS_WORD_INTERVAL_MS    = "5000"
+    # Status-surface ASCII braille spinner tick interval (ms, R1 / ADR 0057). Kept
+    # ~1000 (never sub-second) to stay clear of Telegram editMessageText 429
+    # flood-control.
+    ASSISTANT_STATUS_SPINNER_INTERVAL_MS = "1000"
 
     # v2 message debounce + queue-after (Wave C, Story 14a).
     ASSISTANT_DEBOUNCE_WINDOW_MS      = "2000"
@@ -82,6 +86,11 @@ locals {
 
     # v2 reply-keyboard latest-button context (Wave E, Story 16).
     ASSISTANT_LAST_BUTTON_TTL_SECONDS = "300"
+
+    # Last-message-language tracker (R2 / ADR 0055) TTL (seconds): per-user last
+    # resolved loading-status locale, borrowed by the next turn's voice pre-STT
+    # "Listening…" line. Sticky, self-cleaning backstop — keep it long (~7 days).
+    ASSISTANT_LAST_MESSAGE_LANGUAGE_TTL_SECONDS = "604800"
   }
 }
 

@@ -96,12 +96,12 @@ export const environmentSchema = z
     // Redis pointer to the animated status surface (draft id / message id). Short —
     // it only needs to outlive one in-flight turn; cleared on finalize.
     ASSISTANT_STATUS_SESSION_TTL_SECONDS: z.coerce.number().int().positive(),
-    // Live-status animation cadence (Story 12, ADR 0012): the trailing-dot tick
-    // interval (ms, ~500) and the loading-word swap interval (ms, ~5000). Both
-    // routed through the central L9 draft throttle (~2–5/s) so the combined draft
-    // re-call rate stays under the conservative cap — keep the dot tick ≥ 250 ms.
-    ASSISTANT_STATUS_DOT_INTERVAL_MS: z.coerce.number().int().positive(),
-    ASSISTANT_STATUS_WORD_INTERVAL_MS: z.coerce.number().int().positive(),
+    // Status-surface spinner tick interval (ms, R1 / ADR 0057): how often the
+    // ASCII braille spinner frame advances on the one live status message. Kept
+    // around ~1000 (never sub-second) to stay clear of Telegram editMessageText
+    // flood-control (429); a benign "message is not modified" 400 from an identical
+    // frame is treated as success by the connector.
+    ASSISTANT_STATUS_SPINNER_INTERVAL_MS: z.coerce.number().int().positive(),
     // Per-user serialization lock (StatusSession ADR 0012 sibling; Story 11). The
     // mutex's auto-expiry TTL (ms) — the deadlock backstop if a holder crashes
     // without releasing — and the watchdog renew interval (ms) that extends it
@@ -129,6 +129,16 @@ export const environmentSchema = z
     // backstop for a user who taps a button and then never sends a follow-up
     // message; keep it short (a few minutes).
     ASSISTANT_LAST_BUTTON_TTL_SECONDS: z.coerce.number().int().positive(),
+    // Last-message-language tracker (R2, ADR 0055) TTL (seconds): how long the
+    // per-user last resolved loading-status locale (en/uk/ru) stays in Redis to be
+    // borrowed by the NEXT turn's voice pre-STT "Listening…" line (which has no
+    // transcript to detect yet). It is STICKY (overwritten on each known-language
+    // turn, never read-cleared), so this is a self-cleaning backstop for a user who
+    // goes quiet — keep it long (~7 days).
+    ASSISTANT_LAST_MESSAGE_LANGUAGE_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive(),
     ASSISTANT_LINK_NONCE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_DEDUPE_TTL_SECONDS: z.coerce.number().int().positive(),
     ASSISTANT_RECENT_WINDOW_SIZE: z.coerce.number().int().positive(),

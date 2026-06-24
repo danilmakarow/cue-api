@@ -5,6 +5,8 @@
  * no timestamp (the timestamp lives in the volatile now-context turn).
  */
 
+import type { StatusLocale } from './reply/status-phrases';
+
 /**
  * System prompt — the J.A.R.V.I.S.-register persona plus the tool-use,
  * ask-don't-guess, and confirmation policy (spec "Voice and persona" +
@@ -20,6 +22,7 @@ Voice
 - Address the user by their profile name when known; default to neutral respect and never assume gender.
 - Acknowledge crisply ("Done — moved to 4 pm."). Be honest and plain under failure, not a pile of apologies.
 - Minimal, tasteful emoji at most. Clarity and correctness always beat character.
+- Reply in the same language the user writes in (their latest message decides); match Russian with Russian, Ukrainian with Ukrainian, English with English. Never switch languages unprompted.
 
 Working with the calendar
 - The calendar is the source of truth; read and edit it only through the provided tools. Never invent events or claim an action you did not take via a tool.
@@ -79,6 +82,29 @@ export const MEMORY_EXTRACTION_SYSTEM_PROMPT = `You extract durable facts about 
  * Background prompt for the per-round progress recap (Story 13 / ADR 0041). Run
  * on the cheap BACKGROUND model between tool rounds; renders one short
  * present-tense line into the live status draft so the user sees progress. Kept
- * terse and best-effort — never a final answer, never an apology.
+ * terse and best-effort — never a final answer, never an apology. Language-neutral
+ * base copy; {@link roundRecapSystemPrompt} appends the per-turn language
+ * instruction (R2 / ADR 0055).
  */
 export const ROUND_RECAP_SYSTEM_PROMPT = `You narrate, in ONE short present-tense sentence (max ~8 words, no trailing period), what a scheduling assistant just did in this step — e.g. "Checking Thursday afternoon" or "Booking the dentist". Use the just-completed tool actions. No greetings, no apologies, no final summary, no first person. Return only the sentence.`;
+
+/**
+ * The three loading/recap locales (kept in step with `StatusLocale` in
+ * status-phrases.ts) mapped to the English language name the BACKGROUND recap
+ * model is instructed to write in (R2 / ADR 0055).
+ */
+const RECAP_LANGUAGE_NAMES: Record<StatusLocale, string> = {
+  en: 'English',
+  uk: 'Ukrainian',
+  ru: 'Russian',
+};
+
+/**
+ * Builds the per-round recap system prompt for a given turn locale (R2 / ADR
+ * 0055), appending a single sentence instructing the BACKGROUND model to write the
+ * recap in the user's language. Defaults to English when no locale is supplied (an
+ * `ask_user` resume or a turn whose language never resolved), preserving the prior
+ * English-only behaviour.
+ */
+export const roundRecapSystemPrompt = (locale: StatusLocale = 'en'): string =>
+  `${ROUND_RECAP_SYSTEM_PROMPT} Write the sentence in ${RECAP_LANGUAGE_NAMES[locale]}.`;

@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import {
   ExternalVendorConfig,
   TelegramVendorConfig,
@@ -473,6 +475,99 @@ describe('TelegramVendorConnector', () => {
         connector.sendMessage({ vendorChatId: 'bad' }, { text: 'hi' }),
       ).rejects.toThrow(/chat not found/);
     });
+
+    it('treats a "message is not modified" 400 as SUCCESS (benign repeated spinner frame, R1 / ADR 0057)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      // Telegram returns this when an edit is a no-op (identical text). The status
+      // spinner re-posts identical frames on a stalled turn, so it must not throw.
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          ok: false,
+          error_code: 400,
+          description: 'Bad Request: message is not modified',
+        }),
+      } as unknown as Response);
+
+      await expect(
+        connector.editMessageText(
+          { vendorChatId: '12345' },
+          { vendorMessageId: '5', text: 'same frame' },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it('treats a "message is not modified" reported as HTTP 200 + ok:false as SUCCESS too', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: false,
+          description: 'Bad Request: message is not modified',
+        }),
+      } as unknown as Response);
+
+      await expect(
+        connector.editMessageText(
+          { vendorChatId: '12345' },
+          { vendorMessageId: '5', text: 'same frame' },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it('reads parameters.retry_after on a 429 then degrades (still throws, never hard-blocks)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+      const debugSpy = jest
+        .spyOn(Logger.prototype, 'debug')
+        .mockImplementation(() => undefined);
+
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 429,
+        json: async () => ({
+          ok: false,
+          error_code: 429,
+          description: 'Too Many Requests: retry after 7',
+          parameters: { retry_after: 7 },
+        }),
+      } as unknown as Response);
+
+      await expect(
+        connector.editMessageText(
+          { vendorChatId: '12345' },
+          { vendorMessageId: '5', text: 'frame' },
+        ),
+      ).rejects.toThrow(/Too Many Requests/);
+
+      // The back-off hint is logged (best-effort) but the turn is not blocked.
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('retry_after=7s'),
+      );
+    });
+
+    it('throws on a real HTTP error status with no JSON body, surfacing the status', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error('not json');
+        },
+      } as unknown as Response);
+
+      await expect(
+        connector.sendMessage({ vendorChatId: '12345' }, { text: 'hi' }),
+      ).rejects.toThrow(/HTTP 502/);
+    });
   });
 
   describe('messenger primitives (Story 10, ADR 0012)', () => {
@@ -589,6 +684,71 @@ describe('TelegramVendorConnector', () => {
         text: 'updated',
         parse_mode: undefined,
       });
+    });
+
+    it('editMessageText with clearButtons sends an EMPTY inline_keyboard to drop the keyboard (R3 / ADR 0058)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 5 }));
+
+      await connector.editMessageText(
+        { vendorChatId: '12345' },
+        {
+          vendorMessageId: '5',
+          text: 'Which day?\n\nUser selected: Friday',
+          format: OutboundFormat.Html,
+          clearButtons: true,
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      // The Bot-API way to remove an inline keyboard via an edit: empty rows.
+      expect(body.reply_markup).toEqual({ inline_keyboard: [] });
+      expect(body.parse_mode).toBe('HTML');
+    });
+
+    it('editMessageText prefers buttons over clearButtons when both are set (buttons wins)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 5 }));
+
+      await connector.editMessageText(
+        { vendorChatId: '12345' },
+        {
+          vendorMessageId: '5',
+          text: 'still asking',
+          buttons: [[{ label: 'Yes', callbackData: 'ask:1:y' }]],
+          clearButtons: true,
+        },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      expect(body.reply_markup).toEqual({
+        inline_keyboard: [[{ text: 'Yes', callback_data: 'ask:1:y' }]],
+      });
+    });
+
+    it('editMessageText with neither buttons nor clearButtons omits reply_markup (keyboard untouched)', async () => {
+      const connector = createConnector();
+      const fetchMock = mockFetch();
+
+      fetchMock.mockResolvedValue(okResponse({ message_id: 5 }));
+
+      await connector.editMessageText(
+        { vendorChatId: '12345' },
+        { vendorMessageId: '5', text: 'just text' },
+      );
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+
+      expect(body.reply_markup).toBeUndefined();
     });
 
     it('sendChatAction posts sendChatAction with the mapped action string', async () => {

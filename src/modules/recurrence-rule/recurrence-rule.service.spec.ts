@@ -2,11 +2,10 @@ import { Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
 import { RecurrenceRuleService } from './recurrence-rule.service';
-import { Occurrence } from './recurrence.types';
+import { Occurrence, RecurrenceConfig } from './recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
-  RecurrenceRule,
   Task,
   TaskOccurrenceException,
 } from '@/modules/database/entities';
@@ -24,26 +23,26 @@ const makeTask = (overrides: Partial<Task> = {}): Task =>
     endAt: null,
     isAllDay: false,
     completedAt: null,
-    recurrenceRuleId: 'rule-1',
     ...overrides,
   }) as Task;
 
 /**
- * Builds a RecurrenceRule with NEVER/interval-1 defaults, overridable per test.
+ * Builds a RecurrenceConfig with NEVER/interval-1 defaults, overridable per test.
+ * The engine now takes the inline config POJO (no persisted rule / id).
  */
-const makeRule = (overrides: Partial<RecurrenceRule> = {}): RecurrenceRule =>
-  ({
-    id: 'rule-1',
-    frequency: RecurrenceFrequency.DAILY,
-    interval: 1,
-    byWeekday: null,
-    byMonthDay: null,
-    byMonth: null,
-    endType: RecurrenceEndType.NEVER,
-    endDate: null,
-    count: null,
-    ...overrides,
-  }) as RecurrenceRule;
+const makeRule = (
+  overrides: Partial<RecurrenceConfig> = {},
+): RecurrenceConfig => ({
+  frequency: RecurrenceFrequency.DAILY,
+  interval: 1,
+  byWeekday: null,
+  byMonthDay: null,
+  byMonth: null,
+  endType: RecurrenceEndType.NEVER,
+  endDate: null,
+  count: null,
+  ...overrides,
+});
 
 /**
  * Builds a TaskOccurrenceException for a given original-start instant.
@@ -91,8 +90,8 @@ describe('RecurrenceRuleService.expandOccurrences', () => {
   let service: RecurrenceRuleService;
 
   beforeEach(() => {
-    // The expander is pure; the DB service is never touched in these tests.
-    service = new RecurrenceRuleService(null as never);
+    // The expander is pure and carries no DB dependency (ADR 0054).
+    service = new RecurrenceRuleService();
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
@@ -827,8 +826,8 @@ describe('RecurrenceRuleService.previewSeriesOccurrences (Story 9)', () => {
   let service: RecurrenceRuleService;
 
   beforeEach(() => {
-    // Pure + I/O-free: the DB service is never touched when previewing a series.
-    service = new RecurrenceRuleService(null as never);
+    // Pure + I/O-free: no DB dependency when previewing a series (ADR 0054).
+    service = new RecurrenceRuleService();
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
@@ -871,28 +870,16 @@ describe('RecurrenceRuleService.previewSeriesOccurrences (Story 9)', () => {
   });
 });
 
-describe('RecurrenceRuleService CRUD', () => {
-  const buildDatabaseService = () => ({
-    createInstance: jest.fn((partial: Partial<RecurrenceRule>) => partial),
-    save: jest.fn((entity: RecurrenceRule) =>
-      Promise.resolve({ ...entity, id: entity.id ?? 'rule-1' }),
-    ),
-    findOneByOrThrow: jest.fn(),
-    deleteOrThrow: jest.fn().mockResolvedValue({ affected: 1 }),
-  });
-
-  it('create builds the instance with defaults and saves it', async () => {
-    const databaseService = buildDatabaseService();
-    const service = new RecurrenceRuleService(databaseService as never);
-
-    const saved = await service.create({
+describe('RecurrenceRuleService.toConfig', () => {
+  it('normalizes a validated DTO into a fully-populated inline config', () => {
+    const config = RecurrenceRuleService.toConfig({
       frequency: RecurrenceFrequency.WEEKLY,
       byWeekday: [0, 2, 4],
       endType: RecurrenceEndType.COUNT,
       count: 10,
     });
 
-    expect(databaseService.createInstance).toHaveBeenCalledWith({
+    expect(config).toEqual({
       frequency: RecurrenceFrequency.WEEKLY,
       interval: 1, // defaulted
       byWeekday: [0, 2, 4],
@@ -902,14 +889,14 @@ describe('RecurrenceRuleService CRUD', () => {
       endDate: null,
       count: 10,
     });
-    expect(databaseService.save).toHaveBeenCalledTimes(1);
-    expect(saved.id).toBe('rule-1');
   });
 
-  it('update mutates only the provided fields and saves once', async () => {
-    const databaseService = buildDatabaseService();
-    const existing = {
-      id: 'rule-1',
+  it('defaults endType to NEVER and the by* / end fields to null', () => {
+    const config = RecurrenceRuleService.toConfig({
+      frequency: RecurrenceFrequency.DAILY,
+    });
+
+    expect(config).toEqual({
       frequency: RecurrenceFrequency.DAILY,
       interval: 1,
       byWeekday: null,
@@ -918,51 +905,28 @@ describe('RecurrenceRuleService CRUD', () => {
       endType: RecurrenceEndType.NEVER,
       endDate: null,
       count: null,
-    } as RecurrenceRule;
-
-    databaseService.findOneByOrThrow.mockResolvedValue(existing);
-
-    const service = new RecurrenceRuleService(databaseService as never);
-
-    await service.update('rule-1', { interval: 3 });
-
-    expect(existing.interval).toBe(3);
-    expect(databaseService.save).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('update short-circuits and does not save when nothing changed', async () => {
-    const databaseService = buildDatabaseService();
-    const existing = {
-      id: 'rule-1',
+  it('produces a config the engine can expand directly', () => {
+    const service = new RecurrenceRuleService();
+    const anchor = makeTask({ startAt: zoned('2026-06-01T09:00') });
+    const config = RecurrenceRuleService.toConfig({
       frequency: RecurrenceFrequency.DAILY,
-      interval: 2,
-      byWeekday: null,
-      byMonthDay: null,
-      byMonth: null,
-      endType: RecurrenceEndType.NEVER,
-      endDate: null,
-      count: null,
-    } as RecurrenceRule;
-
-    databaseService.findOneByOrThrow.mockResolvedValue(existing);
-
-    const service = new RecurrenceRuleService(databaseService as never);
-
-    const result = await service.update('rule-1', {
-      frequency: RecurrenceFrequency.DAILY,
-      interval: 2,
+      endType: RecurrenceEndType.COUNT,
+      count: 2,
     });
 
-    expect(databaseService.save).not.toHaveBeenCalled();
-    expect(result).toBe(existing);
-  });
+    const result = service.expandOccurrences(
+      anchor,
+      config,
+      [],
+      zoned('2026-06-01T00:00'),
+      zoned('2026-06-10T00:00'),
+    );
 
-  it('remove delegates to deleteOrThrow', async () => {
-    const databaseService = buildDatabaseService();
-    const service = new RecurrenceRuleService(databaseService as never);
-
-    await service.remove('rule-1');
-
-    expect(databaseService.deleteOrThrow).toHaveBeenCalledWith('rule-1');
+    expect(
+      result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+    ).toEqual(['2026-06-01', '2026-06-02']);
   });
 });

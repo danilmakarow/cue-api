@@ -59,6 +59,15 @@ export interface PendingQuestionPayload {
   correlationId: string;
   /** Vendor (Telegram) chat id the resumed reply must be delivered back to. */
   vendorChatId: string;
+  /**
+   * Vendor message id of the QUESTION message the `ask_user` keyboard was sent on
+   * (R3 / ADR 0058) — captured by the orchestrator after the question is sent so
+   * the resume can morph that original message (remove its buttons + append the
+   * chosen answer) on a button tap. jsonb, so it is purely additive (no migration);
+   * ABSENT on rows suspended before R3 — the resume skips the question-morph edit
+   * gracefully when it is missing.
+   */
+  questionVendorMessageId?: string;
 }
 
 /**

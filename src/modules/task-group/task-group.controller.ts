@@ -106,6 +106,7 @@ export class TaskGroupController {
       color: dto.color,
       icon: dto.icon,
       sortOrder: dto.sortOrder,
+      requiresCompletion: dto.requiresCompletion,
       recurrence: dto.recurrence,
     });
 

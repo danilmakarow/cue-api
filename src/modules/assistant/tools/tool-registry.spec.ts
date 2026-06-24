@@ -14,8 +14,9 @@ const NOOP_SCHEMA = z.object({});
  * derives `toSchemas()` from the single-sourced tool definitions, and this test
  * asserts the derived array is deep-equal — same names, descriptions, required
  * arrays, and every nested field description — and in the same STABLE order
- * (`create_tasks` appended last) so the cached tool-defs prefix never shifts
- * (ADR 0004). Any drift in a tool's prompt or input_schema fails here.
+ * (new tools appended last — `update_group` is the latest, FEATURE R5) so the
+ * cached tool-defs prefix never shifts (ADR 0004). Any drift in a tool's prompt
+ * or input_schema fails here.
  */
 const recurrenceJsonSchema = {
   type: 'object',
@@ -71,6 +72,25 @@ const editScopeJsonSchema = {
     'For a repeating task: which instances to affect. Omit to be asked which scope; pass only when the user is unambiguous.',
 };
 
+const COLOR_DESCRIPTION =
+  'Color: a preset name (RED, ORANGE, YELLOW, GREEN, TEAL, BLUE, INDIGO, PURPLE, PINK, BROWN, GRAY) or a custom #RRGGBB hex.';
+
+const colorJsonSchema = {
+  type: 'string',
+  description: COLOR_DESCRIPTION,
+};
+
+const nullableColorJsonSchema = {
+  type: ['string', 'null'],
+  description: `${COLOR_DESCRIPTION} Pass null to clear and inherit the group.`,
+};
+
+const nullableRecurrenceJsonSchema = {
+  ...recurrenceJsonSchema,
+  description:
+    'New recurrence rule, or null to stop repeating. Makes the task repeat as ONE task with a single rule — never create copies for future dates.',
+};
+
 const createTaskProperties = {
   title: { type: 'string', description: 'Task title.' },
   startAt: {
@@ -95,6 +115,11 @@ const createTaskProperties = {
   requiresCompletion: {
     type: 'boolean',
     description: 'Whether the task must be completed (todos default true).',
+  },
+  color: {
+    type: 'string',
+    description:
+      'Color: a preset name (RED, ORANGE, YELLOW, GREEN, TEAL, BLUE, INDIGO, PURPLE, PINK, BROWN, GRAY) or a custom #RRGGBB hex.',
   },
   timezone: {
     type: 'string',
@@ -198,7 +223,13 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
           description: 'New ISO 8601 end datetime, or null to clear it.',
         },
         group: { type: 'string', description: 'New group name.' },
-        recurrence: recurrenceJsonSchema,
+        recurrence: nullableRecurrenceJsonSchema,
+        requiresCompletion: {
+          type: ['boolean', 'null'],
+          description:
+            'Set whether the task must be completed, or null to clear and inherit the group default.',
+        },
+        color: nullableColorJsonSchema,
         editScope: editScopeJsonSchema,
         confirmOverlap: {
           type: 'boolean',
@@ -286,13 +317,19 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
   {
     name: 'create_group',
     description:
-      'Create a task group (e.g. a new "Home reno" project). Confirm with the user before creating a group they did not explicitly ask for.',
+      'Create a task group (e.g. a new "Home reno" project), optionally with a default color, default recurrence, and default completion-requirement inherited by its tasks. Confirm with the user before creating a group they did not explicitly ask for.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Group name.' },
-        color: { type: 'string', description: 'Optional color.' },
+        color: colorJsonSchema,
         icon: { type: 'string', description: 'Optional icon.' },
+        recurrence: recurrenceJsonSchema,
+        requiresCompletion: {
+          type: 'boolean',
+          description:
+            'Default completion requirement inherited by tasks in this group.',
+        },
       },
       required: ['name'],
     },
@@ -401,6 +438,33 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
       required: ['question'],
     },
   },
+  {
+    name: 'update_group',
+    description:
+      'Update an existing task group by its name: rename it, or change its default color, icon, recurrence, or completion requirement (the defaults its tasks inherit). Pass null for color / icon / recurrence / requiresCompletion to clear that group default. Resolve the group via list_groups first if you are unsure of the exact name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        group: {
+          type: 'string',
+          description: 'Existing group name to update.',
+        },
+        name: { type: 'string', description: 'New group name (a rename).' },
+        color: nullableColorJsonSchema,
+        icon: {
+          type: ['string', 'null'],
+          description: 'New icon, or null to clear it.',
+        },
+        recurrence: nullableRecurrenceJsonSchema,
+        requiresCompletion: {
+          type: ['boolean', 'null'],
+          description:
+            'Set the group default completion requirement, or null to clear it.',
+        },
+      },
+      required: ['group'],
+    },
+  },
 ];
 
 describe('ToolRegistry.toSchemas — byte-equivalence with the prior hand-written schemas', () => {
@@ -432,6 +496,7 @@ describe('ToolRegistry.toSchemas — byte-equivalence with the prior hand-writte
       'create_tasks',
       'check_availability',
       'ask_user',
+      'update_group',
     ]);
   });
 
@@ -468,6 +533,7 @@ describe('ToolRegistry derived accounting sets', () => {
         'create_tasks',
         'complete_task',
         'delete_task',
+        'update_group',
         'update_task',
       ].sort(),
     );
