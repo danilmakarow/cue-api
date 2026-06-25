@@ -1,6 +1,8 @@
-# Reusable quality gate: install, lint, type-check, unit tests.
-# Defined once and called by ci.yml (PRs) and deploy.yml (master), so the checks
-# can never drift between "check before merge" and "check before deploy".
+# Reusable QUALITY gate (pipeline stage 1): install, lint, type-check.
+# Defined once and called by ci.yml (PRs) and deploy.yml (master), so the checks can
+# never drift between "check before merge" and "check before deploy". The heavier
+# unit + e2e tests live in the next stage (_functionality.yml), which the callers
+# run only after this gate passes.
 name: quality
 
 on:
@@ -10,14 +12,14 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # pnpm must be set up before setup-node so its cache can find the store.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 11.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
@@ -29,8 +31,3 @@ jobs:
 
       - name: Type-check
         run: pnpm type
-
-      - name: Unit tests
-        run: pnpm test
-      # Unit tests mock their dependencies — no database/Redis needed. When integration
-      # tests land (test:e2e), add a `services:` Postgres here and point DB_* at it.

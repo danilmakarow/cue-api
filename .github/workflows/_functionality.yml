@@ -1,0 +1,154 @@
+# Reusable FUNCTIONALITY gate (pipeline stage 2): unit tests + end-to-end tests.
+# Runs only after the quality stage passes (the callers wire `needs: quality`), and
+# is shared by ci.yml (PRs) and deploy.yml (master) so the test gate is identical
+# before a merge and before a release.
+#
+# The e2e harness (test/e2e/global-setup.ts) normally boots Postgres + Redis via
+# `docker compose`; in CI we instead provide them as service containers and set
+# E2E_SKIP_DOCKER=1 so the harness runs against that already-running infra. The
+# harness also loads `.env.test` on boot (gitignored, so absent here), so we
+# generate one from the committed Zod contract (src/config/env.config.ts), pointing
+# DB/Redis at the services below.
+name: functionality
+
+on:
+  workflow_call:
+
+jobs:
+  functionality:
+    runs-on: ubuntu-latest
+
+    # Postgres + Redis for the e2e suite. Versions/credentials mirror
+    # docker-compose.dev.yml; published on localhost so the app (DB_HOST/REDIS_HOST
+    # = localhost in the generated .env.test) reaches them. Steps don't start until
+    # both healthchecks pass.
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: cue
+          POSTGRES_USER: cue
+          POSTGRES_PASSWORD: cue
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cue -d cue"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # pnpm must be set up before setup-node so its cache can find the store.
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.3.0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Unit tests
+        run: pnpm test
+
+      # The e2e harness reads .env.test on boot (gitignored → absent in CI). Generate
+      # it from the committed Zod schema, pointing DB/Redis at the service containers.
+      # Dummy vendor/AI keys are safe: the deterministic e2e specs stub the AI
+      # connector (the real-LLM smokes self-skip without E2E_LLM=real), and
+      # ASSISTANT_WEBHOOK_URL is intentionally empty so the boot-time Telegram
+      # setWebhook call is skipped (no outbound network).
+      - name: Generate .env.test
+        run: |
+          cat > .env.test <<'EOF'
+          # Application
+          NODE_ENV=test
+          PORT=3067
+
+          # Database — points at the postgres service container (localhost). The
+          # postgres:15-alpine image has SSL compiled off, so DB_DISABLE_SSL_AUTH
+          # must be false (no ssl key set → plaintext); migrations run on boot.
+          DB_HOST=localhost
+          DB_PORT=5432
+          DB_USERNAME=cue
+          DB_PASSWORD=cue
+          DB_DATABASE=cue
+          DB_SYNCHRONIZE=false
+          DB_RUN_MIGRATIONS=true
+          DB_LOGGING=false
+          DB_DISABLE_SSL_AUTH=false
+
+          # Redis — points at the redis service container (localhost), DB index 15.
+          REDIS_HOST=localhost
+          REDIS_PORT=6379
+          REDIS_PASSWORD=
+          REDIS_DB=15
+
+          # Auth (unused by the assistant path, but required by the Zod schema).
+          JWT_SECRET=e2e-test-jwt-secret-at-least-32-characters-long
+          JWT_EXPIRES_IN=30d
+          APPLE_CLIENT_ID=makarov.cue
+
+          # External vendor (Telegram) — the secret the webhook POST must echo.
+          EXTERNAL_VENDOR=telegram
+          TELEGRAM_BOT_TOKEN=e2e-test-bot-token
+          TELEGRAM_WEBHOOK_SECRET=e2e-test-webhook-secret
+          TELEGRAM_API_BASE=https://api.telegram.org
+
+          # AI provider (Anthropic). Deterministic specs override the connector, so
+          # this placeholder key is never used on the default e2e run.
+          ASSISTANT_AI_PROVIDER=anthropic
+          ANTHROPIC_API_KEY=e2e-test-anthropic-key
+          ASSISTANT_MODEL_MAIN=claude-sonnet-4-5
+          ASSISTANT_MODEL_BACKGROUND=claude-haiku-4-5
+          ASSISTANT_MAX_OUTPUT_TOKENS=1024
+          ASSISTANT_AI_MAX_RETRIES=2
+
+          # Speech-to-text (OpenAI) — required by the schema; never called on text path.
+          STT_PROVIDER=openai
+          OPENAI_API_KEY=e2e-test-openai-key
+          STT_MODEL=gpt-4o-mini-transcribe
+          STT_TRANSLATE_TO_ENGLISH=false
+
+          # Assistant orchestration. ASSISTANT_WEBHOOK_URL must stay falsy so the
+          # boot-time setWebhook registration is skipped (no network egress).
+          ASSISTANT_WEBHOOK_URL=
+          ASSISTANT_APP_LINK_BASE_URL=https://cue.example.test
+          ASSISTANT_MAX_TOOL_ROUNDTRIPS=8
+          ASSISTANT_MAX_SCHEDULE_FETCHES=5
+          ASSISTANT_MAX_CORRECTIONS=5
+          ASSISTANT_ASK_USER_TTL_SECONDS=1800
+          ASSISTANT_ASK_USER_RETENTION_HOURS=168
+          ASSISTANT_STATUS_SESSION_TTL_SECONDS=120
+          ASSISTANT_STATUS_SPINNER_INTERVAL_MS=1000
+          ASSISTANT_USER_LOCK_TTL_MS=30000
+          ASSISTANT_USER_LOCK_RENEW_MS=10000
+          ASSISTANT_DEBOUNCE_WINDOW_MS=2000
+          ASSISTANT_DEBOUNCE_QUEUE_AFTER_MS=750
+          ASSISTANT_LAST_BUTTON_TTL_SECONDS=300
+          ASSISTANT_LAST_MESSAGE_LANGUAGE_TTL_SECONDS=604800
+          ASSISTANT_LINK_NONCE_TTL_SECONDS=600
+          ASSISTANT_DEDUPE_TTL_SECONDS=3600
+          ASSISTANT_RECENT_WINDOW_SIZE=10
+          ASSISTANT_PRELOAD_HORIZON_DAYS=7
+          # High threshold so background summarization never fires mid-assertion.
+          ASSISTANT_SUMMARIZE_THRESHOLD=1000
+          EOF
+
+      - name: End-to-end tests
+        env:
+          # Run against the service containers above instead of `docker compose`.
+          E2E_SKIP_DOCKER: '1'
+        run: pnpm test:e2e
