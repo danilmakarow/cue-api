@@ -87,6 +87,7 @@ const nullableColorJsonSchema = {
 
 const nullableRecurrenceJsonSchema = {
   ...recurrenceJsonSchema,
+  type: ['object', 'null'],
   description:
     'New recurrence rule, or null to stop repeating. Makes the task repeat as ONE task with a single rule — never create copies for future dates.',
 };
@@ -215,14 +216,27 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
         },
         title: { type: 'string', description: 'New title.' },
         startAt: {
-          type: 'string',
-          description: 'New ISO 8601 start datetime.',
+          type: ['string', 'null'],
+          description:
+            'New ISO 8601 start datetime, or null to clear it (revert to a timeless todo).',
         },
         endAt: {
           type: ['string', 'null'],
           description: 'New ISO 8601 end datetime, or null to clear it.',
         },
-        group: { type: 'string', description: 'New group name.' },
+        isAllDay: { type: 'boolean', description: 'Mark the task all-day.' },
+        notes: {
+          type: ['string', 'null'],
+          description: 'New notes, or null to clear them.',
+        },
+        timezone: {
+          type: 'string',
+          description: 'New IANA timezone for the task (e.g. Europe/Berlin).',
+        },
+        group: {
+          type: ['string', 'null'],
+          description: 'New group name, or null to un-group the task.',
+        },
         recurrence: nullableRecurrenceJsonSchema,
         requiresCompletion: {
           type: ['boolean', 'null'],
@@ -450,6 +464,10 @@ const EXPECTED_SCHEMAS: ToolSchema[] = [
           description: 'Existing group name to update.',
         },
         name: { type: 'string', description: 'New group name (a rename).' },
+        sortOrder: {
+          type: 'integer',
+          description: 'New sort position among groups (lower sorts first).',
+        },
         color: nullableColorJsonSchema,
         icon: {
           type: ['string', 'null'],

@@ -8,6 +8,7 @@ import {
   RecurrenceEndType,
   RecurrenceFrequency,
   Task,
+  TaskColor,
   TaskGroup,
   TaskOccurrenceException,
 } from '@/modules/database/entities';
@@ -1255,6 +1256,378 @@ describe('TaskService.update (details scope)', () => {
 
     expect(taskDb.save).toHaveBeenCalledTimes(1);
     expect(task.requiresCompletion).toBe(false);
+  });
+});
+
+describe('TaskService.update — per field', () => {
+  /**
+   * Builds a TaskService over a single mutable task fixture for the per-field
+   * update tests. `groupDbOverride` lets the group-setting tests resolve a real
+   * same-calendar group (the default stub resolves to `null`, which the un-group
+   * and field-only tests never reach).
+   */
+  const buildService = (
+    task: Task,
+    groupDbOverride?: { findOneBy: jest.Mock },
+  ) => {
+    const taskDb = {
+      findOneBy: jest.fn().mockResolvedValue(task),
+      save: jest.fn((entity: Task) => Promise.resolve(entity)),
+    };
+    const service = new TaskService(
+      taskDb as never,
+      buildCalendarDatabaseService() as never,
+      (groupDbOverride ?? buildGroupDatabaseService()) as never,
+      new RecurrenceRuleService() as never,
+      buildExceptionService() as never,
+    );
+
+    return { service, taskDb };
+  };
+
+  /**
+   * A group-database stub whose single group `group-1` lives in `cal-1` (the
+   * default task's calendar), so `ensureGroupInCalendar` accepts it.
+   */
+  const sameCalendarGroupDb = () => ({
+    findOneBy: jest
+      .fn()
+      .mockResolvedValue({ id: 'group-1', calendarId: 'cal-1' }),
+  });
+
+  it('persists a title change', async () => {
+    const task = makeTask({ id: 'task-1', title: 'Old' });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { title: 'New' });
+
+    expect(result.title).toBe('New');
+    expect(task.title).toBe('New');
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists setting notes', async () => {
+    const task = makeTask({ id: 'task-1', notes: null });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      notes: 'Bring the prototype',
+    });
+
+    expect(result.notes).toBe('Bring the prototype');
+    expect(task.notes).toBe('Bring the prototype');
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing notes to null', async () => {
+    const task = makeTask({ id: 'task-1', notes: 'Existing note' });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { notes: null });
+
+    expect(result.notes).toBeNull();
+    expect(task.notes).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists setting startAt', async () => {
+    const task = makeTask({ id: 'task-1', startAt: null });
+    const { service, taskDb } = buildService(task);
+    const nextStart = zoned('2026-06-03T09:00');
+
+    const result = await service.update('user-1', 'task-1', {
+      startAt: nextStart.toISOString(),
+    });
+
+    expect(result.startAt).toEqual(nextStart);
+    expect(task.startAt).toEqual(nextStart);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing startAt to null (reverts a timed task to a todo)', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-03T09:00'),
+      endAt: null,
+    });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { startAt: null });
+
+    // No anchor time → a timeless todo.
+    expect(result.startAt).toBeNull();
+    expect(task.startAt).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists setting endAt', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-03T09:00'),
+      endAt: null,
+    });
+    const { service, taskDb } = buildService(task);
+    const nextEnd = zoned('2026-06-03T10:00');
+
+    const result = await service.update('user-1', 'task-1', {
+      endAt: nextEnd.toISOString(),
+    });
+
+    expect(result.endAt).toEqual(nextEnd);
+    expect(task.endAt).toEqual(nextEnd);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing endAt to null', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-03T09:00'),
+      endAt: zoned('2026-06-03T10:00'),
+    });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { endAt: null });
+
+    expect(result.endAt).toBeNull();
+    expect(task.endAt).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists an isAllDay change', async () => {
+    const task = makeTask({ id: 'task-1', isAllDay: false });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { isAllDay: true });
+
+    expect(result.isAllDay).toBe(true);
+    expect(task.isAllDay).toBe(true);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a timezone change', async () => {
+    const task = makeTask({ id: 'task-1', timezone: 'America/New_York' });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      timezone: 'Europe/Berlin',
+    });
+
+    expect(result.timezone).toBe('Europe/Berlin');
+    expect(task.timezone).toBe('Europe/Berlin');
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists requiresCompletion set to false', async () => {
+    const task = makeTask({ id: 'task-1', requiresCompletion: true });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      requiresCompletion: false,
+    });
+
+    expect(result.requiresCompletion).toBe(false);
+    expect(task.requiresCompletion).toBe(false);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists requiresCompletion set to true', async () => {
+    const task = makeTask({ id: 'task-1', requiresCompletion: false });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      requiresCompletion: true,
+    });
+
+    expect(result.requiresCompletion).toBe(true);
+    expect(task.requiresCompletion).toBe(true);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing requiresCompletion to null (inherits the effective default)', async () => {
+    const task = makeTask({ id: 'task-1', requiresCompletion: true });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      requiresCompletion: null,
+    });
+
+    // Cleared to null on the row — the effective value now resolves via the
+    // group default (then `false`) through the effective-settings resolver.
+    expect(result.requiresCompletion).toBeNull();
+    expect(task.requiresCompletion).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a preset color', async () => {
+    const task = makeTask({ id: 'task-1', color: null });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      color: TaskColor.BLUE,
+    });
+
+    expect(result.color).toBe(TaskColor.BLUE);
+    expect(task.color).toBe(TaskColor.BLUE);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a custom #hex color', async () => {
+    const task = makeTask({ id: 'task-1', color: TaskColor.BLUE });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      color: '#a1b2c3',
+    });
+
+    expect(result.color).toBe('#a1b2c3');
+    expect(task.color).toBe('#a1b2c3');
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing color to null', async () => {
+    const task = makeTask({ id: 'task-1', color: TaskColor.GREEN });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', { color: null });
+
+    expect(result.color).toBeNull();
+    expect(task.color).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists setting groupId (validated against the same calendar)', async () => {
+    const task = makeTask({ id: 'task-1', groupId: null });
+    const groupDb = sameCalendarGroupDb();
+    const { service, taskDb } = buildService(task, groupDb);
+
+    const result = await service.update('user-1', 'task-1', {
+      groupId: 'group-1',
+    });
+
+    expect(result.groupId).toBe('group-1');
+    expect(task.groupId).toBe('group-1');
+    // The group's co-location was checked before the write.
+    expect(groupDb.findOneBy).toHaveBeenCalledWith({ id: 'group-1' });
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists clearing groupId to null (un-groups the task, no group lookup)', async () => {
+    const task = makeTask({ id: 'task-1', groupId: 'group-1' });
+    const groupDb = sameCalendarGroupDb();
+    const { service, taskDb } = buildService(task, groupDb);
+
+    const result = await service.update('user-1', 'task-1', { groupId: null });
+
+    expect(result.groupId).toBeNull();
+    expect(task.groupId).toBeNull();
+    // Un-grouping never validates a group — the co-location check is skipped.
+    expect(groupDb.findOneBy).not.toHaveBeenCalled();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('short-circuits without saving when no field actually changes', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      title: 'Same',
+      notes: 'Same note',
+      isAllDay: true,
+      requiresCompletion: false,
+    });
+    const { service, taskDb } = buildService(task);
+
+    // Every provided value equals the current one — a true no-op.
+    const result = await service.update('user-1', 'task-1', {
+      title: 'Same',
+      notes: 'Same note',
+      isAllDay: true,
+      requiresCompletion: false,
+    });
+
+    // The same row is returned as-is, without a needless save.
+    expect(result).toBe(task);
+    expect(taskDb.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('TaskService.update — recurrence regression', () => {
+  /**
+   * Builds a TaskService over a single mutable task fixture for the recurrence
+   * set/change/clear regression tests. The real (pure) engine is wired; the
+   * service maps the recurrence DTO to a config via the static
+   * `RecurrenceRuleService.toConfig`.
+   */
+  const buildService = (task: Task) => {
+    const taskDb = {
+      findOneBy: jest.fn().mockResolvedValue(task),
+      save: jest.fn((entity: Task) => Promise.resolve(entity)),
+    };
+    const service = new TaskService(
+      taskDb as never,
+      buildCalendarDatabaseService() as never,
+      buildGroupDatabaseService() as never,
+      new RecurrenceRuleService() as never,
+      buildExceptionService() as never,
+    );
+
+    return { service, taskDb };
+  };
+
+  it('SET: a task with no rule gains an inline recurrenceConfig', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      recurrenceConfig: null,
+    });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      recurrence: { frequency: RecurrenceFrequency.DAILY },
+    });
+
+    expect(result.recurrenceConfig).toEqual(makeRule());
+    expect(task.recurrenceConfig).toEqual(makeRule());
+    // A recurrence-only change still persists, even with no other field touched.
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('CHANGE: an existing rule is replaced (interval 1 → 2)', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      recurrenceConfig: makeRule({
+        frequency: RecurrenceFrequency.DAILY,
+        interval: 1,
+      }),
+    });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      recurrence: { frequency: RecurrenceFrequency.DAILY, interval: 2 },
+    });
+
+    expect(result.recurrenceConfig?.interval).toBe(2);
+    expect(task.recurrenceConfig?.interval).toBe(2);
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('CLEAR: setting recurrence to null stops the task repeating', async () => {
+    const task = makeTask({
+      id: 'task-1',
+      startAt: zoned('2026-06-01T09:00'),
+      endAt: zoned('2026-06-01T09:30'),
+      recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+    });
+    const { service, taskDb } = buildService(task);
+
+    const result = await service.update('user-1', 'task-1', {
+      recurrence: null,
+    });
+
+    expect(result.recurrenceConfig).toBeNull();
+    expect(task.recurrenceConfig).toBeNull();
+    expect(taskDb.save).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -18,6 +18,8 @@ export const updateGroupTool = buildTool({
   name: ToolName.UPDATE_GROUP,
   prompt: () => UPDATE_GROUP_PROMPT,
   inputSchema: updateGroupInputSchema,
+  // Intentionally NOT editable here: defaultNotificationStrategyId (delivery
+  // not wired). Do not add it.
   jsonSchema: {
     type: 'object',
     properties: {
@@ -26,6 +28,10 @@ export const updateGroupTool = buildTool({
         description: 'Existing group name to update.',
       },
       name: { type: 'string', description: 'New group name (a rename).' },
+      sortOrder: {
+        type: 'integer',
+        description: 'New sort position among groups (lower sorts first).',
+      },
       color: nullableColorJsonSchema,
       icon: {
         type: ['string', 'null'],

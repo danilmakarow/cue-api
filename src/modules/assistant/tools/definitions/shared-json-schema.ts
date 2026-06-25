@@ -78,9 +78,17 @@ export const nullableColorJsonSchema: ToolJsonSchema = {
   description: `${COLOR_DESCRIPTION} Pass null to clear and inherit the group.`,
 };
 
-/** Model-facing JSON-Schema fragment for the group's nullable recurrence. */
+/**
+ * Model-facing JSON-Schema fragment for a nullable (clearable) recurrence.
+ * Spreads the recurrence object schema but WIDENS `type` to `['object', 'null']`
+ * (mirroring {@link nullableColorJsonSchema}'s `['string', 'null']`) so a
+ * schema-conforming model can actually send `recurrence: null` to stop a series
+ * repeating — without this widening the stop-repeating clear path is unreachable
+ * for both `update_task` and `update_group`.
+ */
 export const nullableRecurrenceJsonSchema: ToolJsonSchema = {
   ...recurrenceJsonSchema,
+  type: ['object', 'null'],
   description:
     'New recurrence rule, or null to stop repeating. Makes the task repeat as ONE task with a single rule — never create copies for future dates.',
 };

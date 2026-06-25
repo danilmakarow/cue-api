@@ -47,9 +47,10 @@ import {
  * scope). `startAt`/`endAt`/`notes`/`groupId`/`requiresCompletion`/`color` accept
  * `null` to clear; an omitted key leaves the current value untouched.
  * `recurrence` set to a DTO adds or replaces the inline config; set to `null`
- * removes recurrence entirely. `isAllDay` is an optional boolean. Clearing
- * `requiresCompletion` (null) drops the task's own value so the group default
- * (then `false`) applies via the effective-settings resolver.
+ * removes recurrence entirely. `isAllDay` and `timezone` are optional non-nullable
+ * scalars (`timezone` is a non-null column, so it can only be RE-SET, never
+ * cleared). Clearing `requiresCompletion` (null) drops the task's own value so the
+ * group default (then `false`) applies via the effective-settings resolver.
  */
 export interface UpdateTaskInput {
   title?: string;
@@ -57,6 +58,7 @@ export interface UpdateTaskInput {
   startAt?: string | null;
   endAt?: string | null;
   isAllDay?: boolean;
+  timezone?: string;
   requiresCompletion?: boolean | null;
   color?: string | null;
   groupId?: string | null;
@@ -90,9 +92,11 @@ export interface OccurrenceCompletionResult {
  * Changes carried by a "this and following" split. Anchor-field keys retarget
  * the new series' first instance; `recurrence` is merged on top of the cloned
  * rule. `groupId` (when provided) is validated against the new master's calendar
- * and applied atomically in the same insert — never as a follow-up write. All
- * keys are optional — an empty object splits the series at `originalStart`
- * without otherwise altering it.
+ * and applied atomically in the same insert — never as a follow-up write.
+ * `requiresCompletion`/`color`/`isAllDay`/`timezone` retarget the new series so a
+ * `this_and_following` edit of those fields is not silently dropped; an omitted
+ * key keeps the cloned anchor's value. All keys are optional — an empty object
+ * splits the series at `originalStart` without otherwise altering it.
  */
 export interface SplitSeriesChanges {
   title?: string;
@@ -100,6 +104,10 @@ export interface SplitSeriesChanges {
   startAt?: string | null;
   endAt?: string | null;
   groupId?: string | null;
+  requiresCompletion?: boolean | null;
+  color?: string | null;
+  isAllDay?: boolean;
+  timezone?: string;
   recurrence?: CreateRecurrenceRuleDto;
 }
 
@@ -615,6 +623,7 @@ export class TaskService {
     const nextGroupId =
       input.groupId !== undefined ? input.groupId : task.groupId;
     const nextIsAllDay = input.isAllDay ?? task.isAllDay;
+    const nextTimezone = input.timezone ?? task.timezone;
     // requiresCompletion / color are nullable: an explicit value (incl. null to
     // clear) is taken, an omitted key keeps the current value.
     const nextRequiresCompletion =
@@ -638,6 +647,7 @@ export class TaskService {
       nextNotes !== task.notes ||
       nextGroupId !== task.groupId ||
       nextIsAllDay !== task.isAllDay ||
+      nextTimezone !== task.timezone ||
       nextRequiresCompletion !== task.requiresCompletion ||
       nextColor !== task.color ||
       nextStartAt?.getTime() !== task.startAt?.getTime() ||
@@ -651,6 +661,7 @@ export class TaskService {
     task.notes = nextNotes;
     task.groupId = nextGroupId;
     task.isAllDay = nextIsAllDay;
+    task.timezone = nextTimezone;
     task.requiresCompletion = nextRequiresCompletion;
     task.color = nextColor;
     task.startAt = nextStartAt;
@@ -757,10 +768,13 @@ export class TaskService {
       notes: changes.notes !== undefined ? changes.notes : task.notes,
       startAt: newStartAt,
       endAt: newEndAt,
-      isAllDay: task.isAllDay,
-      timezone: task.timezone,
-      requiresCompletion: task.requiresCompletion,
-      color: task.color,
+      isAllDay: changes.isAllDay ?? task.isAllDay,
+      timezone: changes.timezone ?? task.timezone,
+      requiresCompletion:
+        changes.requiresCompletion !== undefined
+          ? changes.requiresCompletion
+          : task.requiresCompletion,
+      color: changes.color !== undefined ? changes.color : task.color,
       notificationStrategyId: task.notificationStrategyId,
       recurrenceConfig: newConfig,
     });
@@ -1429,6 +1443,13 @@ export class TaskService {
       ...(changes.notes !== undefined ? { notes: changes.notes } : {}),
       ...(changes.startAt !== undefined ? { startAt: changes.startAt } : {}),
       ...(changes.endAt !== undefined ? { endAt: changes.endAt } : {}),
+      ...(changes.groupId !== undefined ? { groupId: changes.groupId } : {}),
+      ...(changes.isAllDay !== undefined ? { isAllDay: changes.isAllDay } : {}),
+      ...(changes.timezone !== undefined ? { timezone: changes.timezone } : {}),
+      ...(changes.requiresCompletion !== undefined
+        ? { requiresCompletion: changes.requiresCompletion }
+        : {}),
+      ...(changes.color !== undefined ? { color: changes.color } : {}),
       ...(changes.recurrence !== undefined
         ? { recurrence: changes.recurrence }
         : {}),

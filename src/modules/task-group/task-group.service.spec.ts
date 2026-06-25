@@ -5,6 +5,7 @@ import {
   Calendar,
   RecurrenceEndType,
   RecurrenceFrequency,
+  TaskColor,
   TaskGroup,
 } from '@/modules/database/entities';
 
@@ -485,6 +486,238 @@ describe('TaskGroupService', () => {
       await service.update('user-1', 'group-1', { name: 'My Group' });
 
       expect(groupDb.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update — per field', () => {
+    /**
+     * Builds a fully-populated TaskGroup carrying explicit starting values for
+     * every mutable field, so a per-field update test can prove it changes the
+     * one field under test (and only that field) and that the row is persisted.
+     */
+    const seededGroup = (overrides: Partial<TaskGroup> = {}): TaskGroup =>
+      ({
+        id: 'group-1',
+        calendarId: 'cal-1',
+        name: 'Seed Name',
+        color: null,
+        icon: null,
+        sortOrder: 0,
+        requiresCompletion: null,
+        recurrenceConfig: null,
+        ...overrides,
+      }) as unknown as TaskGroup;
+
+    /**
+     * Wires the two database stubs so `findOwnedGroup` resolves to `group` under
+     * an owned calendar, then returns a ready service plus the stubs for
+     * assertions. Centralizes the repetitive arrange step of each per-field test.
+     */
+    const arrangeUpdate = (group: TaskGroup) => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+
+      groupDb.findOneBy.mockResolvedValue(group);
+      calendarDb.findOneBy.mockResolvedValue(ownedCalendar('cal-1'));
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      return { service, groupDb, calendarDb };
+    };
+
+    /** A complete recurrence config used as a persisted starting state. */
+    const dailyConfig = (): TaskGroup['recurrenceConfig'] => ({
+      frequency: RecurrenceFrequency.DAILY,
+      interval: 1,
+      byWeekday: null,
+      byMonthDay: null,
+      byMonth: null,
+      endType: RecurrenceEndType.NEVER,
+      endDate: null,
+      count: null,
+    });
+
+    it('name — persists a new name on update', async () => {
+      const group = seededGroup({ name: 'Old Name' });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        name: 'New Name',
+      });
+
+      expect(group.name).toBe('New Name');
+      expect(result.name).toBe('New Name');
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+      expect(groupDb.save).toHaveBeenCalledWith(group);
+    });
+
+    it('color — persists a preset color', async () => {
+      const group = seededGroup({ color: null });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        color: TaskColor.BLUE,
+      });
+
+      expect(group.color).toBe(TaskColor.BLUE);
+      expect(result.color).toBe(TaskColor.BLUE);
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('color — persists a custom #hex color', async () => {
+      const group = seededGroup({ color: TaskColor.BLUE });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        color: '#A1B2C3',
+      });
+
+      expect(group.color).toBe('#A1B2C3');
+      expect(result.color).toBe('#A1B2C3');
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('color — clears the color to null', async () => {
+      const group = seededGroup({ color: TaskColor.BLUE });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', { color: null });
+
+      expect(group.color).toBeNull();
+      expect(result.color).toBeNull();
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('icon — persists a new icon', async () => {
+      const group = seededGroup({ icon: null });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        icon: 'star.fill',
+      });
+
+      expect(group.icon).toBe('star.fill');
+      expect(result.icon).toBe('star.fill');
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('icon — clears the icon to null', async () => {
+      const group = seededGroup({ icon: 'star.fill' });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', { icon: null });
+
+      expect(group.icon).toBeNull();
+      expect(result.icon).toBeNull();
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('requiresCompletion — persists a boolean default', async () => {
+      const group = seededGroup({ requiresCompletion: null });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        requiresCompletion: true,
+      });
+
+      expect(group.requiresCompletion).toBe(true);
+      expect(result.requiresCompletion).toBe(true);
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('requiresCompletion — clears the default to null', async () => {
+      const group = seededGroup({ requiresCompletion: true });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        requiresCompletion: null,
+      });
+
+      expect(group.requiresCompletion).toBeNull();
+      expect(result.requiresCompletion).toBeNull();
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('sortOrder — persists a reorder', async () => {
+      const group = seededGroup({ sortOrder: 0 });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        sortOrder: 5,
+      });
+
+      expect(group.sortOrder).toBe(5);
+      expect(result.sortOrder).toBe(5);
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('recurrence — SET writes the inline config on a group with none', async () => {
+      const group = seededGroup({ recurrenceConfig: null });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      await service.update('user-1', 'group-1', {
+        recurrence: { frequency: RecurrenceFrequency.DAILY },
+      });
+
+      expect(group.recurrenceConfig).toEqual(dailyConfig());
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('recurrence — CHANGE replaces an existing inline config', async () => {
+      const group = seededGroup({ recurrenceConfig: dailyConfig() });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      await service.update('user-1', 'group-1', {
+        recurrence: { frequency: RecurrenceFrequency.WEEKLY, interval: 2 },
+      });
+
+      expect(group.recurrenceConfig).toEqual({
+        frequency: RecurrenceFrequency.WEEKLY,
+        interval: 2,
+        byWeekday: null,
+        byMonthDay: null,
+        byMonth: null,
+        endType: RecurrenceEndType.NEVER,
+        endDate: null,
+        count: null,
+      });
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('recurrence — CLEAR removes an existing inline config', async () => {
+      const group = seededGroup({ recurrenceConfig: dailyConfig() });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      await service.update('user-1', 'group-1', { recurrence: null });
+
+      expect(group.recurrenceConfig).toBeNull();
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('no-op — short-circuits without saving when every field matches', async () => {
+      const group = seededGroup({
+        name: 'Stable',
+        color: TaskColor.GREEN,
+        icon: 'flag.fill',
+        sortOrder: 3,
+        requiresCompletion: false,
+        recurrenceConfig: dailyConfig(),
+      });
+      const { service, groupDb } = arrangeUpdate(group);
+
+      const result = await service.update('user-1', 'group-1', {
+        name: 'Stable',
+        color: TaskColor.GREEN,
+        icon: 'flag.fill',
+        sortOrder: 3,
+        requiresCompletion: false,
+      });
+
+      expect(groupDb.save).not.toHaveBeenCalled();
+      expect(result).toBe(group);
     });
   });
 });

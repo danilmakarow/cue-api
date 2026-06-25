@@ -158,6 +158,19 @@ interface GroupResolution {
   outcome?: ToolDispatchOutcome;
 }
 
+/**
+ * Result of resolving the `group` argument of an UPDATE into the tri-state the
+ * task service expects. Exactly one of `groupId` / `outcome` is set: `groupId`
+ * is the resolved tri-state value (`undefined` ⇒ leave unchanged, `null` ⇒
+ * un-group, a string ⇒ the resolved id), `outcome` a recoverable result the model
+ * relays (ambiguous / missing name). The caller forwards `groupId` only when the
+ * `group` key was present, so an omitted key never arrives as a null un-group.
+ */
+interface GroupUpdateResolution {
+  groupId?: string | null;
+  outcome?: ToolDispatchOutcome;
+}
+
 /** A validated, parsed single-create input (shared by `create_task[s]`). */
 type CreateTaskInput = ReturnType<typeof createTaskInputSchema.parse>;
 
@@ -326,6 +339,29 @@ export class ToolDispatcherService implements ToolHandlerHost {
     }
 
     return { groupId: matches[0].id };
+  }
+
+  /**
+   * Resolves an UPDATE's `group` argument into the tri-state `groupId` the task
+   * service expects, honoring set-vs-clear: an omitted key (`undefined`) leaves
+   * the group unchanged; an explicit `null` un-groups the task (forwarded straight
+   * as `groupId: null`, bypassing `resolveGroup`); a name string is resolved to a
+   * single owned group id (surfacing the ambiguous / missing recoverable outcome).
+   * Centralizes the branch so the one-off, `all`, and `this_and_following` paths
+   * thread the identical tri-state.
+   */
+  private async resolveGroupUpdate(
+    userId: string,
+    group: string | null | undefined,
+  ): Promise<GroupUpdateResolution> {
+    if (group === undefined) return {};
+    if (group === null) return { groupId: null };
+
+    const resolution = await this.resolveGroup(userId, group);
+
+    if (resolution.outcome) return { outcome: resolution.outcome };
+
+    return { groupId: resolution.groupId };
   }
 
   /**
@@ -915,16 +951,18 @@ export class ToolDispatcherService implements ToolHandlerHost {
     if (scope === 'this_and_following') {
       // Resolve the group BEFORE splitting: a name that is ambiguous or missing
       // must surface as a recoverable result without having mutated the series,
-      // otherwise we would split and then report a partial / false success.
-      let splitGroupId: string | undefined;
+      // otherwise we would split and then report a partial / false success. The
+      // tri-state is forwarded by KEY PRESENCE (`parsed.group !== undefined`) so an
+      // explicit null un-groups the new series and an omitted key keeps the parent.
+      const groupResolution = await this.resolveGroupUpdate(
+        userId,
+        parsed.group,
+      );
 
-      if (parsed.group) {
-        const resolution = await this.resolveGroup(userId, parsed.group);
+      if (groupResolution.outcome) return groupResolution.outcome;
 
-        if (resolution.outcome) return resolution.outcome;
-
-        splitGroupId = resolution.groupId;
-      }
+      const hasGroupChange = parsed.group !== undefined;
+      const splitGroupId = groupResolution.groupId;
 
       const splitConflict = await this.recurringEditConflict(
         context,
@@ -947,27 +985,37 @@ export class ToolDispatcherService implements ToolHandlerHost {
           ...(parsed.title !== undefined ? { title: parsed.title } : {}),
           ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
           ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
-          ...(splitGroupId !== undefined ? { groupId: splitGroupId } : {}),
+          ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
+          ...(parsed.isAllDay !== undefined
+            ? { isAllDay: parsed.isAllDay }
+            : {}),
+          ...(parsed.timezone !== undefined
+            ? { timezone: parsed.timezone }
+            : {}),
+          ...(parsed.requiresCompletion !== undefined
+            ? { requiresCompletion: parsed.requiresCompletion }
+            : {}),
+          ...(parsed.color !== undefined ? { color: parsed.color } : {}),
+          ...(hasGroupChange ? { groupId: splitGroupId } : {}),
           ...(recurrenceDto ? { recurrence: recurrenceDto } : {}),
         },
       );
 
-      return splitGroupId !== undefined
+      // A move-to-group only happens when a NON-null group id was resolved; an
+      // explicit un-group (null) reports the plain following-updated message.
+      return splitGroupId
         ? {
             content: `Updated "${newMaster.title}" and following, and moved them to the group.`,
           }
         : { content: `Updated "${newMaster.title}" and following.` };
     }
 
-    let groupId: string | undefined;
+    const groupResolution = await this.resolveGroupUpdate(userId, parsed.group);
 
-    if (parsed.group) {
-      const resolution = await this.resolveGroup(userId, parsed.group);
+    if (groupResolution.outcome) return groupResolution.outcome;
 
-      if (resolution.outcome) return resolution.outcome;
-
-      groupId = resolution.groupId;
-    }
+    const hasGroupChange = parsed.group !== undefined;
+    const groupId = groupResolution.groupId;
 
     const allConflict = await this.recurringEditConflict(
       context,
@@ -982,11 +1030,14 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
       ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
+      ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
+      ...(parsed.isAllDay !== undefined ? { isAllDay: parsed.isAllDay } : {}),
+      ...(parsed.timezone !== undefined ? { timezone: parsed.timezone } : {}),
       ...(parsed.requiresCompletion !== undefined
         ? { requiresCompletion: parsed.requiresCompletion }
         : {}),
       ...(parsed.color !== undefined ? { color: parsed.color } : {}),
-      ...(groupId !== undefined ? { groupId } : {}),
+      ...(hasGroupChange ? { groupId } : {}),
       // Tri-state recurrence: a DTO sets/replaces, null clears, undefined leaves.
       ...(recurrenceUpdate !== undefined
         ? { recurrence: recurrenceUpdate }
@@ -1031,7 +1082,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       context.userId,
       taskId,
       {
-        ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
+        ...(parsed.startAt !== undefined && parsed.startAt !== null
+          ? { startAt: parsed.startAt }
+          : {}),
         ...(parsed.endAt !== undefined && parsed.endAt !== null
           ? { endAt: parsed.endAt }
           : {}),
@@ -1073,8 +1126,11 @@ export class ToolDispatcherService implements ToolHandlerHost {
   ): Promise<ToolDispatchOutcome | null> {
     // A non-time override (rename / completion / notes) never needs a conflict
     // check — only a real MOVE (a new start and/or end) can land on a commitment.
-    const movesTime =
-      parsed.startAt !== undefined || parsed.endAt !== undefined;
+    // A `startAt: null` (clear) does NOT move an occurrence: a single recurring
+    // instance cannot be made timeless (its originalStart is its identity), so it
+    // is treated as "no start move" everywhere on the `this` path.
+    const movesStart = parsed.startAt !== undefined && parsed.startAt !== null;
+    const movesTime = movesStart || parsed.endAt !== undefined;
 
     if (!movesTime) return null;
 
@@ -1093,8 +1149,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       originalStart,
       existingException,
     );
-    const nextStart =
-      parsed.startAt !== undefined ? new Date(parsed.startAt) : current.start;
+    const nextStart = movesStart
+      ? new Date(parsed.startAt as string)
+      : current.start;
     const nextEnd = this.resolveOccurrenceMoveEnd(current, nextStart, parsed);
 
     // No concrete timed window (end-less / all-day occurrence) ⇒ nothing can
@@ -1189,18 +1246,22 @@ export class ToolDispatcherService implements ToolHandlerHost {
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
     existingException: TaskOccurrenceException | null,
   ): OccurrenceOverrideChanges {
+    // A `startAt: null` (clear) is ignored on the `this` path: a single recurring
+    // occurrence cannot be made timeless (its originalStart is its identity), so
+    // only a non-null new start is persisted as an `overrideStartAt` move.
+    const movesStart = parsed.startAt !== undefined && parsed.startAt !== null;
+
     const changes: OccurrenceOverrideChanges = {
       ...(parsed.title !== undefined ? { overrideTitle: parsed.title } : {}),
-      ...(parsed.startAt !== undefined
-        ? { overrideStartAt: new Date(parsed.startAt) }
+      ...(movesStart
+        ? { overrideStartAt: new Date(parsed.startAt as string) }
         : {}),
       ...(parsed.endAt !== undefined
         ? { overrideEndAt: parsed.endAt ? new Date(parsed.endAt) : null }
         : {}),
     };
 
-    const isStartOnlyMove =
-      parsed.startAt !== undefined && parsed.endAt === undefined;
+    const isStartOnlyMove = movesStart && parsed.endAt === undefined;
 
     if (isStartOnlyMove && existingException?.overrideEndAt) {
       const current = this.effectiveOccurrenceWindow(
@@ -1233,18 +1294,25 @@ export class ToolDispatcherService implements ToolHandlerHost {
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
     recurrenceUpdate: CreateRecurrenceRuleDto | null | undefined,
   ): Promise<ToolDispatchOutcome> {
-    let groupId: string | undefined;
+    const groupResolution = await this.resolveGroupUpdate(
+      context.userId,
+      parsed.group,
+    );
 
-    if (parsed.group) {
-      const resolution = await this.resolveGroup(context.userId, parsed.group);
+    if (groupResolution.outcome) return groupResolution.outcome;
 
-      if (resolution.outcome) return resolution.outcome;
+    const hasGroupChange = parsed.group !== undefined;
+    const groupId = groupResolution.groupId;
 
-      groupId = resolution.groupId;
-    }
-
+    // startAt / endAt are both tri-state: a string sets, an explicit null clears
+    // (startAt:null reverts a timed task to a timeless todo), undefined keeps the
+    // current value.
     const nextStartAt =
-      parsed.startAt !== undefined ? new Date(parsed.startAt) : task.startAt;
+      parsed.startAt !== undefined
+        ? parsed.startAt
+          ? new Date(parsed.startAt)
+          : null
+        : task.startAt;
     const nextEndAt =
       parsed.endAt !== undefined
         ? parsed.endAt
@@ -1281,11 +1349,14 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.title !== undefined ? { title: parsed.title } : {}),
       ...(parsed.startAt !== undefined ? { startAt: parsed.startAt } : {}),
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
+      ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
+      ...(parsed.isAllDay !== undefined ? { isAllDay: parsed.isAllDay } : {}),
+      ...(parsed.timezone !== undefined ? { timezone: parsed.timezone } : {}),
       ...(parsed.requiresCompletion !== undefined
         ? { requiresCompletion: parsed.requiresCompletion }
         : {}),
       ...(parsed.color !== undefined ? { color: parsed.color } : {}),
-      ...(groupId !== undefined ? { groupId } : {}),
+      ...(hasGroupChange ? { groupId } : {}),
       // Tri-state recurrence: a DTO sets/replaces, null clears, undefined leaves.
       ...(recurrenceUpdate !== undefined
         ? { recurrence: recurrenceUpdate }
@@ -1479,6 +1550,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       resolution.groupId as string,
       {
         ...(parsed.name !== undefined ? { name: parsed.name } : {}),
+        ...(parsed.sortOrder !== undefined
+          ? { sortOrder: parsed.sortOrder }
+          : {}),
         ...(parsed.color !== undefined ? { color: parsed.color } : {}),
         ...(parsed.icon !== undefined ? { icon: parsed.icon } : {}),
         ...(parsed.requiresCompletion !== undefined

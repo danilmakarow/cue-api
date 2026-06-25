@@ -983,6 +983,120 @@ describe('ToolDispatcherService', () => {
       expect(outcome.content).toMatch(/updated/i);
     });
 
+    it('forwards notes, isAllDay, and timezone straight through to the one-off update', async () => {
+      // The plain content fields are not gated and not transformed — they reach
+      // the service exactly as the model passed them.
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          notes: 'Bring the X-rays',
+          isAllDay: true,
+          timezone: 'Europe/Berlin',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.update).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        {
+          notes: 'Bring the X-rays',
+          isAllDay: true,
+          timezone: 'Europe/Berlin',
+        },
+      );
+    });
+
+    it('un-groups a one-off task — an explicit group:null forwards groupId:null', async () => {
+      // Tri-state group: a present-but-null key means "un-group", forwarded as the
+      // literal groupId:null (resolveGroup is bypassed, so findByName never runs).
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', { handle: alias, group: null }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskGroupService.findByName).not.toHaveBeenCalled();
+      expect(harness.taskService.update).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        { groupId: null },
+      );
+    });
+
+    it('reverts a timed one-off to a todo — an explicit startAt:null forwards startAt:null with no conflict probe', async () => {
+      // Clearing the start makes the task timeless: the write carries the literal
+      // startAt:null and the conflict gate is skipped (no concrete window to check).
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', { handle: alias, startAt: null }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.findOverlapping).not.toHaveBeenCalled();
+      expect(harness.taskService.update).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        { startAt: null },
+      );
+    });
+
+    it('stops a one-off repeating — an explicit recurrence:null forwards recurrence:null', async () => {
+      // Tri-state recurrence: a present-but-null key clears the rule, forwarded as
+      // the literal recurrence:null (the service deletes the inline config).
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', { handle: alias, recurrence: null }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.update).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        { recurrence: null },
+      );
+    });
+
+    it('changes a one-off recurrence — a recurrence object forwards the mapped DTO', async () => {
+      // A recurrence object is mapped through toRecurrenceDto and forwarded as the
+      // structural DTO the task service consumes.
+      const harness = buildDispatcher();
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({ taskId: 'task-1', originalStart: null });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          recurrence: { frequency: 'WEEKLY', byWeekday: [0, 2, 4] },
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.update).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        {
+          recurrence: expect.objectContaining({
+            frequency: 'WEEKLY',
+            byWeekday: [0, 2, 4],
+          }),
+        },
+      );
+    });
+
     it('returns a stale-handle error when the handle is unknown', async () => {
       const harness = buildDispatcher();
 
@@ -1456,6 +1570,48 @@ describe('ToolDispatcherService', () => {
       );
       expect(harness.taskService.update).not.toHaveBeenCalled();
       expect(outcome.content).toMatch(/moved them to the group/i);
+    });
+
+    it('carries requiresCompletion / color / notes INTO the split for "this_and_following" (not dropped)', async () => {
+      // The new series must retarget these fields atomically in the same insert —
+      // a "this_and_following" edit of them is passed into splitSeries, never lost
+      // and never applied as a separate follow-up update.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceConfig: { frequency: 'DAILY' },
+        calendarId: 'cal-1',
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          requiresCompletion: true,
+          color: 'BLUE',
+          notes: 'Pack the kit',
+          editScope: 'this_and_following',
+        }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.splitSeries).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        {
+          requiresCompletion: true,
+          color: 'BLUE',
+          notes: 'Pack the kit',
+        },
+      );
+      expect(harness.taskService.update).not.toHaveBeenCalled();
     });
 
     it('surfaces a cross-calendar group rejection from splitSeries as a recoverable error (no follow-up write)', async () => {
@@ -2159,6 +2315,38 @@ describe('ToolDispatcherService', () => {
         expect.objectContaining({ color: 'GREEN', recurrence: null }),
       );
       expect(outcome.content).toMatch(/updated group/i);
+    });
+
+    it('reorders a group — update_group forwards sortOrder to the service', async () => {
+      const harness = buildDispatcher();
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_group', { group: 'Work', sortOrder: 3 }),
+        buildContext(),
+      );
+
+      expect(harness.taskGroupService.update).toHaveBeenCalledWith(
+        'user-1',
+        'grp-1',
+        expect.objectContaining({ sortOrder: 3 }),
+      );
+    });
+
+    it('stops a group repeating — an explicit recurrence:null forwards exactly recurrence:null', async () => {
+      // Tri-state recurrence on the group default: a present-but-null key clears
+      // it, forwarded as the literal recurrence:null with no other field touched.
+      const harness = buildDispatcher();
+
+      await harness.dispatcher.dispatch(
+        toolCall('update_group', { group: 'Work', recurrence: null }),
+        buildContext(),
+      );
+
+      expect(harness.taskGroupService.update).toHaveBeenCalledWith(
+        'user-1',
+        'grp-1',
+        { recurrence: null },
+      );
     });
   });
 

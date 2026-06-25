@@ -243,19 +243,45 @@ export const createTasksInputSchema = z.object({
     ),
 });
 
-/** Zod schema validating `update_task` input. */
+/**
+ * Zod schema validating `update_task` input.
+ *
+ * `calendarId` (a cross-calendar move), `completedAt` (owned by complete_task),
+ * and `notificationStrategyId` (delivery not wired) are intentionally NOT
+ * editable here — see the matching note on the JSON schema in `update-task.tool.ts`.
+ */
 export const updateTaskInputSchema = z.object({
   handle: z
     .string()
     .describe('Bracketed handle of the task to update, e.g. e2.'),
   title: z.string().min(1).optional().describe('New title.'),
-  startAt: z.string().optional().describe('New ISO 8601 start datetime.'),
+  startAt: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'New ISO 8601 start datetime, or null to clear it (revert to a timeless todo).',
+    ),
   endAt: z
     .string()
     .nullable()
     .optional()
     .describe('New ISO 8601 end datetime, or null to clear it.'),
-  group: z.string().optional().describe('New group name.'),
+  isAllDay: z.boolean().optional().describe('Mark the task all-day.'),
+  notes: z
+    .string()
+    .nullable()
+    .optional()
+    .describe('New notes, or null to clear them.'),
+  timezone: z
+    .string()
+    .optional()
+    .describe('New IANA timezone for the task (e.g. Europe/Berlin).'),
+  group: z
+    .string()
+    .nullable()
+    .optional()
+    .describe('New group name, or null to un-group the task.'),
   recurrence: recurrenceInputSchema
     .nullable()
     .optional()
@@ -339,7 +365,12 @@ export const createGroupInputSchema = z.object({
     ),
 });
 
-/** Zod schema validating `update_group` input. */
+/**
+ * Zod schema validating `update_group` input.
+ *
+ * `defaultNotificationStrategyId` is intentionally NOT editable here (delivery
+ * not wired) — see the matching note on the JSON schema in `update-group.tool.ts`.
+ */
 export const updateGroupInputSchema = z.object({
   group: z
     .string()
@@ -348,6 +379,11 @@ export const updateGroupInputSchema = z.object({
       'Existing group name to update (resolve via list_groups first if unsure).',
     ),
   name: z.string().min(1).optional().describe('New group name (a rename).'),
+  sortOrder: z
+    .number()
+    .int()
+    .optional()
+    .describe('New sort position among groups (lower sorts first).'),
   color: colorInputSchema
     .nullable()
     .optional()

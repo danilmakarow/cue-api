@@ -19,6 +19,9 @@ export const updateTaskTool = buildTool({
   name: ToolName.UPDATE_TASK,
   prompt: () => UPDATE_TASK_PROMPT,
   inputSchema: updateTaskInputSchema,
+  // Intentionally NOT editable here: calendarId (cross-calendar move —
+  // single-calendar for now), completedAt (owned by complete_task), and
+  // notificationStrategyId (delivery not wired). Do not add them.
   jsonSchema: {
     type: 'object',
     properties: {
@@ -28,14 +31,27 @@ export const updateTaskTool = buildTool({
       },
       title: { type: 'string', description: 'New title.' },
       startAt: {
-        type: 'string',
-        description: 'New ISO 8601 start datetime.',
+        type: ['string', 'null'],
+        description:
+          'New ISO 8601 start datetime, or null to clear it (revert to a timeless todo).',
       },
       endAt: {
         type: ['string', 'null'],
         description: 'New ISO 8601 end datetime, or null to clear it.',
       },
-      group: { type: 'string', description: 'New group name.' },
+      isAllDay: { type: 'boolean', description: 'Mark the task all-day.' },
+      notes: {
+        type: ['string', 'null'],
+        description: 'New notes, or null to clear them.',
+      },
+      timezone: {
+        type: 'string',
+        description: 'New IANA timezone for the task (e.g. Europe/Berlin).',
+      },
+      group: {
+        type: ['string', 'null'],
+        description: 'New group name, or null to un-group the task.',
+      },
       recurrence: nullableRecurrenceJsonSchema,
       requiresCompletion: {
         type: ['boolean', 'null'],
