@@ -37,6 +37,7 @@ const timedOccurrence = (title: string, start: Date): Occurrence => ({
   completedAt: null,
   isRecurring: false,
   isException: false,
+  recurrence: null,
 });
 
 /**

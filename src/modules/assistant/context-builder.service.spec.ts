@@ -5,11 +5,16 @@ import { HandleMap } from './tools/handle-map';
 import { PromptBlock } from '@/modules/ai/ai.types';
 import {
   ConflictPolicy,
+  RecurrenceEndType,
+  RecurrenceFrequency,
   Task,
   TaskGroup,
   User,
 } from '@/modules/database/entities';
-import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
+import {
+  Occurrence,
+  RecurrenceSource,
+} from '@/modules/recurrence-rule/recurrence.types';
 
 const USER = { id: 'user-1', timezone: 'UTC', displayName: 'Tony' } as User;
 
@@ -35,6 +40,7 @@ const oneOffOccurrence = (
   completedAt: null,
   isRecurring: false,
   isException: false,
+  recurrence: null,
 });
 
 /** Builds a minimal recurring occurrence (carries its instance originalStart). */
@@ -51,6 +57,20 @@ const recurringOccurrence = (
   completedAt: null,
   isRecurring: true,
   isException: false,
+  recurrence: {
+    config: {
+      frequency: RecurrenceFrequency.DAILY,
+      interval: 1,
+      byWeekday: null,
+      byMonthDay: null,
+      byMonth: null,
+      endType: RecurrenceEndType.NEVER,
+      endDate: null,
+      count: null,
+    },
+    source: RecurrenceSource.TASK,
+    groupName: null,
+  },
 });
 
 /**

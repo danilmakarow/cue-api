@@ -714,6 +714,54 @@ paths:
         '404':
           description: No task group with that id.
 
+  /users/me/settings:
+    get:
+      tags: [users]
+      summary: Get the current user account settings
+      description: |
+        Returns the signed-in user's mutable account settings — currently the
+        IANA `timezone` every time-of-day-local computation resolves against
+        (recurrence expansion, the daily-report scheduler).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current account settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettingsDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    patch:
+      tags: [users]
+      summary: Update the current user account settings
+      description: |
+        Updates the signed-in user's account settings. `timezone` is optional —
+        send only what changed — but when present must be a valid IANA zone (e.g.
+        `Europe/Berlin`); an unknown or malformed value is rejected with 400. This
+        is the post-sign-in path; the timezone is otherwise only set at sign-in
+        via `POST /auth/apple`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserSettingsRequest'
+      responses:
+        '200':
+          description: Updated account settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettingsDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
   /users/me/report-settings:
     get:
       tags: [users]
@@ -819,6 +867,31 @@ components:
       bearerFormat: JWT
 
   schemas:
+    UserSettingsDTO:
+      type: object
+      description: |
+        The signed-in user's mutable account settings. `timezone` is the IANA zone
+        every time-of-day-local computation resolves against (recurrence
+        expansion, the daily-report scheduler).
+      required: [timezone]
+      properties:
+        timezone:
+          type: string
+          example: 'Europe/Berlin'
+          description: The user's IANA timezone identifier.
+    UpdateUserSettingsRequest:
+      type: object
+      description: |
+        Partial update for the account settings. Send only the fields that
+        changed; an omitted field is left untouched. `timezone`, when present,
+        must be a valid IANA zone; an unknown or malformed value is rejected
+        with 400.
+      properties:
+        timezone:
+          type: string
+          maxLength: 64
+          example: 'Europe/Berlin'
+          description: IANA timezone identifier for the signed-in user.
     ReportSettingsDTO:
       type: object
       description: |

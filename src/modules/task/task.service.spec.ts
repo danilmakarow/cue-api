@@ -13,7 +13,10 @@ import {
   TaskOccurrenceException,
 } from '@/modules/database/entities';
 import { RecurrenceRuleService } from '@/modules/recurrence-rule/recurrence-rule.service';
-import { RecurrenceConfig } from '@/modules/recurrence-rule/recurrence.types';
+import {
+  RecurrenceConfig,
+  RecurrenceSource,
+} from '@/modules/recurrence-rule/recurrence.types';
 
 /**
  * Minimal shape of a TypeORM FindOperator as seen from the test router — only
@@ -2496,6 +2499,13 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
     expect(result).toHaveLength(7);
     expect(result.every((occ) => occ.task.id === 't-inherited')).toBe(true);
     expect(result.every((occ) => occ.isRecurring)).toBe(true);
+    // Each occurrence carries a GROUP-source summary naming the group + the
+    // effective (inherited) rule, so a reader can render the inherited context.
+    expect(
+      result.every((occ) => occ.recurrence?.source === RecurrenceSource.GROUP),
+    ).toBe(true);
+    expect(result[0].recurrence?.groupName).toBe('Test Group');
+    expect(result[0].recurrence?.config).toBe(groupRule);
   });
 
   it('does not double-count a group-inherited recurring task surfaced by both reads', async () => {
@@ -2569,6 +2579,11 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
     expect(result).toHaveLength(1);
     expect(result[0].task.id).toBe('t-own-rule');
     expect(localDate(result[0].occurrenceStart)).toBe('2026-06-01');
+    // The own rule wins, so the summary is TASK-sourced (no inherited group name)
+    // and carries the task's own rule, not the group default.
+    expect(result[0].recurrence?.source).toBe(RecurrenceSource.TASK);
+    expect(result[0].recurrence?.groupName).toBeNull();
+    expect(result[0].recurrence?.config).toBe(ownRule);
   });
 
   it('changing the group default changes expansion for tasks without own rules', async () => {
@@ -3141,5 +3156,166 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
     await expect(
       service.findChangedSince('user-1', SINCE, 'missing-cal'),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+/**
+ * PROOF: the write boundary interprets a NAIVE wall-clock ISO (no offset, as the
+ * AI model emits) in the task's timezone — NOT as UTC. With the process tz forced
+ * to UTC (mirroring the prod server) and zone "Europe/Moscow" (UTC+3), a naive
+ * "14:30" must persist as 11:30Z, and a string carrying an explicit offset must
+ * keep that offset. Asserting on absolute UTC instants is tz-independent, but the
+ * forced TZ pins the regression: the old `new Date(naive)` would store 14:30Z.
+ */
+describe('TaskService write-boundary timezone interpretation', () => {
+  const ZONE = 'Europe/Moscow';
+  const NAIVE = '2026-06-25T14:30:00';
+  const WITH_OFFSET = '2026-06-25T14:30:00+03:00';
+  // Both naive-in-Moscow and the +03:00 string denote the SAME instant: 11:30Z.
+  const EXPECTED_UTC = '2026-06-25T11:30:00.000Z';
+
+  let originalTz: string | undefined;
+
+  beforeAll(() => {
+    originalTz = process.env.TZ;
+    process.env.TZ = 'UTC';
+  });
+
+  afterAll(() => {
+    process.env.TZ = originalTz;
+  });
+
+  /**
+   * Builds a TaskService over a single mutable task fixture with mocked write
+   * collaborators (createInstance/save/findOne), covering create + update + split.
+   */
+  const buildService = (task?: Task) => {
+    const taskDb = {
+      createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
+      save: jest.fn((entity: Task) =>
+        Promise.resolve({ ...entity, id: entity.id ?? 'task-1' }),
+      ),
+      findOneBy: jest.fn().mockResolvedValue(task ?? null),
+      findOne: jest.fn().mockResolvedValue(task ?? null),
+    };
+    const service = new TaskService(
+      taskDb as never,
+      buildCalendarDatabaseService() as never,
+      buildGroupDatabaseService() as never,
+      new RecurrenceRuleService() as never,
+      buildExceptionService() as never,
+    );
+
+    return { service, taskDb };
+  };
+
+  describe('create', () => {
+    it('stores a naive wall-clock as the zoned instant (11:30Z, NOT 14:30Z)', async () => {
+      const { service } = buildService();
+
+      const created = await service.create('user-1', {
+        calendarId: 'cal-1',
+        title: 'Standup',
+        timezone: ZONE,
+        startAt: NAIVE,
+        endAt: NAIVE,
+      });
+
+      expect(created.startAt?.toISOString()).toBe(EXPECTED_UTC);
+      expect(created.endAt?.toISOString()).toBe(EXPECTED_UTC);
+    });
+
+    it('honors an explicit in-string offset (+03:00 ⇒ 11:30Z)', async () => {
+      const { service } = buildService();
+
+      const created = await service.create('user-1', {
+        calendarId: 'cal-1',
+        title: 'Standup',
+        timezone: ZONE,
+        startAt: WITH_OFFSET,
+      });
+
+      expect(created.startAt?.toISOString()).toBe(EXPECTED_UTC);
+    });
+  });
+
+  describe('update (one-off / all scope)', () => {
+    it('localizes a naive move in the next timezone (11:30Z)', async () => {
+      const task = makeTask({ id: 'task-1', timezone: ZONE });
+      const { service } = buildService(task);
+
+      const updated = await service.update('user-1', 'task-1', {
+        startAt: NAIVE,
+        endAt: NAIVE,
+        timezone: ZONE,
+      });
+
+      expect(updated.startAt?.toISOString()).toBe(EXPECTED_UTC);
+      expect(updated.endAt?.toISOString()).toBe(EXPECTED_UTC);
+      expect(updated.timezone).toBe(ZONE);
+    });
+
+    it('honors an explicit offset on update (+03:00 ⇒ 11:30Z)', async () => {
+      const task = makeTask({ id: 'task-1', timezone: ZONE });
+      const { service } = buildService(task);
+
+      const updated = await service.update('user-1', 'task-1', {
+        startAt: WITH_OFFSET,
+        timezone: ZONE,
+      });
+
+      expect(updated.startAt?.toISOString()).toBe(EXPECTED_UTC);
+    });
+
+    it('updates a RECURRING anchor (the all scope) with a naive move ⇒ 11:30Z', async () => {
+      const task = makeTask({
+        id: 'task-1',
+        timezone: ZONE,
+        startAt: zoned('2026-06-01T09:00', ZONE),
+        endAt: zoned('2026-06-01T09:30', ZONE),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      });
+      const { service } = buildService(task);
+
+      const updated = await service.update('user-1', 'task-1', {
+        startAt: NAIVE,
+        endAt: NAIVE,
+        timezone: ZONE,
+      });
+
+      // The master anchor's instant is the zoned wall-clock; the inline config is
+      // untouched, so the whole series re-anchors to the correct instant.
+      expect(updated.startAt?.toISOString()).toBe(EXPECTED_UTC);
+      expect(updated.recurrenceConfig).toEqual(
+        makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      );
+    });
+  });
+
+  describe('splitSeries (this_and_following scope)', () => {
+    it('anchors the new master at the zoned naive instant (11:30Z)', async () => {
+      const anchor = makeTask({
+        id: 'task-1',
+        timezone: ZONE,
+        startAt: zoned('2026-06-01T09:00', ZONE),
+        endAt: zoned('2026-06-01T09:30', ZONE),
+        recurrenceConfig: makeRule({ frequency: RecurrenceFrequency.DAILY }),
+      });
+      const { service, taskDb } = buildService(anchor);
+
+      const originalStart = zoned('2026-06-25T09:00', ZONE);
+
+      await service.splitSeries('user-1', 'task-1', originalStart, {
+        startAt: NAIVE,
+        timezone: ZONE,
+      });
+
+      // The new master is the LAST createInstance call; its startAt is the zoned
+      // naive instant, not 14:30Z.
+      const newMaster = taskDb.createInstance.mock.calls.at(-1)?.[0] as Task;
+
+      expect(newMaster.startAt?.toISOString()).toBe(EXPECTED_UTC);
+      expect(newMaster.timezone).toBe(ZONE);
+    });
   });
 });

@@ -20,6 +20,7 @@ const timed = (title: string, startIso: string, zone: string): Occurrence => {
     completedAt: null,
     isRecurring: false,
     isException: false,
+    recurrence: null,
   };
 };
 
@@ -36,6 +37,7 @@ const allDay = (title: string, dateIso: string, zone: string): Occurrence => {
     completedAt: null,
     isRecurring: false,
     isException: false,
+    recurrence: null,
   };
 };
 
@@ -49,6 +51,7 @@ const todo = (title: string): Occurrence => ({
   completedAt: null,
   isRecurring: false,
   isException: false,
+  recurrence: null,
 });
 
 describe('renderAsciiCalendar', () => {

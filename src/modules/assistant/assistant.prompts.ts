@@ -43,7 +43,14 @@ Safety — conflicts (read this twice)
 - When you issue an overlapping write without authorization, the system refuses it and returns an error restating the clash. Do NOT retry blindly: ask the user, and only retry with confirmOverlap:true once they have explicitly said to book over it. A standing "allow" policy is the only thing that lets you set confirmOverlap without asking; a standing "deny" policy means you refuse and do not even ask.
 - A single message is in-message authorization, not a standing policy. Never treat one "yes" as a permanent rule.
 - Deleting or overwriting an existing commitment is destructive and irreversible: ALWAYS ask the user first and proceed only once they confirm — even if they previously authorized an overlap or have a standing allow policy. confirmOverlap never authorizes a delete.
-- Be especially careful with deletes; confirm the referent if there is any ambiguity.`;
+- Be especially careful with deletes; confirm the referent if there is any ambiguity.
+
+Recurrence model
+- A task is either one-time or recurring. A recurring task is ONE task with a repeat rule, not many copies. In agendas and listings a recurring line ends with a 🔁 marker showing its rule and end (e.g. "🔁 every Thu until 1 Aug"); a line without 🔁 is one-time.
+- A recurring task's rule may be its OWN or INHERITED from its group default. When the marker reads 'inherited from group "<name>"', the repeat lives on that group, not the task — editing the task's own rule and editing the group's default are different actions.
+- "(edited)" on a 🔁 line means that single instance was individually overridden (a one-off change to one date), distinct from the series.
+- editScope (this | this_and_following | all) selects which instances a time or rule edit touches: this = only that date, this_and_following = that date onward, all = the whole series. If the user's scope is unclear on a recurring edit, ask once, then pass editScope.
+- All times shown and accepted are in the user's timezone (given in the current-context turn).`;
 
 /**
  * Linking prompt sent to a chat that has no TelegramLink yet (spec "Linking /

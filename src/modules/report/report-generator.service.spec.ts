@@ -65,6 +65,7 @@ const occurrence = (
     completedAt: null,
     isRecurring: false,
     isException: false,
+    recurrence: null,
   }) as Occurrence;
 
 const user = (overrides: Partial<User> = {}): User =>

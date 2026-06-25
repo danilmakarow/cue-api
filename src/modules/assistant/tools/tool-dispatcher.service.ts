@@ -32,12 +32,14 @@ import {
   TaskOccurrenceException,
 } from '@/modules/database/entities';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
+import { resolveEffectiveSettings } from '@/modules/task/effective-settings';
 import {
   RecurringSeriesConflicts,
   TaskService,
 } from '@/modules/task/task.service';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
 import { OccurrenceOverrideChanges } from '@/modules/task-occurrence-exception/task-occurrence-exception.service';
+import { parseWallClockInZone } from '@/utils/datetime';
 
 /** Maximum free slots returned by `find_free_slots` to keep results compact. */
 const MAX_FREE_SLOTS = 5;
@@ -287,6 +289,27 @@ export class ToolDispatcherService implements ToolHandlerHost {
    */
   private handleMapOf(context: ToolDispatchContext): HandleMap {
     return context.handleMap ?? new HandleMap();
+  }
+
+  /**
+   * True when a resolved handle target addresses a concrete instance of a
+   * recurring series: the task recurs under its EFFECTIVE recurrence (its own
+   * inline `recurrenceConfig` OR one inherited from its group default, resolved
+   * via {@link resolveEffectiveSettings}) AND the handle carries a non-null
+   * `originalStart` (a real occurrence coordinate, not the bare master row).
+   *
+   * Using the EFFECTIVE recurrence — not `task.recurrenceConfig !== null` — is the
+   * inheritance fix: a task with no own rule that recurs through its group was
+   * previously mis-classified as a one-off, so a recurring edit / completion /
+   * delete skipped the editScope question and used one-off occurrence identity.
+   * The `task` MUST be loaded with its `group` relation (`findByIdWithRule`) for
+   * the inherited rule to be visible.
+   */
+  private isRecurringInstance(task: Task, originalStart: Date | null): boolean {
+    return (
+      resolveEffectiveSettings(task).recurrence !== null &&
+      originalStart !== null
+    );
   }
 
   /**
@@ -750,8 +773,15 @@ export class ToolDispatcherService implements ToolHandlerHost {
     }
 
     const timezone = parsed.timezone ?? context.user.timezone;
-    const startAt = parsed.startAt ? new Date(parsed.startAt) : null;
-    const endAt = parsed.endAt ? new Date(parsed.endAt) : null;
+    // Conflict-window pre-parse: localize the naive wall-clock in the SAME zone
+    // the service persists it in, so the overlap check matches the stored instant
+    // (the raw strings are forwarded to `create`, which re-localizes them).
+    const startAt = parsed.startAt
+      ? parseWallClockInZone(parsed.startAt, timezone)
+      : null;
+    const endAt = parsed.endAt
+      ? parseWallClockInZone(parsed.endAt, timezone)
+      : null;
 
     // Default-deny conflict gate (ADR 0011 + 0044): a timed create is
     // conflict-checked and REFUSED on overlap with a recoverable restatement —
@@ -844,9 +874,17 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     if (!target) return STALE_HANDLE_RESULT;
 
-    const task = await this.taskService.findById(context.userId, target.taskId);
-    const isRecurringInstance =
-      task.recurrenceConfig !== null && target.originalStart !== null;
+    // Load WITH the group relation so an inherited recurrence rule is visible:
+    // the classification below resolves the EFFECTIVE recurrence (own ?? group),
+    // and a relation-less read would hide a group-inherited rule.
+    const task = await this.taskService.findByIdWithRule(
+      context.userId,
+      target.taskId,
+    );
+    const isRecurringInstance = this.isRecurringInstance(
+      task,
+      target.originalStart,
+    );
     const recurrenceUpdate = this.resolveRecurrenceUpdate(parsed.recurrence);
 
     if (isRecurringInstance) {
@@ -942,6 +980,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
           originalStart,
           parsed,
           existingException,
+          parsed.timezone ?? context.user.timezone,
         ),
       );
 
@@ -989,9 +1028,10 @@ export class ToolDispatcherService implements ToolHandlerHost {
           ...(parsed.isAllDay !== undefined
             ? { isAllDay: parsed.isAllDay }
             : {}),
-          ...(parsed.timezone !== undefined
-            ? { timezone: parsed.timezone }
-            : {}),
+          // ALWAYS forward the resolved user zone: the interpretation zone for a
+          // bare move on the new anchor AND the new master's `timezone` (locked
+          // decision).
+          timezone: parsed.timezone ?? context.user.timezone,
           ...(parsed.requiresCompletion !== undefined
             ? { requiresCompletion: parsed.requiresCompletion }
             : {}),
@@ -1032,7 +1072,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
       ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
       ...(parsed.isAllDay !== undefined ? { isAllDay: parsed.isAllDay } : {}),
-      ...(parsed.timezone !== undefined ? { timezone: parsed.timezone } : {}),
+      // ALWAYS forward the resolved user zone: the interpretation zone for a bare
+      // move on the whole series AND the master's new `timezone` (locked decision).
+      timezone: parsed.timezone ?? context.user.timezone,
       ...(parsed.requiresCompletion !== undefined
         ? { requiresCompletion: parsed.requiresCompletion }
         : {}),
@@ -1090,6 +1132,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
           : {}),
         ...(parsed.title !== undefined ? { title: parsed.title } : {}),
         ...(recurrenceDto ? { recurrence: recurrenceDto } : {}),
+        // The resolved user zone the subsequent write also localizes / sets the
+        // series in, so the conflict window matches the persisted instant.
+        timezone: parsed.timezone ?? context.user.timezone,
       },
     );
 
@@ -1149,10 +1194,18 @@ export class ToolDispatcherService implements ToolHandlerHost {
       originalStart,
       existingException,
     );
+    // Localize the bare wall-clock in the resolved user zone so the conflict
+    // window matches the instant the override will persist.
+    const zone = parsed.timezone ?? context.user.timezone;
     const nextStart = movesStart
-      ? new Date(parsed.startAt as string)
+      ? (parseWallClockInZone(parsed.startAt as string, zone) ?? current.start)
       : current.start;
-    const nextEnd = this.resolveOccurrenceMoveEnd(current, nextStart, parsed);
+    const nextEnd = this.resolveOccurrenceMoveEnd(
+      current,
+      nextStart,
+      parsed,
+      zone,
+    );
 
     // No concrete timed window (end-less / all-day occurrence) ⇒ nothing can
     // overlap, mirroring `findOverlapping`'s [start, end) contract — proceed.
@@ -1217,9 +1270,10 @@ export class ToolDispatcherService implements ToolHandlerHost {
     current: { start: Date; end: Date | null },
     nextStart: Date,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
+    zone: string,
   ): Date | null {
     if (parsed.endAt !== undefined) {
-      return parsed.endAt ? new Date(parsed.endAt) : null;
+      return parsed.endAt ? parseWallClockInZone(parsed.endAt, zone) : null;
     }
 
     if (!current.end) return null;
@@ -1245,25 +1299,37 @@ export class ToolDispatcherService implements ToolHandlerHost {
     originalStart: Date,
     parsed: ReturnType<typeof updateTaskInputSchema.parse>,
     existingException: TaskOccurrenceException | null,
+    zone: string,
   ): OccurrenceOverrideChanges {
     // A `startAt: null` (clear) is ignored on the `this` path: a single recurring
     // occurrence cannot be made timeless (its originalStart is its identity), so
-    // only a non-null new start is persisted as an `overrideStartAt` move.
+    // only a non-null new start is persisted as an `overrideStartAt` move. The
+    // bare wall-clock is localized in the resolved user zone (an explicit
+    // in-string offset is honored) so the override stores the right instant.
     const movesStart = parsed.startAt !== undefined && parsed.startAt !== null;
+    const overrideStartAt = movesStart
+      ? parseWallClockInZone(parsed.startAt as string, zone)
+      : null;
 
     const changes: OccurrenceOverrideChanges = {
       ...(parsed.title !== undefined ? { overrideTitle: parsed.title } : {}),
-      ...(movesStart
-        ? { overrideStartAt: new Date(parsed.startAt as string) }
-        : {}),
+      ...(overrideStartAt ? { overrideStartAt } : {}),
       ...(parsed.endAt !== undefined
-        ? { overrideEndAt: parsed.endAt ? new Date(parsed.endAt) : null }
+        ? {
+            overrideEndAt: parsed.endAt
+              ? parseWallClockInZone(parsed.endAt, zone)
+              : null,
+          }
         : {}),
     };
 
     const isStartOnlyMove = movesStart && parsed.endAt === undefined;
 
-    if (isStartOnlyMove && existingException?.overrideEndAt) {
+    if (
+      isStartOnlyMove &&
+      overrideStartAt &&
+      existingException?.overrideEndAt
+    ) {
       const current = this.effectiveOccurrenceWindow(
         task,
         originalStart,
@@ -1274,7 +1340,7 @@ export class ToolDispatcherService implements ToolHandlerHost {
         const durationMs = current.end.getTime() - current.start.getTime();
 
         changes.overrideEndAt = new Date(
-          new Date(parsed.startAt as string).getTime() + durationMs,
+          overrideStartAt.getTime() + durationMs,
         );
       }
     }
@@ -1304,19 +1370,25 @@ export class ToolDispatcherService implements ToolHandlerHost {
     const hasGroupChange = parsed.group !== undefined;
     const groupId = groupResolution.groupId;
 
+    // Per the locked tz decision the user's timezone is the single source of
+    // truth on a move: a bare wall-clock is interpreted in it and `task.timezone`
+    // is re-set to it (the service applies both off the forwarded `timezone`).
+    const timezone = parsed.timezone ?? context.user.timezone;
+
     // startAt / endAt are both tri-state: a string sets, an explicit null clears
     // (startAt:null reverts a timed task to a timeless todo), undefined keeps the
-    // current value.
+    // current value. The conflict-window pre-parse localizes in the SAME zone the
+    // service persists in, so the overlap check matches the stored instant.
     const nextStartAt =
       parsed.startAt !== undefined
         ? parsed.startAt
-          ? new Date(parsed.startAt)
+          ? parseWallClockInZone(parsed.startAt, timezone)
           : null
         : task.startAt;
     const nextEndAt =
       parsed.endAt !== undefined
         ? parsed.endAt
-          ? new Date(parsed.endAt)
+          ? parseWallClockInZone(parsed.endAt, timezone)
           : null
         : task.endAt;
 
@@ -1351,7 +1423,9 @@ export class ToolDispatcherService implements ToolHandlerHost {
       ...(parsed.endAt !== undefined ? { endAt: parsed.endAt } : {}),
       ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
       ...(parsed.isAllDay !== undefined ? { isAllDay: parsed.isAllDay } : {}),
-      ...(parsed.timezone !== undefined ? { timezone: parsed.timezone } : {}),
+      // ALWAYS forward the resolved user zone: it is both the interpretation zone
+      // for a bare move and the task's new `timezone` (locked decision).
+      timezone,
       ...(parsed.requiresCompletion !== undefined
         ? { requiresCompletion: parsed.requiresCompletion }
         : {}),
@@ -1381,13 +1455,18 @@ export class ToolDispatcherService implements ToolHandlerHost {
     if (!target) return STALE_HANDLE_RESULT;
 
     const completed = parsed.completed ?? true;
-    const task = await this.taskService.findById(context.userId, target.taskId);
+    // Load WITH the group relation so a group-inherited recurring task toggles
+    // per-occurrence (not the master) — classify off the EFFECTIVE recurrence.
+    const task = await this.taskService.findByIdWithRule(
+      context.userId,
+      target.taskId,
+    );
 
-    if (task.recurrenceConfig !== null && target.originalStart !== null) {
+    if (this.isRecurringInstance(task, target.originalStart)) {
       await this.taskService.setOccurrenceCompleted(
         context.userId,
         target.taskId,
-        target.originalStart,
+        target.originalStart as Date,
         completed,
       );
     } else {
@@ -1424,9 +1503,17 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
     if (!target) return STALE_HANDLE_RESULT;
 
-    const task = await this.taskService.findById(context.userId, target.taskId);
-    const isRecurringInstance =
-      task.recurrenceConfig !== null && target.originalStart !== null;
+    // Load WITH the group relation so a group-inherited recurring task is
+    // classified as recurring (asks for editScope, skips/truncates per-occurrence
+    // instead of soft-deleting the whole series) — off the EFFECTIVE recurrence.
+    const task = await this.taskService.findByIdWithRule(
+      context.userId,
+      target.taskId,
+    );
+    const isRecurringInstance = this.isRecurringInstance(
+      task,
+      target.originalStart,
+    );
 
     // Ask which scope FIRST when a repeating task is targeted without one — the
     // model cannot meaningfully confirm a delete whose extent it has not pinned.

@@ -36,11 +36,13 @@ import {
 import {
   Occurrence,
   RecurrenceConfig,
+  RecurrenceSource,
 } from '@/modules/recurrence-rule/recurrence.types';
 import {
   OccurrenceOverrideChanges,
   TaskOccurrenceExceptionService,
 } from '@/modules/task-occurrence-exception/task-occurrence-exception.service';
+import { parseWallClockInZone } from '@/utils/datetime';
 
 /**
  * Fields the assistant may change on an existing event (the "all" / one-off
@@ -137,6 +139,10 @@ export interface RecurringEditProposal {
   endAt?: string;
   title?: string;
   recurrence?: CreateRecurrenceRuleDto;
+  // The zone a bare wall-clock move is interpreted in AND the series is expanded
+  // in — the dispatcher passes the resolved user zone so the conflict window
+  // matches the instant the subsequent write persists. Omitted ⇒ task.timezone.
+  timezone?: string;
 }
 
 /**
@@ -191,8 +197,14 @@ export class TaskService {
   async create(userId: string, dto: CreateTaskDto): Promise<Task> {
     await this.ensureCalendarOwnedByUser(dto.calendarId, userId);
 
-    const startAt = dto.startAt ? new Date(dto.startAt) : null;
-    const endAt = dto.endAt ? new Date(dto.endAt) : null;
+    // Naive wall-clock ISO from the assistant is a local time in `dto.timezone`
+    // (the dispatcher-resolved user zone); an explicit in-string offset is kept.
+    const startAt = dto.startAt
+      ? parseWallClockInZone(dto.startAt, dto.timezone)
+      : null;
+    const endAt = dto.endAt
+      ? parseWallClockInZone(dto.endAt, dto.timezone)
+      : null;
 
     if (startAt && endAt && endAt.getTime() < startAt.getTime()) {
       throw new BadRequestException(
@@ -605,8 +617,20 @@ export class TaskService {
   ): Promise<Task> {
     const task = await this.findById(userId, taskId);
 
-    const nextStartAt = this.resolveNextDate(input.startAt, task.startAt);
-    const nextEndAt = this.resolveNextDate(input.endAt, task.endAt);
+    // The zone a bare move is interpreted in = the task's NEXT timezone. The
+    // dispatcher forwards the user's timezone as `input.timezone` on updates, so
+    // this is the user zone, and `task.timezone` is re-set to it below.
+    const nextTimezone = input.timezone ?? task.timezone;
+    const nextStartAt = this.resolveNextDate(
+      input.startAt,
+      task.startAt,
+      nextTimezone,
+    );
+    const nextEndAt = this.resolveNextDate(
+      input.endAt,
+      task.endAt,
+      nextTimezone,
+    );
 
     if (
       nextStartAt &&
@@ -623,7 +647,6 @@ export class TaskService {
     const nextGroupId =
       input.groupId !== undefined ? input.groupId : task.groupId;
     const nextIsAllDay = input.isAllDay ?? task.isAllDay;
-    const nextTimezone = input.timezone ?? task.timezone;
     // requiresCompletion / color are nullable: an explicit value (incl. null to
     // clear) is taken, an omitted key keeps the current value.
     const nextRequiresCompletion =
@@ -752,13 +775,18 @@ export class TaskService {
       task.startAt && task.endAt
         ? task.endAt.getTime() - task.startAt.getTime()
         : null;
+    // The new master's zone (== the `timezone` field set on it below). A bare
+    // move on the split anchor is a naive wall-clock in this zone; an explicit
+    // in-string offset is honored.
+    const newZone = changes.timezone ?? task.timezone;
     const newStartAt = changes.startAt
-      ? new Date(changes.startAt)
+      ? (parseWallClockInZone(changes.startAt, newZone) ?? originalStart)
       : originalStart;
     const newEndAt = this.resolveSplitEndAt(
       changes.endAt,
       newStartAt,
       durationMillis,
+      newZone,
     );
 
     const newTask = this.taskDatabaseService.createInstance({
@@ -1008,10 +1036,17 @@ export class TaskService {
       return { conflictDates: [], conflictingTasks: [] };
     }
 
+    // The effective series is expanded in the NEXT zone (the resolved user zone
+    // the dispatcher passes, else the task's current zone), and a bare move is
+    // localized in it — so the conflict window matches the instant the write
+    // persists. An explicit in-string offset is honored by the helper.
+    const nextZone = proposal.timezone ?? task.timezone;
     const startAt = proposal.startAt
-      ? new Date(proposal.startAt)
+      ? parseWallClockInZone(proposal.startAt, nextZone)
       : task.startAt;
-    const endAt = proposal.endAt ? new Date(proposal.endAt) : task.endAt;
+    const endAt = proposal.endAt
+      ? parseWallClockInZone(proposal.endAt, nextZone)
+      : task.endAt;
 
     // Only a timed series (a concrete window) can overlap; an open-ended or
     // timeless effective series is non-conflicting by construction.
@@ -1026,7 +1061,7 @@ export class TaskService {
         title: proposal.title ?? task.title,
         startAt,
         endAt,
-        timezone: task.timezone,
+        timezone: nextZone,
         recurrence: effectiveRecurrence,
       },
       taskId,
@@ -1200,6 +1235,7 @@ export class TaskService {
           exceptions,
           from,
           to,
+          RecurrenceSource.TASK,
         ),
       );
     }
@@ -1220,6 +1256,9 @@ export class TaskService {
           exceptions,
           from,
           to,
+          // Group-inherited: the summary records the group source + name (the
+          // group relation is loaded above so `anchor.group.name` is available).
+          RecurrenceSource.GROUP,
         ),
       );
     }
@@ -1321,6 +1360,7 @@ export class TaskService {
       completedAt: task.completedAt,
       isRecurring: false,
       isException: false,
+      recurrence: null,
     };
   }
 
@@ -1581,16 +1621,18 @@ export class TaskService {
   }
 
   /**
-   * Resolves the new anchor's `endAt` for a split: an explicit value wins, else
-   * the cloned anchor preserves the original duration, else null.
+   * Resolves the new anchor's `endAt` for a split: an explicit value wins (a
+   * naive wall-clock interpreted in `zone`, an explicit in-string offset
+   * honored), else the cloned anchor preserves the original duration, else null.
    */
   private resolveSplitEndAt(
     explicitEndAt: string | null | undefined,
     newStartAt: Date,
     durationMillis: number | null,
+    zone: string,
   ): Date | null {
     if (explicitEndAt !== undefined) {
-      return explicitEndAt ? new Date(explicitEndAt) : null;
+      return explicitEndAt ? parseWallClockInZone(explicitEndAt, zone) : null;
     }
 
     if (durationMillis === null) return null;
@@ -1600,15 +1642,18 @@ export class TaskService {
 
   /**
    * Resolves a "next" date from an optional ISO input: a string parses to a
-   * `Date`, an explicit null clears, and `undefined` keeps the current value.
+   * `Date` (a naive wall-clock interpreted in `zone`, an explicit in-string
+   * offset honored), an explicit null clears, and `undefined` keeps the current
+   * value. An unparseable string yields null (treated as a clear).
    */
   private resolveNextDate(
     input: string | null | undefined,
     current: Date | null,
+    zone: string,
   ): Date | null {
     if (input === undefined) return current;
 
-    return input ? new Date(input) : null;
+    return input ? parseWallClockInZone(input, zone) : null;
   }
 
   /**

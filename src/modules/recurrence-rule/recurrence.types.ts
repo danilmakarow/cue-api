@@ -33,6 +33,33 @@ export interface RecurrenceConfig {
 }
 
 /**
+ * Where a recurring occurrence's effective rule comes from: the task's own inline
+ * `recurrenceConfig` (`TASK`) or the one inherited from its group default
+ * (`GROUP`). Surfaced so a reader can tell an owned series from an inherited one.
+ */
+export enum RecurrenceSource {
+  TASK = 'TASK',
+  GROUP = 'GROUP',
+}
+
+/**
+ * The recurrence context attached to a recurring {@link Occurrence}: the EFFECTIVE
+ * rule that generated it (task-owned or group-inherited), where that rule comes
+ * from, and — when inherited — the group's name. A value, never a persisted row;
+ * it is what lets a reader (the assistant formatter) render the rule, its end
+ * condition, and its source inline rather than treating a recurring instance as a
+ * one-off. Null on a one-off / todo occurrence (carried via {@link Occurrence}).
+ */
+export interface RecurrenceSummary {
+  /** The effective rule expanded into this occurrence (task own ?? group default). */
+  config: RecurrenceConfig;
+  /** Whether the rule is the task's own or inherited from its group default. */
+  source: RecurrenceSource;
+  /** The owning group's name; non-null only when `source` is `GROUP`. */
+  groupName: string | null;
+}
+
+/**
  * A single computed instance of a task within a query window.
  *
  * An `Occurrence` is a value, never a persisted row: a one-off task yields one
@@ -70,4 +97,11 @@ export interface Occurrence {
   isRecurring: boolean;
   /** True when a `TaskOccurrenceException` row was applied to this instance. */
   isException: boolean;
+  /**
+   * The recurrence context for a recurring occurrence — the effective rule, its
+   * source (task-owned vs group-inherited), and the group name when inherited.
+   * Null on a one-off / todo occurrence (`isRecurring === false`). Lets a reader
+   * render the rule + source inline instead of treating it as a one-off.
+   */
+  recurrence: RecurrenceSummary | null;
 }

@@ -2,7 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
 import { CreateRecurrenceRuleDto } from './dtos';
-import { Occurrence, RecurrenceConfig } from './recurrence.types';
+import {
+  Occurrence,
+  RecurrenceConfig,
+  RecurrenceSource,
+  RecurrenceSummary,
+} from './recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
@@ -321,9 +326,14 @@ export class RecurrenceRuleService {
   /**
    * Builds the Occurrence for a generated instant, applying any matching
    * exception (skip is handled by the caller; this assumes the instance is kept).
+   * Attaches the {@link RecurrenceSummary} (the effective rule + its source) so a
+   * reader can render the recurrence context inline rather than treating the
+   * instance as a one-off.
    */
   private buildOccurrence(
     anchor: Task,
+    config: RecurrenceConfig,
+    summary: RecurrenceSummary,
     originalStart: Date,
     durationMillis: number | null,
     exception: TaskOccurrenceException | undefined,
@@ -344,6 +354,7 @@ export class RecurrenceRuleService {
       completedAt: exception?.completedAt ?? null,
       isRecurring: true,
       isException: exception !== undefined,
+      recurrence: summary,
     };
   }
 
@@ -361,6 +372,11 @@ export class RecurrenceRuleService {
    * stops at the earliest of `windowTo`, the COUNT cap, or the UNTIL boundary.
    * The result is capped at `MAX_OCCURRENCES_PER_WINDOW`, logging a truncation
    * warning rather than silently dropping.
+   *
+   * `source` records where `config` came from — the task's own inline rule
+   * (`TASK`, the default) or its group default (`GROUP`, with the group's name) —
+   * so every built occurrence carries a {@link RecurrenceSummary} a reader can
+   * render inline. It is metadata only; it never affects which instants generate.
    */
   expandOccurrences(
     anchor: Task,
@@ -368,6 +384,7 @@ export class RecurrenceRuleService {
     exceptions: TaskOccurrenceException[],
     windowFrom: Date,
     windowTo: Date,
+    source: RecurrenceSource = RecurrenceSource.TASK,
   ): Occurrence[] {
     if (!anchor.startAt) return [];
 
@@ -375,6 +392,13 @@ export class RecurrenceRuleService {
     const seed = DateTime.fromJSDate(anchor.startAt, { zone });
 
     if (!seed.isValid) return [];
+
+    const summary: RecurrenceSummary = {
+      config,
+      source,
+      groupName:
+        source === RecurrenceSource.GROUP ? (anchor.group?.name ?? null) : null,
+    };
 
     const durationMillis =
       anchor.endAt !== null
@@ -429,6 +453,8 @@ export class RecurrenceRuleService {
         occurrences.push(
           this.buildOccurrence(
             anchor,
+            config,
+            summary,
             originalStart,
             durationMillis,
             exception,

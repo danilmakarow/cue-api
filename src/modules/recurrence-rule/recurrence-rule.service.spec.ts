@@ -2,7 +2,11 @@ import { Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
 import { RecurrenceRuleService } from './recurrence-rule.service';
-import { Occurrence, RecurrenceConfig } from './recurrence.types';
+import {
+  Occurrence,
+  RecurrenceConfig,
+  RecurrenceSource,
+} from './recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
@@ -650,6 +654,48 @@ describe('RecurrenceRuleService.expandOccurrences', () => {
 
       expect(completed.completedAt).toEqual(completedAt);
       expect(other.completedAt).toBeNull();
+    });
+  });
+
+  describe('recurrence summary', () => {
+    it('attaches a TASK-source summary carrying the effective rule by default', () => {
+      const anchor = makeTask({ startAt: zoned('2026-06-01T09:00') });
+      const rule = makeRule({ frequency: RecurrenceFrequency.WEEKLY });
+
+      const [first] = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-06-08T00:00'),
+      );
+
+      expect(first.recurrence).not.toBeNull();
+      expect(first.recurrence?.source).toBe(RecurrenceSource.TASK);
+      expect(first.recurrence?.groupName).toBeNull();
+      // The summary carries the SAME effective config the engine expanded.
+      expect(first.recurrence?.config).toBe(rule);
+    });
+
+    it('attaches a GROUP-source summary with the group name when source is GROUP', () => {
+      const anchor = makeTask({
+        startAt: zoned('2026-06-01T09:00'),
+        // The inherited path loads the group relation; the engine reads its name.
+        group: { name: 'Work', recurrenceConfig: null } as never,
+      });
+      const rule = makeRule({ frequency: RecurrenceFrequency.DAILY });
+
+      const [first] = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-06-03T00:00'),
+        RecurrenceSource.GROUP,
+      );
+
+      expect(first.recurrence?.source).toBe(RecurrenceSource.GROUP);
+      expect(first.recurrence?.groupName).toBe('Work');
     });
   });
 

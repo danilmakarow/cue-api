@@ -9,11 +9,18 @@ import { ToolCall } from '@/modules/ai/ai.types';
 import { CalendarService } from '@/modules/calendar/calendar.service';
 import {
   ConflictPolicy,
+  RecurrenceEndType,
+  RecurrenceFrequency,
   Task,
   TaskGroup,
   User,
 } from '@/modules/database/entities';
-import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
+import {
+  Occurrence,
+  RecurrenceConfig,
+  RecurrenceSource,
+  RecurrenceSummary,
+} from '@/modules/recurrence-rule/recurrence.types';
 import { TaskService } from '@/modules/task/task.service';
 import { TaskGroupService } from '@/modules/task-group/task-group.service';
 
@@ -50,6 +57,38 @@ const buildOccurrence = (overrides: Partial<Occurrence> = {}): Occurrence => ({
   completedAt: null,
   isRecurring: false,
   isException: false,
+  recurrence: null,
+  ...overrides,
+});
+
+/**
+ * Builds a `RecurrenceConfig` with NEVER/interval-1 defaults for the formatter
+ * tests, overridable per case.
+ */
+const buildConfig = (
+  overrides: Partial<RecurrenceConfig> = {},
+): RecurrenceConfig => ({
+  frequency: RecurrenceFrequency.WEEKLY,
+  interval: 1,
+  byWeekday: [3],
+  byMonthDay: null,
+  byMonth: null,
+  endType: RecurrenceEndType.NEVER,
+  endDate: null,
+  count: null,
+  ...overrides,
+});
+
+/**
+ * Builds a `RecurrenceSummary` defaulting to a task-owned weekly-Thursday rule;
+ * `source` / `groupName` / `config` are overridable for the inheritance cases.
+ */
+const buildSummary = (
+  overrides: Partial<RecurrenceSummary> = {},
+): RecurrenceSummary => ({
+  config: buildConfig(),
+  source: RecurrenceSource.TASK,
+  groupName: null,
   ...overrides,
 });
 
@@ -57,15 +96,25 @@ const buildOccurrence = (overrides: Partial<Occurrence> = {}): Occurrence => ({
  * Assembles a `ToolDispatcherService` with mocked feature services.
  */
 const buildDispatcher = () => {
+  // `findById` and `findByIdWithRule` resolve to the SAME row in tests: the
+  // dispatcher reads recurrence/group classification off whichever the handler
+  // calls, and the handlers that classify now use `findByIdWithRule` (so an
+  // inherited rule is visible). Wiring the with-rule variant to delegate to the
+  // plain mock means a per-test `findById.mockResolvedValue({...})` override is
+  // automatically reflected in both, keeping the existing overrides working.
+  const findById = jest.fn().mockResolvedValue({
+    id: 'task-1',
+    recurrenceConfig: null,
+    calendarId: 'cal-1',
+  });
   const taskService = {
     create: jest.fn().mockResolvedValue({ id: 'task-1', title: 'Dentist' }),
     update: jest.fn().mockResolvedValue({ id: 'task-1', title: 'Lunch' }),
     remove: jest.fn().mockResolvedValue(undefined),
-    findById: jest.fn().mockResolvedValue({
-      id: 'task-1',
-      recurrenceConfig: null,
-      calendarId: 'cal-1',
-    }),
+    findById,
+    findByIdWithRule: jest.fn((userId: string, taskId: string) =>
+      findById(userId, taskId),
+    ),
     findOverlapping: jest.fn().mockResolvedValue([]),
     findRecurringSeriesConflicts: jest
       .fn()
@@ -193,6 +242,138 @@ describe('formatTaskLine', () => {
     );
 
     expect(line).toBe('[e3] todo: Stretch');
+  });
+
+  it('appends a 🔁 marker with the rule for a task-owned recurring occurrence', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        recurrence: buildSummary(),
+      }),
+      'UTC',
+      'e4',
+    );
+
+    expect(line).toBe('[e4] Tue 02 Jun 09:00–09:30 Standup 🔁 every Thu');
+  });
+
+  it('renders the end condition in the marker (until date)', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        recurrence: buildSummary({
+          config: buildConfig({
+            endType: RecurrenceEndType.UNTIL_DATE,
+            endDate: '2026-08-01',
+          }),
+        }),
+      }),
+      'UTC',
+      'e5',
+    );
+
+    expect(line).toBe(
+      '[e5] Tue 02 Jun 09:00–09:30 Standup 🔁 every Thu until 1 Aug',
+    );
+  });
+
+  it('renders the COUNT end condition as xN', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        recurrence: buildSummary({
+          config: buildConfig({
+            byWeekday: null,
+            frequency: RecurrenceFrequency.WEEKLY,
+            interval: 2,
+            endType: RecurrenceEndType.COUNT,
+            count: 10,
+          }),
+        }),
+      }),
+      'UTC',
+      'e6',
+    );
+
+    expect(line).toBe(
+      '[e6] Tue 02 Jun 09:00–09:30 Standup 🔁 every 2 weeks x10',
+    );
+  });
+
+  it('marks a group-inherited rule with its source and group name', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        recurrence: buildSummary({
+          source: RecurrenceSource.GROUP,
+          groupName: 'Work',
+        }),
+      }),
+      'UTC',
+      'e7',
+    );
+
+    expect(line).toBe(
+      '[e7] Tue 02 Jun 09:00–09:30 Standup 🔁 every Thu inherited from group "Work"',
+    );
+  });
+
+  it('marks an overridden instance with (edited)', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        isException: true,
+        recurrence: buildSummary(),
+      }),
+      'UTC',
+      'e8',
+    );
+
+    expect(line).toBe(
+      '[e8] Tue 02 Jun 09:00–09:30 Standup 🔁 every Thu (edited)',
+    );
+  });
+
+  it('combines source and (edited) for a group-inherited, overridden instance', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        isRecurring: true,
+        isException: true,
+        recurrence: buildSummary({
+          source: RecurrenceSource.GROUP,
+          groupName: 'Chores',
+          config: buildConfig({
+            frequency: RecurrenceFrequency.MONTHLY,
+            byWeekday: null,
+            byMonthDay: [1],
+          }),
+        }),
+      }),
+      'UTC',
+      'e9',
+    );
+
+    expect(line).toBe(
+      '[e9] Tue 02 Jun 09:00–09:30 Standup 🔁 monthly day 1 inherited from group "Chores" (edited)',
+    );
+  });
+
+  it('appends the marker on an all-day recurring occurrence too', () => {
+    const line = formatTaskLine(
+      buildOccurrence({
+        task: { id: 'task-1', isAllDay: true } as Task,
+        occurrenceEnd: null,
+        title: 'Bin day',
+        isRecurring: true,
+        recurrence: buildSummary({
+          config: buildConfig({ byWeekday: null }),
+        }),
+      }),
+      'UTC',
+      'e10',
+    );
+
+    expect(line).toBe('[e10] Tue 02 Jun all-day Bin day 🔁 weekly');
   });
 });
 
@@ -1024,10 +1205,13 @@ describe('ToolDispatcherService', () => {
       );
 
       expect(harness.taskGroupService.findByName).not.toHaveBeenCalled();
+      // The resolved user zone (here the context default 'UTC') is ALWAYS
+      // forwarded now, so a bare move is interpreted in it and task.timezone
+      // tracks the user (the wall-clock tz fix).
       expect(harness.taskService.update).toHaveBeenCalledWith(
         'user-1',
         'task-1',
-        { groupId: null },
+        { groupId: null, timezone: 'UTC' },
       );
     });
 
@@ -1047,7 +1231,7 @@ describe('ToolDispatcherService', () => {
       expect(harness.taskService.update).toHaveBeenCalledWith(
         'user-1',
         'task-1',
-        { startAt: null },
+        { startAt: null, timezone: 'UTC' },
       );
     });
 
@@ -1066,7 +1250,7 @@ describe('ToolDispatcherService', () => {
       expect(harness.taskService.update).toHaveBeenCalledWith(
         'user-1',
         'task-1',
-        { recurrence: null },
+        { recurrence: null, timezone: 'UTC' },
       );
     });
 
@@ -1093,6 +1277,7 @@ describe('ToolDispatcherService', () => {
             frequency: 'WEEKLY',
             byWeekday: [0, 2, 4],
           }),
+          timezone: 'UTC',
         },
       );
     });
@@ -1139,6 +1324,46 @@ describe('ToolDispatcherService', () => {
         harness.taskService.applyOccurrenceOverride,
       ).not.toHaveBeenCalled();
       expect(harness.taskService.splitSeries).not.toHaveBeenCalled();
+      expect(harness.taskService.update).not.toHaveBeenCalled();
+    });
+
+    it('treats a GROUP-INHERITED recurring task (own recurrenceConfig null) as recurring — asks for scope, not a one-off update', async () => {
+      // Inheritance fix: the task has NO own rule but recurs via its group's
+      // default. Classifying off the EFFECTIVE recurrence (own ?? group) now sees
+      // it as recurring, so an unscoped edit asks for editScope instead of falling
+      // through to the one-off `update` path. The group relation is loaded via
+      // `findByIdWithRule` (the with-rule mock delegates to `findById`).
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceConfig: null,
+        calendarId: 'cal-1',
+        group: { recurrenceConfig: { frequency: 'WEEKLY' }, name: 'Work' },
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      const outcome = await harness.dispatcher.dispatch(
+        toolCall('update_task', {
+          handle: alias,
+          startAt: '2026-06-03T10:00:00.000Z',
+        }),
+        buildContext(handleMap),
+      );
+
+      // The with-rule loader was used (so the inherited rule is visible) and the
+      // task was NOT written as a one-off.
+      expect(harness.taskService.findByIdWithRule).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+      );
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/repeating task/i);
       expect(harness.taskService.update).not.toHaveBeenCalled();
     });
 
@@ -1520,11 +1745,14 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
+      // The resolved user zone (context default 'UTC') is ALWAYS forwarded into
+      // the split now, so the new master's timezone tracks the user and a bare
+      // move is interpreted in it (the wall-clock tz fix).
       expect(harness.taskService.splitSeries).toHaveBeenCalledWith(
         'user-1',
         'task-1',
         new Date('2026-06-03T09:00:00.000Z'),
-        { title: 'New name' },
+        { title: 'New name', timezone: 'UTC' },
       );
     });
 
@@ -1566,7 +1794,7 @@ describe('ToolDispatcherService', () => {
         'user-1',
         'task-1',
         new Date('2026-06-03T09:00:00.000Z'),
-        { groupId: 'grp-1' },
+        { groupId: 'grp-1', timezone: 'UTC' },
       );
       expect(harness.taskService.update).not.toHaveBeenCalled();
       expect(outcome.content).toMatch(/moved them to the group/i);
@@ -1609,6 +1837,7 @@ describe('ToolDispatcherService', () => {
           requiresCompletion: true,
           color: 'BLUE',
           notes: 'Pack the kit',
+          timezone: 'UTC',
         },
       );
       expect(harness.taskService.update).not.toHaveBeenCalled();
@@ -1650,7 +1879,7 @@ describe('ToolDispatcherService', () => {
         'user-1',
         'task-1',
         new Date('2026-06-03T09:00:00.000Z'),
-        { groupId: 'grp-1' },
+        { groupId: 'grp-1', timezone: 'UTC' },
       );
       expect(outcome.isError).toBe(true);
       expect(outcome.content).toMatch(/same calendar/i);
@@ -1749,6 +1978,9 @@ describe('ToolDispatcherService', () => {
         'task-1',
         {
           title: 'All renamed',
+          // The resolved user zone is ALWAYS forwarded so the whole series is
+          // interpreted in it and the master's timezone tracks the user.
+          timezone: 'UTC',
         },
       );
     });
@@ -1784,12 +2016,15 @@ describe('ToolDispatcherService', () => {
         buildContext(handleMap),
       );
 
-      // Refused, not written — the conflict check ran with the proposed time.
+      // Refused, not written — the conflict check ran with the proposed time,
+      // localized in the resolved user zone (context default 'UTC') so the
+      // conflict window matches the instant the write would persist.
       expect(
         harness.taskService.findRecurringEditConflicts,
       ).toHaveBeenCalledWith('user-1', 'task-1', {
         startAt: '2026-06-03T10:00:00.000Z',
         endAt: '2026-06-03T10:30:00.000Z',
+        timezone: 'UTC',
       });
       expect(harness.taskService.update).not.toHaveBeenCalled();
       expect(outcome.isError).toBe(true);
@@ -2018,6 +2253,38 @@ describe('ToolDispatcherService', () => {
         'task-1',
         new Date('2026-06-03T09:00:00.000Z'),
         false,
+      );
+      expect(harness.taskService.setCompleted).not.toHaveBeenCalled();
+    });
+
+    it('completes a GROUP-INHERITED recurring occurrence per-instance (not the master)', async () => {
+      // Inheritance fix on the completion path: a task with no own rule that
+      // recurs via its group must toggle the OCCURRENCE, not the master row.
+      const harness = buildDispatcher();
+
+      (harness.taskService.findById as jest.Mock).mockResolvedValue({
+        id: 'task-1',
+        recurrenceConfig: null,
+        calendarId: 'cal-1',
+        group: { recurrenceConfig: { frequency: 'WEEKLY' }, name: 'Work' },
+      });
+
+      const handleMap = new HandleMap();
+      const alias = handleMap.add({
+        taskId: 'task-1',
+        originalStart: new Date('2026-06-03T09:00:00.000Z'),
+      });
+
+      await harness.dispatcher.dispatch(
+        toolCall('complete_task', { handle: alias }),
+        buildContext(handleMap),
+      );
+
+      expect(harness.taskService.setOccurrenceCompleted).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        new Date('2026-06-03T09:00:00.000Z'),
+        true,
       );
       expect(harness.taskService.setCompleted).not.toHaveBeenCalled();
     });

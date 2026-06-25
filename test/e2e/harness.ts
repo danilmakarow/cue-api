@@ -190,9 +190,14 @@ export class E2eHarness {
    * primary Calendar (resolved by `findPrimaryForOwner` when a write omits a
    * calendar), and a TelegramLink whose `telegramChatId` equals the chat id used
    * in the webhook body (`findByTelegramChatId`). Seeds via the same
-   * `*DatabaseService.save()` path the app uses.
+   * `*DatabaseService.save()` path the app uses. The user's `timezone` defaults to
+   * UTC but is overridable so a test can seed a non-UTC user (e.g. `Europe/Moscow`)
+   * and prove the wall-clock write boundary localizes a bare time in the user zone.
    */
-  async seedLinkedUser(chatId = '555000111'): Promise<SeededFixtures> {
+  async seedLinkedUser(
+    chatId = '555000111',
+    timezone = 'UTC',
+  ): Promise<SeededFixtures> {
     const userDb = this.moduleRef.get(UserDatabaseService);
     const calendarDb = this.moduleRef.get(CalendarDatabaseService);
     const linkDb = this.moduleRef.get(TelegramLinkDatabaseService);
@@ -202,7 +207,7 @@ export class E2eHarness {
         appleUserId: `e2e-apple-${chatId}`,
         email: `e2e-${chatId}@example.test`,
         displayName: 'Tony',
-        timezone: 'UTC',
+        timezone,
       }),
     );
 
@@ -344,6 +349,39 @@ export class E2eHarness {
          FROM task WHERE "calendarId" = $1 ORDER BY "createdAt" ASC`,
       [calendarId],
     );
+  }
+
+  /**
+   * Returns the stored `startAt` / `endAt` of the tasks in a calendar (ordered by
+   * creation) as ABSOLUTE UTC ISO strings — normalizing whatever the pg driver
+   * hands back (a `Date` for a `timestamptz`, or a string) through `new Date(...)
+   * .toISOString()`. This is the tz-independent read-back of the persisted instant:
+   * a Moscow-user `14:30` move must store `11:30Z` here regardless of the process
+   * TZ. A null column stays null. Raw SQL reads straight, bypassing the 3-layer
+   * data-access constraints that bind feature code (tests read directly).
+   */
+  async listTaskInstants(
+    calendarId: string,
+  ): Promise<
+    Array<{ title: string; startAt: string | null; endAt: string | null }>
+  > {
+    const rows: Array<{
+      title: string;
+      startAt: Date | string | null;
+      endAt: Date | string | null;
+    }> = await this.dataSource.query(
+      `SELECT title, "startAt", "endAt" FROM task WHERE "calendarId" = $1 ORDER BY "createdAt" ASC`,
+      [calendarId],
+    );
+
+    const toIso = (value: Date | string | null): string | null =>
+      value === null ? null : new Date(value).toISOString();
+
+    return rows.map((row) => ({
+      title: row.title,
+      startAt: toIso(row.startAt),
+      endAt: toIso(row.endAt),
+    }));
   }
 
   /**
