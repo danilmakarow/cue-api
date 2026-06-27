@@ -3,6 +3,7 @@ import { validate } from 'class-validator';
 
 import { CreateRecurrenceRuleDto } from './create-recurrence-rule.dto';
 import { UpdateRecurrenceRuleDto } from './update-recurrence-rule.dto';
+import { MonthlyAnchorMode } from '../recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
@@ -146,6 +147,65 @@ describe('CreateRecurrenceRuleDto', () => {
         byWeekday: [],
       }),
     ).toContain('byWeekday');
+  });
+
+  it('accepts bySetPos within {1..4, -1} combined with byWeekday', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [1],
+      }),
+    ).toEqual([]);
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [4],
+        bySetPos: [-1],
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects a bySetPos ordinal outside {1..4, -1}', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [0],
+      }),
+    ).toContain('bySetPos');
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [5],
+      }),
+    ).toContain('bySetPos');
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [-2],
+      }),
+    ).toContain('bySetPos');
+  });
+
+  it('accepts a valid monthlyAnchor', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects an unknown monthlyAnchor value', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: 'SECOND_WORKDAY',
+      }),
+    ).toContain('monthlyAnchor');
   });
 });
 

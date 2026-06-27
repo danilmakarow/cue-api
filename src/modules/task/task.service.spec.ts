@@ -96,6 +96,8 @@ const makeRule = (
   byWeekday: null,
   byMonthDay: null,
   byMonth: null,
+  bySetPos: null,
+  monthlyAnchor: null,
   endType: RecurrenceEndType.NEVER,
   endDate: null,
   count: null,
@@ -189,6 +191,15 @@ const buildExceptionService = () => ({
   upsertOverride: jest.fn().mockResolvedValue({} as TaskOccurrenceException),
 });
 
+/**
+ * Builds a notification-rule service stub (no per-task reminders by default).
+ */
+const buildNotificationRuleService = () => ({
+  listByTask: jest.fn().mockResolvedValue([]),
+  createForTask: jest.fn().mockResolvedValue([]),
+  replaceForTask: jest.fn().mockResolvedValue([]),
+});
+
 const WINDOW_FROM = zoned('2026-06-01T00:00');
 const WINDOW_TO = zoned('2026-06-08T00:00');
 
@@ -210,6 +221,7 @@ describe('TaskService.findOccurrencesInRange', () => {
       buildGroupDatabaseService() as never,
       realEngine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, exceptionService };
@@ -505,6 +517,7 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
       buildGroupDatabaseService() as never,
       realEngine as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb };
@@ -667,6 +680,7 @@ describe('TaskService.create', () => {
       groupDb as never,
       engine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb, calendarDb, groupDb };
@@ -787,6 +801,7 @@ describe('TaskService recurring-edit scopes', () => {
       buildGroupDatabaseService() as never,
       engine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb, exceptionService };
@@ -847,6 +862,7 @@ describe('TaskService recurring-edit scopes', () => {
         buildGroupDatabaseService() as never,
         new RecurrenceRuleService() as never,
         exceptionService as never,
+        buildNotificationRuleService() as never,
       );
 
       return { service, exceptionService };
@@ -1032,6 +1048,7 @@ describe('TaskService recurring-edit scopes', () => {
         buildGroupDatabaseService() as never,
         {} as never,
         exceptionService as never,
+        buildNotificationRuleService() as never,
       );
 
       const result = await service.setOccurrenceCompleted(
@@ -1201,6 +1218,7 @@ describe('TaskService.update (details scope)', () => {
       buildGroupDatabaseService() as never,
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb };
@@ -1283,6 +1301,7 @@ describe('TaskService.update — per field', () => {
       (groupDbOverride ?? buildGroupDatabaseService()) as never,
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb };
@@ -1570,6 +1589,7 @@ describe('TaskService.update — recurrence regression', () => {
       buildGroupDatabaseService() as never,
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb };
@@ -1652,6 +1672,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       buildGroupDatabaseService() as never,
       realEngine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service };
@@ -1755,6 +1776,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       buildGroupDatabaseService() as never,
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     const clashes = await service.findOverlapping(
@@ -1914,6 +1936,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       (options.groupDbOverride ?? buildGroupDatabaseService()) as never,
       engine as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, engine, taskDb, savedTasks };
@@ -2250,6 +2273,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       buildGroupDatabaseService() as never,
       engine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     const newMaster = await service.splitSeries(
@@ -2355,6 +2379,7 @@ describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
       buildGroupDatabaseService() as never,
       engine as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, engine, taskDb };
@@ -2452,6 +2477,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       buildGroupDatabaseService() as never,
       realEngine as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb, exceptionService };
@@ -2694,6 +2720,7 @@ describe('TaskService.getDailyCounts', () => {
       buildGroupDatabaseService() as never,
       realEngine as never,
       (options.exceptionService ?? buildExceptionService()) as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, calendarDb };
@@ -2982,6 +3009,7 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
       buildGroupDatabaseService() as never,
       new RecurrenceRuleService() as never,
       exceptionService as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, findAll, exceptionService, calendarDb };
@@ -3204,6 +3232,7 @@ describe('TaskService write-boundary timezone interpretation', () => {
       buildGroupDatabaseService() as never,
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
+      buildNotificationRuleService() as never,
     );
 
     return { service, taskDb };

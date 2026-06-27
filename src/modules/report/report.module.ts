@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 
+import { DailyBriefCacheStore } from './daily-brief-cache.store';
+import { DailyBriefController } from './daily-brief.controller';
+import { DailyBriefService } from './daily-brief.service';
 import { DailyReportScheduler } from './daily-report.scheduler';
 import { ReportGeneratorService } from './report-generator.service';
 import { ReportSenderService } from './report-sender.service';
@@ -20,16 +23,22 @@ import { TaskModule } from '@/modules/task/task.module';
  * - the one-shot report generator (MAIN model via `AiModule`, agenda via
  *   `TaskModule`) and the INTERIM direct-send sender (vendor connector via
  *   `ExternalVendorModule`). The durable `ScheduledNotification` delivery worker
- *   is a separate follow-up (Corrected Assumption 3).
+ *   is a separate follow-up (Corrected Assumption 3);
+ * - the on-demand morning daily brief (`GET /users/me/daily-brief`, backlog D2):
+ *   exposes the same generator per request behind a 24h per-user-per-local-day
+ *   Redis cache (`DailyBriefCacheStore`) that bounds the MAIN-model cost. The
+ *   Redis client comes from the `@Global()` `RedisModule` (no explicit import).
  */
 @Module({
   imports: [DatabaseModule, AiModule, TaskModule, ExternalVendorModule],
-  controllers: [ReportSettingsController],
+  controllers: [ReportSettingsController, DailyBriefController],
   providers: [
     ReportSettingsService,
     ReportGeneratorService,
     ReportSenderService,
     DailyReportScheduler,
+    DailyBriefService,
+    DailyBriefCacheStore,
   ],
   exports: [ReportSettingsService],
 })

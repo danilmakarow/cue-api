@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsOptional,
@@ -13,6 +15,7 @@ import {
 } from 'class-validator';
 
 import { IsTaskColor } from './is-task-color.validator';
+import { ReminderDto } from './reminder.dto';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 
 /**
@@ -68,6 +71,29 @@ export class UpdateTaskDto {
   @ValidateIf((dto: UpdateTaskDto) => dto.color !== null)
   @IsTaskColor()
   color?: string | null;
+
+  /** Per-task icon name to set; null to clear it. */
+  @ApiPropertyOptional({ nullable: true, example: 'cart.fill', maxLength: 255 })
+  @IsOptional()
+  @ValidateIf((dto: UpdateTaskDto) => dto.icon !== null)
+  @IsString()
+  @MaxLength(255)
+  icon?: string | null;
+
+  /**
+   * When provided, REPLACES the full set of per-task reminders (an empty array
+   * clears them). Omitted leaves the existing reminders untouched.
+   */
+  @ApiPropertyOptional({
+    type: () => [ReminderDto],
+    description: 'Replaces the full set of per-task reminders.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ReminderDto)
+  reminders?: ReminderDto[];
 
   /** Set to a UUID to assign to a group; null to ungroup. */
   @ApiPropertyOptional({

@@ -1,6 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 
-import { UserReportSettings } from '@/modules/database/entities';
+import {
+  NotificationChannel,
+  UserReportSettings,
+} from '@/modules/database/entities';
 
 /**
  * Response DTO for the user's daily-report settings (Story 17 / ADR 0046). The
@@ -18,6 +21,16 @@ export class ReportSettingsDTO {
     example: '08:00',
   })
   reportTimeLocal: string;
+
+  @ApiProperty({
+    description:
+      'Preferred delivery channel for the daily report. NOTE: push delivery is ' +
+      'deferred (D1) — a `PUSH` value persists but only Telegram delivers today, ' +
+      'so the report is sent over Telegram regardless until the push pipeline ships.',
+    enum: NotificationChannel,
+    example: NotificationChannel.TELEGRAM,
+  })
+  channel: NotificationChannel;
 }
 
 /**
@@ -28,4 +41,5 @@ export const toReportSettingsDTO = (
 ): ReportSettingsDTO => ({
   enabled: settings.enabled,
   reportTimeLocal: settings.reportTimeLocal,
+  channel: settings.channel,
 });

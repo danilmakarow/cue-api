@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { IsNull } from 'typeorm';
 
 import { UpdatePersonaSettingsDto } from './dtos';
 import {
@@ -65,5 +66,33 @@ export class PersonaSettingsService {
       userId,
       dto.promptText,
     );
+  }
+
+  /**
+   * Lists every curated `PRESET` persona (D9) — the user-agnostic rows seeded into
+   * the DB (`userId IS NULL`, `source = PRESET`) the iOS persona screen offers as
+   * pickable starting points. Returns an empty array when the seed migration has
+   * not run; never includes any user's `CUSTOM` row.
+   */
+  async listPresets(): Promise<PersonaPrompt[]> {
+    return this.personaPromptDatabaseService.findAllBy({
+      userId: IsNull(),
+      source: PersonaPromptSource.PRESET,
+    });
+  }
+
+  /**
+   * Clears the user's `CUSTOM` persona (D9 reset-to-preset) and returns the now
+   * active persona — the seeded "Jarvis" preset, or the code-constant default when
+   * the seed is absent. Idempotent: a user with no custom persona still gets the
+   * fallback back, so the iOS screen can re-render the preset either way.
+   */
+  async clearCustom(userId: string): Promise<PersonaPrompt> {
+    await this.personaPromptDatabaseService.delete({
+      userId,
+      source: PersonaPromptSource.CUSTOM,
+    });
+
+    return this.getActive(userId);
   }
 }

@@ -25,6 +25,8 @@ const buildHarness = (
       } as PersonaPrompt)
     : null;
 
+  const presetRows: PersonaPrompt[] = seededPreset ? [seededPreset] : [];
+
   const personaPromptDatabaseService = {
     findActivePersona: jest.fn(async (userId: string) => {
       return customRows.get(userId) ?? seededPreset;
@@ -46,6 +48,15 @@ const buildHarness = (
       customRows.set(userId, row);
 
       return row;
+    }),
+    // Stands in for the base service's `findAllBy({ userId: IsNull(), source:
+    // PRESET })` — returns the seeded preset rows only.
+    findAllBy: jest.fn(async () => presetRows),
+    // Stands in for the base service's `delete({ userId, source: CUSTOM })`.
+    delete: jest.fn(async (where: { userId: string }) => {
+      const had = customRows.delete(where.userId);
+
+      return { affected: had ? 1 : 0, raw: [] };
     }),
   };
 
@@ -101,5 +112,51 @@ describe('PersonaSettingsService (Story 18 / ADR 0014)', () => {
     expect(
       personaPromptDatabaseService.upsertCustomForUser,
     ).toHaveBeenCalledWith('user-1', 'a brisk quartermaster');
+  });
+
+  it('listPresets returns the seeded curated presets (D9)', async () => {
+    const { service } = buildHarness({ seedPreset: true });
+
+    const presets = await service.listPresets();
+
+    expect(presets).toHaveLength(1);
+    expect(presets[0].source).toBe(PersonaPromptSource.PRESET);
+    expect(presets[0].presetName).toBe('Jarvis');
+  });
+
+  it('listPresets returns an empty list when no preset is seeded (D9)', async () => {
+    const { service } = buildHarness({ seedPreset: false });
+
+    const presets = await service.listPresets();
+
+    expect(presets).toEqual([]);
+  });
+
+  it('clearCustom removes the user custom persona and falls back to the seeded preset (D9)', async () => {
+    const { service, personaPromptDatabaseService } = buildHarness({
+      seedPreset: true,
+    });
+
+    await service.update('user-1', { promptText: 'my own butler' });
+
+    const active = await service.clearCustom('user-1');
+
+    expect(personaPromptDatabaseService.delete).toHaveBeenCalledWith({
+      userId: 'user-1',
+      source: PersonaPromptSource.CUSTOM,
+    });
+    // After the reset the active persona is the seeded preset again.
+    expect(active.source).toBe(PersonaPromptSource.PRESET);
+    expect(active.promptText).toBe('SEEDED jarvis preset text');
+  });
+
+  it('clearCustom is idempotent — returns the fallback even with no custom persona set (D9)', async () => {
+    const { service } = buildHarness({ seedPreset: false });
+
+    const active = await service.clearCustom('user-1');
+
+    // No custom row, no seed → the code-constant Jarvis default.
+    expect(active.source).toBe(PersonaPromptSource.PRESET);
+    expect(active.promptText).toBe(DEFAULT_PERSONA_TEXT);
   });
 });

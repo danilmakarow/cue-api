@@ -77,6 +77,14 @@ export class Task extends BaseEntity {
   color: string | null;
 
   /**
+   * Optional per-task icon (an SF Symbol name, e.g. `cart.fill`). Mirrors the
+   * `icon` columns on {@link Calendar} and {@link TaskGroup}. Null leaves the
+   * task iconless (the client may fall back to a group/default icon).
+   */
+  @Column({ type: 'varchar', nullable: true })
+  icon: string | null;
+
+  /**
    * Set to the completion timestamp when the task is marked done. Stored as a timestamp rather
    * than a boolean so reporting can aggregate completion events over time.
    */

@@ -4,6 +4,7 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   Max,
@@ -11,6 +12,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+import { MonthlyAnchorMode } from '../recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
@@ -70,6 +72,25 @@ export class UpdateRecurrenceRuleDto {
   @Min(1, { each: true })
   @Max(12, { each: true })
   byMonth?: number[];
+
+  /** MONTHLY nth-weekday ordinals (1..4 = first..fourth, -1 = last); combine with byWeekday. */
+  @ApiPropertyOptional({
+    type: [Number],
+    description:
+      'MONTHLY nth-weekday ordinals (1..4 = first..fourth, -1 = last); combine with byWeekday.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @IsIn([-1, 1, 2, 3, 4], { each: true })
+  bySetPos?: number[];
+
+  /** MONTHLY working-day anchor (first/last/day-before-last Mon–Fri of the month). */
+  @ApiPropertyOptional({ enum: MonthlyAnchorMode })
+  @IsOptional()
+  @IsEnum(MonthlyAnchorMode)
+  monthlyAnchor?: MonthlyAnchorMode;
 
   @ApiPropertyOptional({ enum: RecurrenceEndType })
   @IsOptional()

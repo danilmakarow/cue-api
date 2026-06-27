@@ -3,6 +3,7 @@ import {
   summarizeRecurrenceConfig,
 } from './recurrence-summary';
 import {
+  MonthlyAnchorMode,
   RecurrenceConfig,
   RecurrenceSource,
   RecurrenceSummary,
@@ -23,6 +24,8 @@ const config = (over: Partial<RecurrenceConfig> = {}): RecurrenceConfig => ({
   byWeekday: null,
   byMonthDay: null,
   byMonth: null,
+  bySetPos: null,
+  monthlyAnchor: null,
   endType: RecurrenceEndType.NEVER,
   endDate: null,
   count: null,
@@ -104,6 +107,46 @@ describe('summarizeRecurrenceConfig — cadence', () => {
         }),
       ),
     ).toBe('every 2 months day 15');
+  });
+
+  it('renders a monthly nth-weekday selector (bySetPos + byWeekday)', () => {
+    expect(
+      summarizeRecurrenceConfig(
+        config({
+          frequency: RecurrenceFrequency.MONTHLY,
+          byWeekday: [0],
+          bySetPos: [1],
+        }),
+      ),
+    ).toBe('monthly first Mon');
+    expect(
+      summarizeRecurrenceConfig(
+        config({
+          frequency: RecurrenceFrequency.MONTHLY,
+          byWeekday: [4],
+          bySetPos: [-1],
+        }),
+      ),
+    ).toBe('monthly last Fri');
+  });
+
+  it('renders a monthly working-day anchor', () => {
+    expect(
+      summarizeRecurrenceConfig(
+        config({
+          frequency: RecurrenceFrequency.MONTHLY,
+          monthlyAnchor: MonthlyAnchorMode.FIRST_WORKDAY,
+        }),
+      ),
+    ).toBe('monthly first workday');
+    expect(
+      summarizeRecurrenceConfig(
+        config({
+          frequency: RecurrenceFrequency.MONTHLY,
+          monthlyAnchor: MonthlyAnchorMode.DAY_BEFORE_LAST_WORKDAY,
+        }),
+      ),
+    ).toBe('monthly day before last workday');
   });
 
   it('renders yearly cadence with month + day selectors', () => {

@@ -41,6 +41,13 @@ export const environmentSchema = z
     JWT_SECRET: z.string().min(32),
     JWT_EXPIRES_IN: z.string(),
     APPLE_CLIENT_ID: z.string(),
+    // Apple Sign-In refresh-token revocation (S5 account deletion). Optional: the
+    // revoker reads them defensively from process.env and degrades to a logged
+    // no-op until all three are present, so local/dev runs without them succeed.
+    APPLE_TEAM_ID: z.string().optional(),
+    APPLE_KEY_ID: z.string().optional(),
+    // PEM private key; a literal `\n` is normalized to a newline by the revoker.
+    APPLE_PRIVATE_KEY: z.string().optional(),
 
     // Redis configuration (first consumed by the assistant: BullMQ webhook queue,
     // dedupe set, link nonces, held-conflict writes).

@@ -134,8 +134,15 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           description: Missing, invalid, or expired bearer token.
-        '404':
-          description: Linking code is unknown or expired (single-use, short TTL).
+        '422':
+          description: |
+            The nonce is invalid, expired, or already burned (M3). Returns a typed
+            `{ code: 'INVALID_LINK_CODE', message }` body so iOS can branch a
+            persistent bad-code state vs a transient error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvalidLinkCodeBody'
     delete:
       tags: [assistant]
       summary: Revoke the Telegram link
@@ -156,6 +163,34 @@ paths:
                   linked:
                     type: boolean
                     enum: [false]
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /assistant/parse:
+    post:
+      tags: [assistant]
+      summary: Parse natural language into a task draft
+      description: |
+        Parses one line of natural language into a structured task draft (D4) via
+        the assistant AI connector WITHOUT creating a task. JWT-guarded. The iOS
+        quick-create well pre-fills its fields from the returned `TaskDraftDTO`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParseTaskRequest'
+      responses:
+        '200':
+          description: The extracted task draft.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDraftDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           description: Missing, invalid, or expired bearer token.
 
@@ -255,6 +290,55 @@ paths:
           description: The calendar is owned by another user.
         '404':
           description: The calendar does not exist.
+
+  /tasks/search:
+    get:
+      tags: [tasks]
+      summary: Search tasks by text
+      description: |
+        Case-insensitive ILIKE search over `title` + `notes` across ALL the authed
+        user's calendars (M1 — NOT window-bound). `q` is required and trimmed; an
+        optional `groupId` narrows to one group; `limit` defaults to 25 and is
+        clamped to 50. Returns the matched series rows (recurring matches return the
+        anchor) as `TaskSearchResultDTO[]`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Case-insensitive search term matched against title + notes (trimmed).
+        - name: groupId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Narrow the search to a single task group.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 25
+          description: Maximum matches to return (clamped to 50).
+      responses:
+        '200':
+          description: Matching tasks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskSearchResultDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
 
   /tasks/daily-counts:
     get:
@@ -639,6 +723,42 @@ paths:
         '404':
           description: The calendar does not exist.
 
+  /task-groups/reorder:
+    patch:
+      tags: [task-groups]
+      summary: Bulk-reorder task groups
+      description: |
+        Transactionally reorders the caller's task groups: each group in `groupIds`
+        receives a `sortOrder` equal to its index, replacing N racy single PATCHes.
+        Every id must exist (else 404) and belong to a calendar the caller owns
+        (else 403) — validated BEFORE any mutation, so a partial reorder can never
+        persist. Returns the reordered groups in the requested order.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderTaskGroupsRequest'
+      responses:
+        '200':
+          description: The reordered task groups, in the requested order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskGroupDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '403':
+          description: A referenced group belongs to a calendar the caller does not own.
+        '404':
+          description: A referenced group id does not exist.
+
   /task-groups/{id}:
     patch:
       tags: [task-groups]
@@ -713,6 +833,130 @@ paths:
           description: Task group belongs to another user.
         '404':
           description: No task group with that id.
+
+  /users/me:
+    delete:
+      tags: [users]
+      summary: Delete the current user account
+      description: |
+        Account deletion (S5). Best-effort revokes the Apple refresh token, then
+        deletes the user row; DB-level FK cascades purge the whole aggregate
+        (Calendars → Tasks/Groups/Strategies, Devices, TelegramLink,
+        ScheduledNotifications, PersonaPrompt, UserReportSettings). Responds 200
+        `{ ok: true }`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/OkResponse'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /users/me/devices:
+    post:
+      tags: [users]
+      summary: Register an APNs device token
+      description: |
+        Registers (upserts) an APNs device token for the authed user. Idempotent —
+        re-posting a known token re-claims/refreshes the row rather than
+        duplicating. Returns 201 with the `DeviceDTO`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceRequest'
+      responses:
+        '201':
+          description: Device registered (or refreshed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /users/me/devices/{token}:
+    delete:
+      tags: [users]
+      summary: Unregister an APNs device token
+      description: |
+        Unregisters an APNs token owned by the authed user (scoped to the caller).
+        Responds 200 `{ ok: true }` (JSON body, not 204, matching the repo's delete
+        convention); 404 when the token is not owned by the caller.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The APNs device token to unregister.
+      responses:
+        '200':
+          $ref: '#/components/responses/OkResponse'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+        '404':
+          description: No such token owned by the caller.
+
+  /users/me/daily-brief:
+    get:
+      tags: [users]
+      summary: Get the current user morning daily brief
+      description: |
+        Morning daily brief (D2). Optional `date` (YYYY-MM-DD, user-local; defaults
+        to today). Cache-aside: a 24h Redis cache keyed by userId+localDate bounds
+        the MAIN-model cost to one generation per user per local day. `brief` is
+        null when generation produced nothing usable.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+            example: '2026-06-27'
+          description: Local date (YYYY-MM-DD, user timezone) to brief on; defaults to today.
+      responses:
+        '200':
+          description: The daily brief for the resolved local day.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyBriefDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /users/me/persona-presets:
+    get:
+      tags: [users]
+      summary: List the curated AI persona presets
+      description: |
+        Lists the seeded curated persona presets (D9) the iOS persona screen offers
+        as pickable starting points.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The curated persona presets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PersonaPresetDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
 
   /users/me/settings:
     get:
@@ -858,6 +1102,24 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           description: Missing, invalid, or expired bearer token.
+    delete:
+      tags: [users]
+      summary: Reset the current user custom AI persona
+      description: |
+        Clears the signed-in user's custom persona (D9 reset-to-preset) and returns
+        the now-active persona — the seeded preset, or the code-constant default
+        when no preset is set. Idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The now-active persona after the reset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonaSettingsDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
 
 components:
   securitySchemes:
@@ -873,17 +1135,31 @@ components:
         The signed-in user's mutable account settings. `timezone` is the IANA zone
         every time-of-day-local computation resolves against (recurrence
         expansion, the daily-report scheduler).
-      required: [timezone]
+      required: [timezone, displayName, avatarBase64, morningBriefEnabled, eveningRecapEnabled]
       properties:
         timezone:
           type: string
           example: 'Europe/Berlin'
           description: The user's IANA timezone identifier.
+        displayName:
+          type: [string, 'null']
+          example: 'Jane Appleseed'
+          description: The user's display name; null when unset. (S6)
+        avatarBase64:
+          type: [string, 'null']
+          description: The user's avatar as a base64 string; null when unset. (S6)
+        morningBriefEnabled:
+          type: boolean
+          description: Whether the morning daily-brief notification is opted in. (D8)
+        eveningRecapEnabled:
+          type: boolean
+          description: Whether the evening recap notification is opted in. (D8)
     UpdateUserSettingsRequest:
       type: object
       description: |
         Partial update for the account settings. Send only the fields that
-        changed; an omitted field is left untouched. `timezone`, when present,
+        changed; an omitted field is left untouched (the service mutates only
+        changed fields and short-circuits a no-op). `timezone`, when present,
         must be a valid IANA zone; an unknown or malformed value is rejected
         with 400.
       properties:
@@ -892,13 +1168,32 @@ components:
           maxLength: 64
           example: 'Europe/Berlin'
           description: IANA timezone identifier for the signed-in user.
+        displayName:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+          example: 'Jane Appleseed'
+          description: |
+            Display name (trimmed; 1–200 chars). null clears it. A whitespace-only
+            value (trims to empty) or an over-long value is rejected with 400. (S6)
+        avatarBase64:
+          type: [string, 'null']
+          description: |
+            Avatar image as a base64 string (base64- and size-validated); null
+            clears it; a malformed or over-size value is rejected with 400. (S6)
+        morningBriefEnabled:
+          type: boolean
+          description: Opt in/out of the morning daily-brief notification. (D8)
+        eveningRecapEnabled:
+          type: boolean
+          description: Opt in/out of the evening recap notification. (D8)
     ReportSettingsDTO:
       type: object
       description: |
         The signed-in user's daily notification-report settings. `reportTimeLocal`
         is a wall-clock send time interpreted in the user's timezone (User.timezone).
         The internal last-sent-date idempotency guard is not exposed.
-      required: [enabled, reportTimeLocal]
+      required: [enabled, reportTimeLocal, channel]
       properties:
         enabled:
           type: boolean
@@ -908,6 +1203,12 @@ components:
           pattern: '^([01]\d|2[0-3]):[0-5]\d$'
           example: '08:00'
           description: Local wall-clock send time as HH:mm (24-hour, zero-padded).
+        channel:
+          type: string
+          enum: [PUSH, TELEGRAM]
+          description: |
+            Preferred delivery channel (S7). PUSH persists but only Telegram
+            delivers today — push delivery is deferred to D1.
     UpdateReportSettingsRequest:
       type: object
       description: |
@@ -922,6 +1223,12 @@ components:
           pattern: '^([01]\d|2[0-3]):[0-5]\d$'
           example: '08:00'
           description: Local wall-clock send time as HH:mm (24-hour, zero-padded).
+        channel:
+          type: string
+          enum: [PUSH, TELEGRAM]
+          description: |
+            Preferred delivery channel (S7). PUSH persists but only Telegram
+            delivers today — push delivery is deferred to D1.
     PersonaSettingsDTO:
       type: object
       description: |
@@ -962,7 +1269,7 @@ components:
         The inline recurrence config returned inside TaskDTO and TaskGroupDTO.
         Stored as a JSONB column on `task` / `task_group` (no separate row, no
         `id`) — ADR 0054. Field names are normative — the FE decodes them exactly.
-      required: [frequency, interval, byWeekday, byMonthDay, byMonth, endType, endDate, count]
+      required: [frequency, interval, byWeekday, byMonthDay, byMonth, bySetPos, monthlyAnchor, endType, endDate, count]
       properties:
         frequency:
           type: string
@@ -992,6 +1299,22 @@ components:
             minimum: 1
             maximum: 12
           description: Months (1–12). Null means no restriction.
+        bySetPos:
+          type: ['array', 'null']
+          items:
+            type: integer
+            enum: [1, 2, 3, 4, -1]
+          description: |
+            MONTHLY ordinal selectors paired with `byWeekday` — e.g. `[1]` + Monday =
+            "first Monday", `[-1]` + Friday = "last Friday". 1..4 or -1. Null means
+            no nth-weekday restriction.
+        monthlyAnchor:
+          type: ['string', 'null']
+          enum: [FIRST_WORKDAY, LAST_WORKDAY, DAY_BEFORE_LAST_WORKDAY, null]
+          description: |
+            MONTHLY working-day anchor — resolves to the first / last / day-before-last
+            workday of each month. Mutually exclusive with the `bySetPos`/`byMonthDay`
+            axes. Null when no working-day anchor applies.
         endType:
           type: string
           enum: [NEVER, UNTIL_DATE, COUNT]
@@ -1038,6 +1361,20 @@ components:
             type: integer
             minimum: 1
             maximum: 12
+        bySetPos:
+          type: array
+          items:
+            type: integer
+            enum: [1, 2, 3, 4, -1]
+          description: |
+            MONTHLY ordinal selectors paired with `byWeekday` ("first Monday",
+            "last Friday"). Values 1..4 or -1.
+        monthlyAnchor:
+          type: string
+          enum: [FIRST_WORKDAY, LAST_WORKDAY, DAY_BEFORE_LAST_WORKDAY]
+          description: |
+            MONTHLY working-day anchor (first / last / day-before-last workday).
+            Mutually exclusive with the `bySetPos`/`byMonthDay` axes.
         endType:
           type: string
           enum: [NEVER, UNTIL_DATE, COUNT]
@@ -1058,7 +1395,7 @@ components:
         Includes the embedded recurrence config for the edit form.
       required:
         [id, calendarId, groupId, title, notes, startAt, endAt, isAllDay, timezone,
-         requiresCompletion, color, completedAt, recurrence,
+         requiresCompletion, color, icon, reminders, completedAt, recurrence,
          notificationStrategyId, createdAt, updatedAt]
       properties:
         id:
@@ -1074,6 +1411,16 @@ components:
           type: string
         notes:
           type: [string, 'null']
+        icon:
+          type: [string, 'null']
+          description: Per-task icon (e.g. an SF Symbol name); null when iconless. (S4)
+        reminders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReminderResultDTO'
+          description: |
+            The task's own per-task reminders (offset + channel), earliest first.
+            Empty when the task carries no per-task reminders. (S1)
         startAt:
           type: [string, 'null']
           format: date-time
@@ -1122,8 +1469,8 @@ components:
         A single expanded occurrence. Returned by GET /tasks. One per visible
         calendar cell. Stable identity = (taskId, occurrenceStart).
       required:
-        [taskId, calendarId, groupId, originalStart, occurrenceStart, occurrenceEnd,
-         title, notes, isAllDay, timezone, requiresCompletion, color, completedAt,
+        [taskId, calendarId, groupId, groupColorHex, originalStart, occurrenceStart, occurrenceEnd,
+         title, notes, isAllDay, timezone, requiresCompletion, color, icon, completedAt,
          isRecurring, isException]
       properties:
         taskId:
@@ -1136,6 +1483,10 @@ components:
         groupId:
           type: [string, 'null']
           format: uuid
+        groupColorHex:
+          type: [string, 'null']
+          example: '#E27921'
+          description: The owning group's color (preset name or #RRGGBB); null when ungrouped.
         originalStart:
           type: [string, 'null']
           format: date-time
@@ -1165,6 +1516,9 @@ components:
           description: |
             Effective color (task ?? group) per the ADR 0054 resolver — a TaskColor
             preset name OR a #RRGGBB hex; null when neither task nor group sets one.
+        icon:
+          type: [string, 'null']
+          description: Per-task icon (e.g. an SF Symbol name); null when iconless. (S4)
         completedAt:
           type: [string, 'null']
           format: date-time
@@ -1365,6 +1719,14 @@ components:
         color:
           type: [string, 'null']
           description: A TaskColor preset name OR a #RRGGBB hex; null/omit inherits the group.
+        icon:
+          type: [string, 'null']
+          description: Optional per-task icon (e.g. an SF Symbol name). (S4)
+        reminders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReminderRequest'
+          description: Per-task reminders (offset + channel) created with the task. (S1)
         groupId:
           type: string
           format: uuid
@@ -1397,6 +1759,16 @@ components:
           description: |
             A TaskColor preset name OR a #RRGGBB hex; null clears the per-task color
             (re-inherit group). ADR 0054.
+        icon:
+          type: [string, 'null']
+          description: Per-task icon (e.g. an SF Symbol name); null clears it. (S4)
+        reminders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReminderRequest'
+          description: |
+            When provided, REPLACES the full per-task reminder set; an empty array
+            clears all reminders; omitting the key leaves the existing set intact. (S1)
         groupId:
           type: [string, 'null']
           format: uuid
@@ -1579,6 +1951,247 @@ components:
           format: date-time
           description: ISO-8601 timestamp the link was established, or null when unlinked.
 
+    OkResponse:
+      type: object
+      required: [ok]
+      description: |
+        Bare success acknowledgement `{ ok: true }` for endpoints that affect a
+        resource without returning it (matches the repo's delete convention).
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+
+    ReminderRequest:
+      type: object
+      description: A single per-task reminder on a create/update task payload (S1).
+      required: [offsetMinutes, channel]
+      properties:
+        offsetMinutes:
+          type: integer
+          minimum: -10080
+          maximum: 10080
+          example: -15
+          description: |
+            Offset in minutes from the task start (negative fires before, positive
+            after), bounded to ±1 week.
+        channel:
+          type: string
+          enum: [PUSH, TELEGRAM]
+          description: Delivery channel for this reminder.
+
+    ReminderResultDTO:
+      type: object
+      description: |
+        A per-task reminder returned on TaskDTO (S1). Carries the persisted rule id
+        so the client can correlate, plus the offset + channel.
+      required: [id, offsetMinutes, channel]
+      properties:
+        id:
+          type: string
+          format: uuid
+        offsetMinutes:
+          type: integer
+          example: -15
+        channel:
+          type: string
+          enum: [PUSH, TELEGRAM]
+
+    TaskSearchResultDTO:
+      type: object
+      description: |
+        A single task search hit (M1). Carries the matched series row's identity,
+        its owning group's id + color, and its anchor date/time — for a recurring
+        series, the anchor occurrence (the calendar view expands occurrences
+        separately).
+      required:
+        [taskId, calendarId, groupId, groupColorHex, title, notes, startAt, endAt,
+         isAllDay, timezone, isRecurring]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+        calendarId:
+          type: string
+          format: uuid
+        groupId:
+          type: [string, 'null']
+          format: uuid
+        groupColorHex:
+          type: [string, 'null']
+          example: '#E27921'
+          description: The owning group's color (preset name or #RRGGBB); null when ungrouped.
+        title:
+          type: string
+        notes:
+          type: [string, 'null']
+        startAt:
+          type: [string, 'null']
+          format: date-time
+        endAt:
+          type: [string, 'null']
+          format: date-time
+        isAllDay:
+          type: boolean
+        timezone:
+          type: string
+        isRecurring:
+          type: boolean
+          description: True when the matched task is a recurring series (startAt is its anchor).
+
+    ReorderTaskGroupsRequest:
+      type: object
+      description: |
+        Bulk-reorder payload (the complete, ordered list of group ids). Each group
+        receives a `sortOrder` equal to its index, transactionally. Every id must
+        exist (else 404) and belong to a calendar the caller owns (else 403).
+      required: [groupIds]
+      properties:
+        groupIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+          description: Ordered group ids; each row receives a sortOrder equal to its index.
+
+    DevicePlatform:
+      type: string
+      enum: [ios, ipados, macos]
+      description: The platform an APNs device token was issued on.
+
+    RegisterDeviceRequest:
+      type: object
+      description: |
+        Registers (upserts) an APNs device token for the current user. Idempotent —
+        a re-posted known token re-claims/refreshes the row rather than duplicating.
+      required: [token, platform]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The opaque APNs device token issued to the client.
+        platform:
+          $ref: '#/components/schemas/DevicePlatform'
+
+    DeviceDTO:
+      type: object
+      description: A registered device. Returned by POST /users/me/devices. Omits the owning userId.
+      required: [id, token, platform, lastSeenAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: The opaque APNs device token.
+        platform:
+          $ref: '#/components/schemas/DevicePlatform'
+        lastSeenAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    DailyBriefDTO:
+      type: object
+      description: |
+        Morning daily brief (D2). `brief` is the generated text, or null when the
+        model produced nothing usable for the day (client shows an empty state).
+        `localDate` is the resolved local day the brief covers.
+      required: [brief, localDate]
+      properties:
+        brief:
+          type: [string, 'null']
+          example: 'Good morning. You have a 10:00 dentist and a 14:00 sync.'
+        localDate:
+          type: string
+          example: '2026-06-27'
+          description: The local date (YYYY-MM-DD, user timezone) the brief covers.
+
+    ParseTaskRequest:
+      type: object
+      description: |
+        One line of natural language to parse into a structured task draft (D4),
+        WITHOUT creating a task. Bounded so a stray paste cannot drive an unbounded
+        model call.
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: 'gym every monday and wednesday at 7am'
+
+    TaskDraftDTO:
+      type: object
+      description: |
+        The structured task draft the assistant extracted from one line of natural
+        language (D4). DRAFT only — no task is created; the iOS quick-create well
+        pre-fills from this and the user confirms/edits before a real POST /tasks.
+      required: [title]
+      properties:
+        title:
+          type: string
+          example: 'gym'
+          description: Extracted task title, with scheduling words stripped.
+        start:
+          type: string
+          format: date-time
+          description: ISO-8601 start resolved in the user timezone; omitted for a timeless todo.
+        durationMinutes:
+          type: integer
+          minimum: 1
+          example: 60
+          description: Present only when the text implied a length.
+        recurrence:
+          $ref: '#/components/schemas/RecurrenceRuleInput'
+        groupId:
+          type: string
+          format: uuid
+          description: Id of an EXISTING group the draft was matched to; omitted when none applied.
+
+    PersonaPresetDTO:
+      type: object
+      description: |
+        One curated persona preset (D9) the iOS persona screen offers as a pickable
+        starting point.
+      required: [id, presetName, promptText]
+      properties:
+        id:
+          type: string
+          format: uuid
+        presetName:
+          type: string
+          example: 'Jarvis'
+        promptText:
+          type: string
+          description: The full persona instruction text.
+
+    InvalidLinkCodeBody:
+      type: object
+      description: |
+        Typed 422 body returned by POST /assistant/link on an invalid, expired, or
+        already-burned nonce (M3) so iOS branches a persistent bad-code state vs a
+        transient error.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_LINK_CODE]
+        message:
+          type: string
+          example: 'This linking code is invalid, expired, or already used.'
+        statusCode:
+          type: integer
+          example: 422
+
     ValidationErrorBody:
       type: object
       required: [statusCode, message]
@@ -1603,3 +2216,9 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ValidationErrorBody'
+    OkResponse:
+      description: 'Success acknowledgement `{ ok: true }`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OkResponse'

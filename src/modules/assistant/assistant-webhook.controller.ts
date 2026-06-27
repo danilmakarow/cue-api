@@ -14,18 +14,29 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
+import {
+  ApiExcludeEndpoint,
+  ApiTags,
+  ApiUnprocessableEntityResponse,
+} from '@nestjs/swagger';
 import { Queue } from 'bullmq';
 
 import { WebhookQueueJob } from './assistant.types';
-import { LinkTelegramDto, TelegramLinkStatusDto } from './dtos';
+import {
+  LinkTelegramDto,
+  ParseTaskDto,
+  TaskDraftDTO,
+  TelegramLinkStatusDto,
+} from './dtos';
 import { LinkingService, TelegramLinkStatus } from './linking.service';
+import { ParseService } from './parse.service';
 import { WEBHOOK_QUEUE_NAME } from '../redis/redis.constants';
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';
 import { ExternalVendorConnectorFactory } from '@/modules/external-vendor/external-vendor-connector.factory';
 import { Swagger } from '@/modules/swagger/decorators/swagger.decorator';
+import { TelegramLinkErrorCode } from '@/modules/telegram-link/exceptions/invalid-link-code.exception';
 
 /** Inbound HTTP header values, as Node delivers them (single or repeated). */
 type InboundHeaders = Record<string, string | string[] | undefined>;
@@ -37,7 +48,9 @@ type InboundHeaders = Record<string, string | string[] | undefined>;
  *   durable job and returns 200 immediately; on reject it returns 401 and
  *   enqueues nothing. All real work happens in the consumer, off this path.
  * - `POST /assistant/link` — JWT-guarded; burns the link nonce and upserts the
- *   `TelegramLink`, returning the resulting link state.
+ *   `TelegramLink`, returning the resulting link state (typed 422 on a bad code).
+ * - `POST /assistant/parse` — JWT-guarded; parses one line of natural language
+ *   into a structured task draft WITHOUT creating the task (D4).
  * - `GET /assistant/link` — JWT-guarded; reports the user's current link state.
  * - `DELETE /assistant/link` — JWT-guarded; revokes the user's link (idempotent).
  */
@@ -51,6 +64,7 @@ export class AssistantWebhookController {
     @InjectQueue(WEBHOOK_QUEUE_NAME)
     private readonly webhookQueue: Queue<WebhookQueueJob>,
     private readonly linkingService: LinkingService,
+    private readonly parseService: ParseService,
   ) {}
 
   /**
@@ -130,6 +144,21 @@ export class AssistantWebhookController {
     responseDto: TelegramLinkStatusDto,
     responseStatus: 201,
   })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'The linking code is invalid, expired, or already used. The body carries a stable machine-readable code so the client branches a persistent bad-code state vs a transient error (M3).',
+    schema: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          example: TelegramLinkErrorCode.INVALID_LINK_CODE,
+        },
+        message: { type: 'string' },
+        statusCode: { type: 'number', example: 422 },
+      },
+    },
+  })
   async link(
     @CurrentUser() user: User,
     @Body() dto: LinkTelegramDto,
@@ -141,6 +170,27 @@ export class AssistantWebhookController {
       telegramUsername: link.telegramUsername,
       linkedAt: link.linkedAt.toISOString(),
     };
+  }
+
+  /**
+   * Natural-language quick-create parse (D4): turns one line of plain language
+   * into a structured task DRAFT for the iOS quick-create well WITHOUT creating
+   * the task. Runs the assistant's parse pipeline (the model as a pure extractor,
+   * no tool loop, no writes) and returns the draft for the user to confirm.
+   */
+  @Post('parse')
+  @UseGuards(AccessTokenGuard)
+  @Swagger({
+    summary:
+      'Parse one line of natural language into a structured task draft (no task is created).',
+    responseDto: TaskDraftDTO,
+    responseStatus: 201,
+  })
+  async parse(
+    @CurrentUser() user: User,
+    @Body() dto: ParseTaskDto,
+  ): Promise<TaskDraftDTO> {
+    return this.parseService.parse(user, dto.text);
   }
 
   /**

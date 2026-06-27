@@ -38,12 +38,14 @@ export class UserSettingsController {
   }
 
   /**
-   * Updates the current user's account settings (timezone), validating the
-   * timezone as a real IANA zone. Returns the persisted shape.
+   * Updates the current user's account settings — timezone (validated as a real
+   * IANA zone), display name, avatar, and notification opt-ins. Returns the
+   * persisted shape.
    */
   @Patch()
   @Swagger({
-    summary: 'Update the current user account settings (timezone).',
+    summary:
+      'Update the current user account settings (timezone, displayName, avatar, notification prefs).',
     responseDto: UserSettingsDTO,
     responseStatus: 200,
   })

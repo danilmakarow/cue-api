@@ -4,6 +4,7 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   Max,
@@ -11,6 +12,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+import { MonthlyAnchorMode } from '../recurrence.types';
 import {
   RecurrenceEndType,
   RecurrenceFrequency,
@@ -85,6 +87,39 @@ export class CreateRecurrenceRuleDto {
   @Min(1, { each: true })
   @Max(12, { each: true })
   byMonth?: number[];
+
+  /**
+   * MONTHLY nth-weekday ordinals (RFC-5545 BYSETPOS): 1..4 = first..fourth,
+   * -1 = last. Combined with `byWeekday` to express "first Monday" / "last
+   * Friday". Absent means no ordinal restriction.
+   */
+  @ApiPropertyOptional({
+    type: [Number],
+    example: [1],
+    description:
+      'MONTHLY nth-weekday ordinals (1..4 = first..fourth, -1 = last); combine with byWeekday.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @IsIn([-1, 1, 2, 3, 4], { each: true })
+  bySetPos?: number[];
+
+  /**
+   * MONTHLY working-day (Mon–Fri) anchor: first / last / day-before-last working
+   * day of the month. Mutually exclusive with `byMonthDay` / `bySetPos`. Absent
+   * means no working-day anchor.
+   */
+  @ApiPropertyOptional({
+    enum: MonthlyAnchorMode,
+    example: MonthlyAnchorMode.LAST_WORKDAY,
+    description:
+      'MONTHLY working-day anchor (first/last/day-before-last Mon–Fri).',
+  })
+  @IsOptional()
+  @IsEnum(MonthlyAnchorMode)
+  monthlyAnchor?: MonthlyAnchorMode;
 
   @ApiPropertyOptional({
     enum: RecurrenceEndType,

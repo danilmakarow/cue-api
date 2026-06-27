@@ -15,6 +15,7 @@ import { ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 
 import {
   CreateTaskGroupDto,
+  ReorderTaskGroupsDto,
   TaskGroupDTO,
   UpdateTaskGroupDto,
   toTaskGroupDTO,
@@ -81,6 +82,28 @@ export class TaskGroupController {
     const groups = calendarId
       ? await this.taskGroupService.findAllByCalendar(user.id, calendarId)
       : await this.taskGroupService.findAllForUser(user.id);
+
+    return groups.map(toTaskGroupDTO);
+  }
+
+  /**
+   * Bulk-reorders the current user's task groups in one transactional request,
+   * assigning each group a `sortOrder` equal to its index in `groupIds`. Replaces
+   * the racy N single-PATCH approach. Declared before `:id` so the literal path is
+   * not captured by the param route. Returns the reordered groups in order.
+   */
+  @Patch('reorder')
+  @Swagger({
+    summary: 'Bulk-reorder task groups transactionally.',
+    responseDto: TaskGroupDTO,
+    isResponseArray: true,
+    responseStatus: 200,
+  })
+  async reorder(
+    @CurrentUser() user: User,
+    @Body() dto: ReorderTaskGroupsDto,
+  ): Promise<TaskGroupDTO[]> {
+    const groups = await this.taskGroupService.reorder(user.id, dto.groupIds);
 
     return groups.map(toTaskGroupDTO);
   }

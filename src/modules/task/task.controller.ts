@@ -21,13 +21,16 @@ import {
   DailyCountsQuery,
   ListTasksQuery,
   OccurrenceDTO,
+  SearchTasksQuery,
   SetCompletionDto,
   SkipOccurrenceDto,
   TaskDTO,
+  TaskSearchResultDTO,
   UpdateTaskDto,
   toOccurrenceDTO,
   toTaskDTO,
   toTaskOccurrenceExceptionDTO,
+  toTaskSearchResultDTO,
 } from './dtos';
 import { CreateTaskDto } from './dtos';
 import { TaskService } from './task.service';
@@ -131,11 +134,38 @@ export class TaskController {
     );
 
     return {
-      tasks: delta.tasks.map(toTaskDTO),
+      // Map without reminders — the changes delta is a lightweight series-row
+      // diff; clients fetch a task's reminders via GET /tasks/:id when needed.
+      tasks: delta.tasks.map((task) => toTaskDTO(task)),
       deleted: delta.deleted,
       exceptions: delta.exceptions.map(toTaskOccurrenceExceptionDTO),
       serverTime: delta.serverTime.toISOString(),
     };
+  }
+
+  /**
+   * Case-insensitive text search over the user's tasks (M1): `ILIKE` on title +
+   * notes, scoped to every calendar the user owns (NOT window-bound), optionally
+   * narrowed to a `groupId`. Declared before `@Get(':id')` so the literal
+   * `search` path is matched ahead of the parametric id route.
+   */
+  @Get('search')
+  @Swagger({
+    summary: "Search the user's tasks by title + notes (ILIKE).",
+    responseDto: TaskSearchResultDTO,
+    isResponseArray: true,
+    responseStatus: 200,
+  })
+  async search(
+    @CurrentUser() user: User,
+    @Query() query: SearchTasksQuery,
+  ): Promise<TaskSearchResultDTO[]> {
+    const tasks = await this.taskService.searchTasks(user.id, query.q, {
+      groupId: query.groupId,
+      limit: query.limit,
+    });
+
+    return tasks.map(toTaskSearchResultDTO);
   }
 
   /**
@@ -153,8 +183,9 @@ export class TaskController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<TaskDTO> {
     const task = await this.taskService.findByIdWithRule(user.id, id);
+    const reminders = await this.taskService.listReminders(user.id, id);
 
-    return toTaskDTO(task);
+    return toTaskDTO(task, reminders);
   }
 
   /**
@@ -173,13 +204,15 @@ export class TaskController {
   ): Promise<TaskDTO> {
     const task = await this.taskService.create(user.id, dto);
 
-    // Re-load with the rule relation so the recurrence field is populated.
+    // Re-load with the rule relation so the recurrence field is populated, and
+    // load the just-persisted reminders so they echo back on the response.
     const taskWithRule = await this.taskService.findByIdWithRule(
       user.id,
       task.id,
     );
+    const reminders = await this.taskService.listReminders(user.id, task.id);
 
-    return toTaskDTO(taskWithRule);
+    return toTaskDTO(taskWithRule, reminders);
   }
 
   /**
@@ -206,17 +239,21 @@ export class TaskController {
       isAllDay: dto.isAllDay,
       requiresCompletion: dto.requiresCompletion,
       color: dto.color,
+      icon: dto.icon,
       groupId: dto.groupId,
       recurrence: dto.recurrence,
+      reminders: dto.reminders,
     });
 
-    // Re-load to get the rule relation if it was just added.
+    // Re-load to get the rule relation if it was just added, and the (possibly
+    // replaced) reminders so they echo back on the response.
     const taskWithRule = await this.taskService.findByIdWithRule(
       user.id,
       task.id,
     );
+    const reminders = await this.taskService.listReminders(user.id, task.id);
 
-    return toTaskDTO(taskWithRule);
+    return toTaskDTO(taskWithRule, reminders);
   }
 
   /**

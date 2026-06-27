@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 
+import { AppleTokenRevoker } from './apple-token.revoker';
 import { AppleTokenVerifier } from './apple-token.verifier';
 import { AppleSignInDto } from './dtos';
 import { EnvironmentVariables } from '@/config/env.config';
@@ -49,6 +50,7 @@ export interface ProvisionUserInput {
 export class AuthService {
   constructor(
     private readonly appleTokenVerifier: AppleTokenVerifier,
+    private readonly appleTokenRevoker: AppleTokenRevoker,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService<EnvironmentVariables, true>,
     private readonly userDatabaseService: UserDatabaseService,
@@ -105,6 +107,17 @@ export class AuthService {
    */
   issueTokenForUser(user: User): Promise<string> {
     return this.issueAccessToken(user);
+  }
+
+  /**
+   * Revokes the user's Apple refresh token as part of account deletion, per the
+   * Sign-in-with-Apple account-deletion policy. Best-effort: it never throws, so
+   * a misconfigured or unreachable Apple endpoint cannot block the local purge.
+   * `refreshToken` is nullable because Cue does not yet persist Apple refresh
+   * tokens (see `needsWiring`); when absent the revoker logs and no-ops.
+   */
+  revokeAppleToken(refreshToken: string | null): Promise<void> {
+    return this.appleTokenRevoker.revokeRefreshToken(refreshToken);
   }
 
   /**

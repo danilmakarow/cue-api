@@ -1,5 +1,13 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
+// `@Transactional()` (used by `reorder`) requires a registered transactional
+// data source at runtime, which a pure unit spec has no DB to provide. Stub the
+// decorator to a pass-through so the method's logic can be exercised directly;
+// the real transaction wrapping is covered at the integration layer.
+jest.mock('typeorm-transactional', () => ({
+  Transactional: () => () => undefined,
+}));
+
 import { TaskGroupService } from './task-group.service';
 import {
   Calendar,
@@ -100,6 +108,8 @@ describe('TaskGroupService', () => {
             byWeekday: null,
             byMonthDay: null,
             byMonth: null,
+            bySetPos: null,
+            monthlyAnchor: null,
             endType: RecurrenceEndType.NEVER,
             endDate: null,
             count: null,
@@ -356,6 +366,126 @@ describe('TaskGroupService', () => {
     });
   });
 
+  describe('reorder', () => {
+    /**
+     * Builds a TaskGroup carrying an id, owning calendar, and current sortOrder.
+     */
+    const reorderable = (
+      id: string,
+      calendarId: string,
+      sortOrder: number,
+    ): TaskGroup => ({ id, calendarId, sortOrder }) as TaskGroup;
+
+    it('assigns sortOrder by array index and saves the changed rows', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+      // Stored order is g1=0, g2=1; request flips them to g2, g1.
+      const g1 = reorderable('g1', 'cal-1', 0);
+      const g2 = reorderable('g2', 'cal-1', 1);
+
+      groupDb.findAll.mockResolvedValue([g1, g2]);
+      calendarDb.findAllByOwner.mockResolvedValue([ownedCalendar('cal-1')]);
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      const result = await service.reorder('user-1', ['g2', 'g1']);
+
+      expect(g2.sortOrder).toBe(0);
+      expect(g1.sortOrder).toBe(1);
+      expect(groupDb.save).toHaveBeenCalledTimes(2);
+      // Returned in the requested order.
+      expect(result.map((group) => group.id)).toEqual(['g2', 'g1']);
+    });
+
+    it('only saves rows whose sortOrder actually changed', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+      // g1 already at index 0; only g2 moves.
+      const g1 = reorderable('g1', 'cal-1', 0);
+      const g2 = reorderable('g2', 'cal-1', 5);
+
+      groupDb.findAll.mockResolvedValue([g1, g2]);
+      calendarDb.findAllByOwner.mockResolvedValue([ownedCalendar('cal-1')]);
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await service.reorder('user-1', ['g1', 'g2']);
+
+      expect(g2.sortOrder).toBe(1);
+      expect(groupDb.save).toHaveBeenCalledTimes(1);
+      expect(groupDb.save).toHaveBeenCalledWith(g2);
+    });
+
+    it('reorders groups spanning multiple owned calendars', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+      const g1 = reorderable('g1', 'cal-1', 0);
+      const g2 = reorderable('g2', 'cal-2', 0);
+
+      groupDb.findAll.mockResolvedValue([g1, g2]);
+      calendarDb.findAllByOwner.mockResolvedValue([
+        ownedCalendar('cal-1'),
+        ownedCalendar('cal-2'),
+      ]);
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await service.reorder('user-1', ['g2', 'g1']);
+
+      expect(g2.sortOrder).toBe(0);
+      expect(g1.sortOrder).toBe(1);
+    });
+
+    it('throws 404 when an id does not resolve to a group', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+
+      // Asked for two ids, only one exists.
+      groupDb.findAll.mockResolvedValue([reorderable('g1', 'cal-1', 0)]);
+      calendarDb.findAllByOwner.mockResolvedValue([ownedCalendar('cal-1')]);
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await expect(
+        service.reorder('user-1', ['g1', 'missing']),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(groupDb.save).not.toHaveBeenCalled();
+    });
+
+    it('throws 403 when any group belongs to a calendar the user does not own', async () => {
+      const groupDb = buildGroupDatabaseService();
+      const calendarDb = buildCalendarDatabaseService();
+      const g1 = reorderable('g1', 'cal-1', 0);
+      const foreign = reorderable('g2', 'cal-foreign', 0);
+
+      groupDb.findAll.mockResolvedValue([g1, foreign]);
+      // User owns only cal-1.
+      calendarDb.findAllByOwner.mockResolvedValue([ownedCalendar('cal-1')]);
+
+      const service = new TaskGroupService(
+        groupDb as never,
+        calendarDb as never,
+      );
+
+      await expect(
+        service.reorder('user-1', ['g1', 'g2']),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(groupDb.save).not.toHaveBeenCalled();
+    });
+  });
+
   describe('update', () => {
     const groupWithConfig = (
       recurrenceConfig: TaskGroup['recurrenceConfig'] = null,
@@ -415,6 +545,8 @@ describe('TaskGroupService', () => {
         byWeekday: null,
         byMonthDay: null,
         byMonth: null,
+        bySetPos: null,
+        monthlyAnchor: null,
         endType: RecurrenceEndType.NEVER,
         endDate: null,
         count: null,
@@ -431,6 +563,8 @@ describe('TaskGroupService', () => {
         byWeekday: null,
         byMonthDay: null,
         byMonth: null,
+        bySetPos: null,
+        monthlyAnchor: null,
         endType: RecurrenceEndType.NEVER,
         endDate: null,
         count: null,
@@ -535,6 +669,8 @@ describe('TaskGroupService', () => {
       byWeekday: null,
       byMonthDay: null,
       byMonth: null,
+      bySetPos: null,
+      monthlyAnchor: null,
       endType: RecurrenceEndType.NEVER,
       endDate: null,
       count: null,
@@ -680,6 +816,8 @@ describe('TaskGroupService', () => {
         byWeekday: null,
         byMonthDay: null,
         byMonth: null,
+        bySetPos: null,
+        monthlyAnchor: null,
         endType: RecurrenceEndType.NEVER,
         endDate: null,
         count: null,

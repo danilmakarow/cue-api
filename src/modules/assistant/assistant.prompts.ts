@@ -115,3 +115,38 @@ const RECAP_LANGUAGE_NAMES: Record<StatusLocale, string> = {
  */
 export const roundRecapSystemPrompt = (locale: StatusLocale = 'en'): string =>
   `${ROUND_RECAP_SYSTEM_PROMPT} Write the sentence in ${RECAP_LANGUAGE_NAMES[locale]}.`;
+
+/**
+ * System prompt for the REST natural-language quick-create PARSE (D4): turns one
+ * line of plain language into a STRUCTURED task draft for the iOS quick-create
+ * well WITHOUT creating anything. It is a pure extractor — no scheduling, no
+ * conflict checks, no tool use — so the model never writes; the REST layer hands
+ * back the draft for the user to confirm. {@link buildParseSystemPrompt} appends
+ * the per-request "now" + timezone so relative phrasing ("tomorrow 3pm") resolves.
+ */
+export const PARSE_SYSTEM_PROMPT = `You convert ONE line of natural language into a structured task draft for a scheduling app's quick-create field. Extract only what the text states; never invent a time, a duration, or a recurrence the user did not imply. Rules:
+- title: a short, clean task title with scheduling words stripped (e.g. "dentist", not "book the dentist tomorrow at 3"). Always required.
+- start: an ISO-8601 datetime resolved against the supplied current time and timezone, or omit it for a timeless todo with no stated time.
+- durationMinutes: a positive integer ONLY when the text states or clearly implies a length (e.g. "for an hour" → 60); omit otherwise.
+- recurrence: include ONLY when the text states a repeat ("every Monday", "daily"); omit for a one-off. Weekday ordinals are 0=Monday … 6=Sunday.
+- groupName: the name of an existing group the task plainly belongs to, chosen ONLY from the provided group list; omit when none clearly applies. Never invent a group.
+Output strictly the structured draft. Do not schedule, do not check conflicts, do not ask questions, do not create anything.`;
+
+/**
+ * Builds the per-request parse system prompt (D4), appending the resolved current
+ * datetime + IANA timezone (so relative phrasing resolves) and the user's existing
+ * group names (so `groupName` is constrained to a real group). Group names are
+ * listed verbatim; an empty list omits the line so the model never guesses a group.
+ */
+export const buildParseSystemPrompt = (
+  nowIso: string,
+  timezone: string,
+  groupNames: string[],
+): string => {
+  const groupLine =
+    groupNames.length === 0
+      ? 'Existing groups: none — omit groupName.'
+      : `Existing groups (choose groupName ONLY from these, else omit): ${groupNames.join(', ')}.`;
+
+  return `${PARSE_SYSTEM_PROMPT}\n\nCurrent time: ${nowIso} (${timezone}).\n${groupLine}`;
+};

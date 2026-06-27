@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { In } from 'typeorm';
+import { Transactional } from 'typeorm-transactional';
 
 import { CreateTaskGroupDto } from './dtos';
 import { EntityNotFoundException } from '@/exceptions/entity-not-found.exception';
@@ -115,6 +116,50 @@ export class TaskGroupService {
     }
 
     return group;
+  }
+
+  /**
+   * Bulk-reorders task groups by assigning each group a `sortOrder` equal to its
+   * index in `groupIds`, transactionally — replacing N racy single PATCHes. Loads
+   * every referenced group, asserts ALL of them belong to a calendar the user owns
+   * (throws 404 if any id is missing, 403 if any belongs to another user) BEFORE
+   * mutating, then saves the changed rows in one transaction so a partial reorder
+   * can never persist. Returns the reordered groups in the requested order.
+   */
+  @Transactional()
+  async reorder(userId: string, groupIds: string[]): Promise<TaskGroup[]> {
+    const groups = await this.taskGroupDatabaseService.findAll({
+      where: { id: In(groupIds) },
+    });
+
+    if (groups.length !== groupIds.length) {
+      throw new EntityNotFoundException(TaskGroup);
+    }
+
+    const ownedCalendarIds = new Set(await this.ownedCalendarIds(userId));
+    const allOwned = groups.every((group) =>
+      ownedCalendarIds.has(group.calendarId),
+    );
+
+    if (!allOwned) {
+      throw new ForbiddenException('You do not have access to these groups');
+    }
+
+    const groupById = new Map(groups.map((group) => [group.id, group]));
+
+    const reordered = await Promise.all(
+      groupIds.map((groupId, index) => {
+        const group = groupById.get(groupId) as TaskGroup;
+
+        if (group.sortOrder === index) return Promise.resolve(group);
+
+        group.sortOrder = index;
+
+        return this.taskGroupDatabaseService.save(group);
+      }),
+    );
+
+    return reordered;
   }
 
   /**

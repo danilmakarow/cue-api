@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 
 import { RecurrenceRuleService } from './recurrence-rule.service';
 import {
+  MonthlyAnchorMode,
   Occurrence,
   RecurrenceConfig,
   RecurrenceSource,
@@ -42,6 +43,8 @@ const makeRule = (
   byWeekday: null,
   byMonthDay: null,
   byMonth: null,
+  bySetPos: null,
+  monthlyAnchor: null,
   endType: RecurrenceEndType.NEVER,
   endDate: null,
   count: null,
@@ -561,6 +564,242 @@ describe('RecurrenceRuleService.expandOccurrences', () => {
     });
   });
 
+  describe('advanced monthly (S3): nth-weekday via bySetPos', () => {
+    it('expands "first Monday" of each month', () => {
+      // Anchor on the first Monday of Jun 2026 (2026-06-01 is itself a Monday).
+      const anchor = makeTask({ startAt: zoned('2026-06-01T09:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [1],
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-10-01T00:00'),
+      );
+
+      // First Mondays: Jun 1, Jul 6, Aug 3, Sep 7.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-06-01', '2026-07-06', '2026-08-03', '2026-09-07']);
+      expect(localHour(result[0].occurrenceStart, anchor.timezone)).toBe(9);
+    });
+
+    it('expands "second Tuesday" of each month', () => {
+      const anchor = makeTask({ startAt: zoned('2026-06-09T08:30') }); // 2nd Tue of Jun
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [1],
+        bySetPos: [2],
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-09-01T00:00'),
+      );
+
+      // Second Tuesdays: Jun 9, Jul 14, Aug 11.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-06-09', '2026-07-14', '2026-08-11']);
+    });
+
+    it('expands "last Friday" of each month, honoring 4- vs 5-Friday months', () => {
+      const anchor = makeTask({ startAt: zoned('2026-01-30T17:00') }); // last Fri of Jan
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [4],
+        bySetPos: [-1],
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-01-01T00:00'),
+        zoned('2026-05-01T00:00'),
+      );
+
+      // Last Fridays: Jan 30, Feb 27, Mar 27, Apr 24.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-01-30', '2026-02-27', '2026-03-27', '2026-04-24']);
+    });
+
+    it('drops a 5th-weekday ordinal in months with only four (never clamps)', () => {
+      // 5 Mondays exist in Jun 2026 (1,8,15,22,29); anchor on the 5th Monday.
+      const anchor = makeTask({ startAt: zoned('2026-06-29T09:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        // 5 is past the DTO-validated 1..4/-1 set, but the engine still treats
+        // any overflowing ordinal as "skip", never clamping to the 4th.
+        bySetPos: [5],
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-12-01T00:00'),
+      );
+
+      // Only months WITH a 5th Monday yield an occurrence: Jun (29), Aug (31),
+      // Nov (30). Months with four Mondays are skipped, not clamped to the 4th.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-06-29', '2026-08-31', '2026-11-30']);
+    });
+
+    it('honors interval > 1 with a nth-weekday rule', () => {
+      const anchor = makeTask({ startAt: zoned('2026-06-01T09:00') }); // 1st Mon
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        interval: 2,
+        byWeekday: [0],
+        bySetPos: [1],
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-06-01T00:00'),
+        zoned('2026-12-01T00:00'),
+      );
+
+      // Every 2nd month's first Monday: Jun 1, Aug 3, Oct 5.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-06-01', '2026-08-03', '2026-10-05']);
+    });
+  });
+
+  describe('advanced monthly (S3): working-day anchor', () => {
+    it('expands the FIRST working day of each month (skipping weekends)', () => {
+      // Aug 2026 starts on Sat (1st) / Sun (2nd); first workday is Mon Aug 3.
+      const anchor = makeTask({ startAt: zoned('2026-08-03T09:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.FIRST_WORKDAY,
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-08-01T00:00'),
+        zoned('2026-12-01T00:00'),
+      );
+
+      // Aug 1/2 are Sat/Sun → Aug 3; Sep 1 Tue; Oct 1 Thu; Nov 1 Sun → Nov 2 Mon.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-08-03', '2026-09-01', '2026-10-01', '2026-11-02']);
+      expect(localHour(result[0].occurrenceStart, anchor.timezone)).toBe(9);
+    });
+
+    it('expands the LAST working day of each month (skipping weekends)', () => {
+      // May 2026: 31st is Sun, 30th Sat → last workday Fri May 29.
+      const anchor = makeTask({ startAt: zoned('2026-05-29T17:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-05-01T00:00'),
+        zoned('2026-09-01T00:00'),
+      );
+
+      // May 29 (Fri), Jun 30 (Tue), Jul 31 (Fri), Aug 31 (Mon).
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-05-29', '2026-06-30', '2026-07-31', '2026-08-31']);
+    });
+
+    it('expands the DAY BEFORE the last working day of each month', () => {
+      // May 2026 last workday is Fri 29 → day before is Thu May 28.
+      const anchor = makeTask({ startAt: zoned('2026-05-28T09:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.DAY_BEFORE_LAST_WORKDAY,
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-05-01T00:00'),
+        zoned('2026-08-01T00:00'),
+      );
+
+      // Second-to-last workday: May 28 (Thu), Jun 29 (Mon), Jul 30 (Thu).
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-05-28', '2026-06-29', '2026-07-30']);
+    });
+
+    it('keeps last-working-day correct across a month-boundary weekend run', () => {
+      // Oct 2026: 31st Sat, 30th Fri → last workday Fri Oct 30; day-before Thu 29.
+      const anchor = makeTask({ startAt: zoned('2026-10-29T09:00') });
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.DAY_BEFORE_LAST_WORKDAY,
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-10-01T00:00'),
+        zoned('2026-12-01T00:00'),
+      );
+
+      // Oct day-before-last-workday = Thu 29; Nov last workday Mon 30 → day-before Fri 27.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-10-29', '2026-11-27']);
+    });
+
+    it('preserves wall-clock time across a spring-forward DST month', () => {
+      // US DST springs forward 2026-03-08. A LAST_WORKDAY March rule must keep
+      // the 09:00 local wall time regardless of the transition.
+      const anchor = makeTask({ startAt: zoned('2026-02-27T09:00') }); // last workday Feb
+      const rule = makeRule({
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+      });
+
+      const result = service.expandOccurrences(
+        anchor,
+        rule,
+        [],
+        zoned('2026-02-01T00:00'),
+        zoned('2026-05-01T00:00'),
+      );
+
+      // Feb 27 (Fri), Mar 31 (Tue), Apr 30 (Thu) — all at 09:00 local.
+      expect(
+        result.map((occ) => localDate(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual(['2026-02-27', '2026-03-31', '2026-04-30']);
+      expect(
+        result.map((occ) => localHour(occ.occurrenceStart, anchor.timezone)),
+      ).toEqual([9, 9, 9]);
+    });
+  });
+
   describe('exceptions', () => {
     it('drops a skipped occurrence', () => {
       const anchor = makeTask({ startAt: zoned('2026-06-01T09:00') });
@@ -931,6 +1170,8 @@ describe('RecurrenceRuleService.toConfig', () => {
       byWeekday: [0, 2, 4],
       byMonthDay: null,
       byMonth: null,
+      bySetPos: null,
+      monthlyAnchor: null,
       endType: RecurrenceEndType.COUNT,
       endDate: null,
       count: 10,
@@ -948,10 +1189,29 @@ describe('RecurrenceRuleService.toConfig', () => {
       byWeekday: null,
       byMonthDay: null,
       byMonth: null,
+      bySetPos: null,
+      monthlyAnchor: null,
       endType: RecurrenceEndType.NEVER,
       endDate: null,
       count: null,
     });
+  });
+
+  it('carries bySetPos + monthlyAnchor through to the inline config', () => {
+    const nthWeekday = RecurrenceRuleService.toConfig({
+      frequency: RecurrenceFrequency.MONTHLY,
+      byWeekday: [0],
+      bySetPos: [-1],
+    });
+    const workday = RecurrenceRuleService.toConfig({
+      frequency: RecurrenceFrequency.MONTHLY,
+      monthlyAnchor: MonthlyAnchorMode.FIRST_WORKDAY,
+    });
+
+    expect(nthWeekday.bySetPos).toEqual([-1]);
+    expect(nthWeekday.monthlyAnchor).toBeNull();
+    expect(workday.monthlyAnchor).toBe(MonthlyAnchorMode.FIRST_WORKDAY);
+    expect(workday.bySetPos).toBeNull();
   });
 
   it('produces a config the engine can expand directly', () => {

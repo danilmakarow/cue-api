@@ -1,6 +1,7 @@
 import { Column, Entity, Index, JoinColumn, OneToOne } from 'typeorm';
 
 import { BaseEntity } from './base.entity';
+import { NotificationChannel } from './notification-rule.entity';
 import { User } from './user.entity';
 
 /**
@@ -42,6 +43,20 @@ export class UserReportSettings extends BaseEntity {
    */
   @Column({ type: 'varchar', length: 5, default: '08:00' })
   reportTimeLocal: string;
+
+  /**
+   * Preferred delivery channel for the daily report (S7). Reuses the shared
+   * {@link NotificationChannel} enum (`PUSH` | `TELEGRAM`). Defaults to
+   * `TELEGRAM`. NOTE: push delivery is deferred (backlog D1) — a `PUSH` value
+   * persists but does NOT deliver today; only Telegram is wired, so the scheduler
+   * still sends via the Telegram sender regardless of this field until D1 ships.
+   */
+  @Column({
+    type: 'enum',
+    enum: NotificationChannel,
+    default: NotificationChannel.TELEGRAM,
+  })
+  channel: NotificationChannel;
 
   /**
    * The user's local date (`YYYY-MM-DD`, in their timezone) the most recent

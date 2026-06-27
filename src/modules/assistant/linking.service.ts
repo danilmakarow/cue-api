@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Redis } from 'ioredis';
 
 import { AssistantConfig } from './assistant.config';
@@ -9,6 +9,7 @@ import { linkNonceKey } from '../redis/redis.constants';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import { TelegramLink } from '@/modules/database/entities';
 import { TelegramLinkDatabaseService } from '@/modules/database/services';
+import { InvalidLinkCodeException } from '@/modules/telegram-link/exceptions/invalid-link-code.exception';
 
 /**
  * The chat details stashed under a link nonce while the user completes the
@@ -78,13 +79,15 @@ export class LinkingService {
   /**
    * Burns the nonce (single-use, atomic via GETDEL) and upserts the
    * `TelegramLink` binding the chat to the signed-in user. Throws
-   * `NotFoundException` when the code is unknown or expired.
+   * {@link InvalidLinkCodeException} (HTTP 422, typed `{ code: 'INVALID_LINK_CODE' }`
+   * body) when the code is unknown, expired, or already burned — so the iOS client
+   * branches a persistent bad-code state vs a transient network error (M3).
    */
   async redeemNonce(userId: string, code: string): Promise<TelegramLink> {
     const raw = await this.redis.getdel(linkNonceKey(code));
 
     if (!raw) {
-      throw new NotFoundException('Invalid or expired linking code');
+      throw new InvalidLinkCodeException();
     }
 
     const payload = JSON.parse(raw) as LinkNoncePayload;

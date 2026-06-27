@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 
 import {
+  MonthlyAnchorMode,
   RecurrenceConfig,
   RecurrenceSource,
   RecurrenceSummary,
@@ -35,6 +36,55 @@ const MONTH_LABELS = [
 ];
 
 /**
+ * Ordinal words for a `bySetPos` value (1..4 = first..fourth, -1 = last), so a
+ * nth-weekday rule renders as "first Mon" / "last Fri" rather than a raw number.
+ */
+const SET_POS_LABELS: Record<number, string> = {
+  [-1]: 'last',
+  1: 'first',
+  2: 'second',
+  3: 'third',
+  4: 'fourth',
+};
+
+/** Compact human label for each working-day {@link MonthlyAnchorMode}. */
+const MONTHLY_ANCHOR_LABELS: Record<MonthlyAnchorMode, string> = {
+  [MonthlyAnchorMode.FIRST_WORKDAY]: 'first workday',
+  [MonthlyAnchorMode.LAST_WORKDAY]: 'last workday',
+  [MonthlyAnchorMode.DAY_BEFORE_LAST_WORKDAY]: 'day before last workday',
+};
+
+/**
+ * Renders the MONTHLY day selector as compact text, honoring selector precedence:
+ * working-day anchor → nth-weekday (`bySetPos` × `byWeekday`) → `byMonthDay` →
+ * none. Returns null when the month has no explicit day selector (plain monthly).
+ */
+const summarizeMonthlySelector = (config: RecurrenceConfig): string | null => {
+  if (config.monthlyAnchor) return MONTHLY_ANCHOR_LABELS[config.monthlyAnchor];
+
+  if (
+    config.bySetPos &&
+    config.bySetPos.length > 0 &&
+    config.byWeekday &&
+    config.byWeekday.length > 0
+  ) {
+    const days = config.byWeekday
+      .map((ordinal) => WEEKDAY_LABELS[ordinal] ?? `?${ordinal}`)
+      .join(',');
+
+    return config.bySetPos
+      .map((setPos) => `${SET_POS_LABELS[setPos] ?? setPos} ${days}`)
+      .join(', ');
+  }
+
+  if (config.byMonthDay && config.byMonthDay.length > 0) {
+    return `day ${config.byMonthDay.join(',')}`;
+  }
+
+  return null;
+};
+
+/**
  * Renders the per-frequency core of a rule (the cadence + any `by*` selector) as
  * compact human text: `every Thu`, `every 2 weeks`, `daily`, `monthly day 1`,
  * `yearly Jul 4`. The interval is shown only when greater than one so the common
@@ -59,13 +109,10 @@ const summarizeCadence = (config: RecurrenceConfig): string => {
   }
 
   if (config.frequency === RecurrenceFrequency.MONTHLY) {
-    const days =
-      config.byMonthDay && config.byMonthDay.length > 0
-        ? `day ${config.byMonthDay.join(',')}`
-        : null;
+    const selector = summarizeMonthlySelector(config);
     const cadence = interval === 1 ? 'monthly' : `every ${interval} months`;
 
-    return days ? `${cadence} ${days}` : cadence;
+    return selector ? `${cadence} ${selector}` : cadence;
   }
 
   if (config.frequency === RecurrenceFrequency.YEARLY) {

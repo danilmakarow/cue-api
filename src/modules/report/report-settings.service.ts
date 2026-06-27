@@ -52,6 +52,11 @@ export class ReportSettingsService {
       changed = true;
     }
 
+    if (dto.channel !== undefined && dto.channel !== settings.channel) {
+      settings.channel = dto.channel;
+      changed = true;
+    }
+
     if (!changed) {
       return settings;
     }

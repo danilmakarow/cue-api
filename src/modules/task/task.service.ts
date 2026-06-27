@@ -6,6 +6,8 @@ import {
 import { DateTime } from 'luxon';
 import {
   And,
+  FindOptionsWhere,
+  ILike,
   In,
   IsNull,
   LessThan,
@@ -15,9 +17,14 @@ import {
 } from 'typeorm';
 
 import { CreateTaskDto } from './dtos';
+import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+} from './dtos/search-tasks.query';
 import { EntityNotFoundException } from '@/exceptions/entity-not-found.exception';
 import {
   Calendar,
+  NotificationRule,
   RecurrenceEndType,
   Task,
   TaskGroup,
@@ -28,6 +35,10 @@ import {
   TaskDatabaseService,
   TaskGroupDatabaseService,
 } from '@/modules/database/services';
+import {
+  NotificationRuleService,
+  ReminderInput,
+} from '@/modules/notification-rule/notification-rule.service';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 import {
   ProposedSeries,
@@ -63,8 +74,12 @@ export interface UpdateTaskInput {
   timezone?: string;
   requiresCompletion?: boolean | null;
   color?: string | null;
+  icon?: string | null;
   groupId?: string | null;
   recurrence?: CreateRecurrenceRuleDto | null;
+  // When provided, REPLACES the full per-task reminder set (empty clears them);
+  // omitted leaves the existing reminders intact.
+  reminders?: ReminderInput[];
 }
 
 /**
@@ -180,6 +195,7 @@ export class TaskService {
     private readonly taskGroupDatabaseService: TaskGroupDatabaseService,
     private readonly recurrenceRuleService: RecurrenceRuleService,
     private readonly taskOccurrenceExceptionService: TaskOccurrenceExceptionService,
+    private readonly notificationRuleService: NotificationRuleService,
   ) {}
 
   /**
@@ -237,10 +253,87 @@ export class TaskService {
       timezone: dto.timezone,
       requiresCompletion: dto.requiresCompletion ?? null,
       color: dto.color ?? null,
+      icon: dto.icon ?? null,
       recurrenceConfig,
     });
 
-    return this.taskDatabaseService.save(task);
+    const savedTask = await this.taskDatabaseService.save(task);
+
+    // Persist any per-task reminders as taskId-linked notification rules (S1).
+    if (dto.reminders && dto.reminders.length > 0) {
+      await this.notificationRuleService.createForTask(
+        savedTask.id,
+        dto.reminders,
+      );
+    }
+
+    return savedTask;
+  }
+
+  /**
+   * Searches the authed user's tasks (across every calendar they own, or a
+   * single explicit `calendarId`-less group) by a case-insensitive `ILIKE` over
+   * `title` + `notes` (M1). NOT window-bound — recurring series match on their
+   * anchor row, not per-occurrence. An optional `groupId` narrows the scope; the
+   * `group` relation is loaded so each hit carries the owning group's color. The
+   * result is capped at `limit` (defaulted + clamped), ordered by `startAt`
+   * descending (most recent first), nulls last.
+   *
+   * An empty/whitespace-only term returns no matches (a blank search is treated
+   * as "nothing to find" rather than "everything").
+   */
+  async searchTasks(
+    userId: string,
+    term: string,
+    opts: { groupId?: string; limit?: number } = {},
+  ): Promise<Task[]> {
+    const trimmed = term.trim();
+
+    if (trimmed.length === 0) return [];
+
+    const calendarIds = await this.resolveCalendarScope(userId, undefined);
+
+    if (calendarIds.length === 0) return [];
+
+    const take = Math.min(opts.limit ?? SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT);
+
+    // Escape ILIKE wildcards in the user term so `%` / `_` are literal.
+    const pattern = `%${this.escapeLike(trimmed)}%`;
+    const calendarScope = In(calendarIds);
+    const groupScope = opts.groupId ? { groupId: opts.groupId } : {};
+
+    // An array `where` is OR-ed: a row matches when title OR notes contains the
+    // term. Each branch repeats the calendar + group scope so the OR cannot
+    // widen past the user's own (optionally group-narrowed) tasks.
+    const base: FindOptionsWhere<Task> = {
+      calendarId: calendarScope,
+      ...groupScope,
+    };
+    const where: FindOptionsWhere<Task>[] = [
+      { ...base, title: ILike(pattern) },
+      { ...base, notes: ILike(pattern) },
+    ];
+
+    return this.taskDatabaseService.findAll({
+      where,
+      relations: { group: true },
+      order: { startAt: 'DESC' },
+      take,
+    });
+  }
+
+  /**
+   * Returns the per-task reminder rules for a task the user owns (S1). Validates
+   * ownership first, then delegates to the notification-rule service. Surfaced so
+   * the controller can hydrate `TaskDTO.reminders` after a create / update / get.
+   */
+  async listReminders(
+    userId: string,
+    taskId: string,
+  ): Promise<NotificationRule[]> {
+    await this.findById(userId, taskId);
+
+    return this.notificationRuleService.listByTask(taskId);
   }
 
   /**
@@ -654,6 +747,7 @@ export class TaskService {
         ? input.requiresCompletion
         : task.requiresCompletion;
     const nextColor = input.color !== undefined ? input.color : task.color;
+    const nextIcon = input.icon !== undefined ? input.icon : task.icon;
 
     if (
       input.groupId !== undefined &&
@@ -665,6 +759,16 @@ export class TaskService {
 
     const recurrenceChanged = this.applyRecurrenceUpdate(task, input);
 
+    // Reminders are replaced as their own write (a side relation, not a column);
+    // do it after ownership is established but independent of the column diff so
+    // a reminder-only edit still takes effect.
+    if (input.reminders !== undefined) {
+      await this.notificationRuleService.replaceForTask(
+        task.id,
+        input.reminders,
+      );
+    }
+
     const hasFieldChanges =
       nextTitle !== task.title ||
       nextNotes !== task.notes ||
@@ -673,6 +777,7 @@ export class TaskService {
       nextTimezone !== task.timezone ||
       nextRequiresCompletion !== task.requiresCompletion ||
       nextColor !== task.color ||
+      nextIcon !== task.icon ||
       nextStartAt?.getTime() !== task.startAt?.getTime() ||
       nextEndAt?.getTime() !== task.endAt?.getTime();
 
@@ -687,6 +792,7 @@ export class TaskService {
     task.timezone = nextTimezone;
     task.requiresCompletion = nextRequiresCompletion;
     task.color = nextColor;
+    task.icon = nextIcon;
     task.startAt = nextStartAt;
     task.endAt = nextEndAt;
 
@@ -1169,6 +1275,8 @@ export class TaskService {
 
     // Timeless todos cannot recur (a null `startAt` yields no occurrences), so
     // they are never owned by the recurring path — no group-inheritance filter.
+    // The group relation is still loaded so the occurrence carries the owning
+    // group's color (B2).
     const todos = await this.taskDatabaseService.findAll({
       where: {
         calendarId: calendarScope,
@@ -1176,6 +1284,7 @@ export class TaskService {
         startAt: IsNull(),
         ...groupScope,
       },
+      relations: { group: true },
     });
 
     return [...occurrences, ...todos.map((task) => this.wrapOneOff(task))];
@@ -1198,13 +1307,16 @@ export class TaskService {
     to: Date,
     groupId?: string,
   ): Promise<Occurrence[]> {
-    // Own-config anchors: tasks with their own inline recurrenceConfig set.
+    // Own-config anchors: tasks with their own inline recurrenceConfig set. The
+    // group relation is loaded so each expanded occurrence carries the owning
+    // group's color (B2), even though the recurrence comes from the row itself.
     const ownRuleAnchors = await this.taskDatabaseService.findAll({
       where: {
         calendarId: In(calendarIds),
         recurrenceConfig: Not(IsNull()),
         ...(groupId ? { groupId } : {}),
       },
+      relations: { group: true },
     });
 
     // Group-inherited anchors: tasks with NO own config but assigned to a group.
@@ -1672,6 +1784,14 @@ export class TaskService {
    */
   private startSortKey(start: Date | null): number {
     return start ? start.getTime() : Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * Escapes the `ILIKE` wildcards (`%`, `_`) and the escape char (`\`) in a raw
+   * user search term so they match literally rather than as patterns.
+   */
+  private escapeLike(term: string): string {
+    return term.replace(/[\\%_]/g, (match) => `\\${match}`);
   }
 
   /**

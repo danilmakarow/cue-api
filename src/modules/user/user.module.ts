@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { UserAccountController } from './user-account.controller';
 import { UserSettingsController } from './user-settings.controller';
 import { UserService } from './user.service';
 import { DatabaseModule } from '../database/database.module';
@@ -12,7 +13,7 @@ import { DatabaseModule } from '../database/database.module';
  */
 @Module({
   imports: [DatabaseModule],
-  controllers: [UserSettingsController],
+  controllers: [UserSettingsController, UserAccountController],
   providers: [UserService],
   exports: [UserService],
 })

@@ -5,6 +5,26 @@ import type {
 } from '@/modules/database/entities';
 
 /**
+ * Monthly anchor that pins a single occurrence to a WORKING day (Mon–Fri) of the
+ * month, independent of a fixed day-of-month or nth-weekday selector (S3).
+ *
+ * Declared here (not in an entity file) because recurrence is a DB-less inline
+ * JSONB config with no `recurrence` entity — this module owns the recurrence
+ * value grammar. Re-exported through `dtos/index.ts` so the DTO + entity JSONB
+ * type share one source of truth.
+ *
+ * - `FIRST_WORKDAY` — the first Mon–Fri on/after the 1st of the month.
+ * - `LAST_WORKDAY` — the last Mon–Fri on/before the last day of the month.
+ * - `DAY_BEFORE_LAST_WORKDAY` — the working day immediately before `LAST_WORKDAY`
+ *   (i.e. the second-to-last working day of the month).
+ */
+export enum MonthlyAnchorMode {
+  FIRST_WORKDAY = 'FIRST_WORKDAY',
+  LAST_WORKDAY = 'LAST_WORKDAY',
+  DAY_BEFORE_LAST_WORKDAY = 'DAY_BEFORE_LAST_WORKDAY',
+}
+
+/**
  * Inline recurrence configuration stored as JSONB on a `Task` or `TaskGroup`
  * (`recurrenceConfig`). A plain POJO — never a persisted entity row — mirroring
  * `CreateRecurrenceRuleDto` field-for-field (RFC-5545-lite). It is the single
@@ -12,6 +32,10 @@ import type {
  * remain only as the class-validator validation surface for the JSONB payload.
  *
  * Weekday encoding for `byWeekday`: 0 = Monday … 6 = Sunday (ISO-8601 ordering).
+ *
+ * Advanced MONTHLY selectors (S3), mutually exclusive with `byMonthDay`:
+ * - `bySetPos` + `byWeekday` → nth-weekday ("first Monday" / "last Friday").
+ * - `monthlyAnchor` → a working-day anchor (first / last / day-before-last).
  */
 export interface RecurrenceConfig {
   /** How often the series repeats. */
@@ -24,6 +48,25 @@ export interface RecurrenceConfig {
   byMonthDay: number[] | null;
   /** Months (1-12); null means no month restriction. */
   byMonth: number[] | null;
+  /**
+   * RFC-5545 BYSETPOS ordinals selecting the nth match of `byWeekday` within a
+   * MONTHLY period: 1..4 for "first".."fourth", -1 for "last". Null/absent means
+   * no ordinal restriction. Honored only for MONTHLY frequency and only when
+   * `byWeekday` is also set ("first Monday" = `byWeekday:[0], bySetPos:[1]`).
+   *
+   * Optional (S3, additive): pre-existing configs that predate advanced monthly
+   * recurrence omit the key entirely — it reads as "unused", same as `null`. The
+   * `toConfig` normalizer always writes an explicit `null` for new configs.
+   */
+  bySetPos?: number[] | null;
+  /**
+   * Working-day MONTHLY anchor (first / last / day-before-last Mon–Fri of the
+   * month); null/absent means no working-day anchor. Honored only for MONTHLY
+   * frequency, and takes precedence over `byMonthDay` / `byWeekday` when set.
+   *
+   * Optional (S3, additive) for the same back-compat reason as `bySetPos`.
+   */
+  monthlyAnchor?: MonthlyAnchorMode | null;
   /** How the series terminates. */
   endType: RecurrenceEndType;
   /** ISO date the series ends on; non-null only for `UNTIL_DATE`. */

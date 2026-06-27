@@ -1,7 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
 
 import { resolveEffectiveSettings } from '../effective-settings';
-import { Task } from '@/modules/database/entities';
+import { ReminderResultDto } from './reminder.dto';
+import { NotificationRule, Task } from '@/modules/database/entities';
 import {
   Occurrence,
   RecurrenceConfig,
@@ -82,11 +83,19 @@ export class TaskDTO {
   @ApiProperty({ nullable: true, example: 'BLUE' })
   color: string | null;
 
+  /** Per-task icon (SF Symbol name); null leaves the task iconless. */
+  @ApiProperty({ nullable: true, example: 'cart.fill' })
+  icon: string | null;
+
   @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
 
   @ApiProperty({ type: () => RecurrenceConfigDTO, nullable: true })
   recurrence: RecurrenceConfigDTO | null;
+
+  /** The task's own per-task reminders (offset + channel), earliest first. */
+  @ApiProperty({ type: () => [ReminderResultDto] })
+  reminders: ReminderResultDto[];
 
   @ApiProperty({ format: 'uuid', nullable: true })
   notificationStrategyId: string | null;
@@ -113,6 +122,15 @@ export class OccurrenceDTO {
 
   @ApiProperty({ format: 'uuid', nullable: true })
   groupId: string | null;
+
+  /**
+   * The owning group's color (a preset name or `#RRGGBB`), null when ungrouped
+   * or the group's relation was not loaded. Carried alongside `groupId` so the
+   * day rails / month dots render real group colors (B2) even when the task has
+   * its own `color` override.
+   */
+  @ApiProperty({ nullable: true, example: '#E27921' })
+  groupColorHex: string | null;
 
   @ApiProperty({ format: 'date-time', nullable: true })
   originalStart: string | null;
@@ -142,6 +160,10 @@ export class OccurrenceDTO {
   /** EFFECTIVE color (task ?? group ?? null). */
   @ApiProperty({ nullable: true, example: 'BLUE' })
   color: string | null;
+
+  /** Per-task icon (SF Symbol name); null leaves the occurrence iconless. */
+  @ApiProperty({ nullable: true, example: 'cart.fill' })
+  icon: string | null;
 
   @ApiProperty({ format: 'date-time', nullable: true })
   completedAt: string | null;
@@ -184,12 +206,28 @@ export const toRecurrenceConfigDTO = (
 });
 
 /**
+ * Maps a `NotificationRule` row to its per-task `ReminderResultDto` wire shape.
+ */
+export const toReminderResultDto = (
+  rule: NotificationRule,
+): ReminderResultDto => ({
+  id: rule.id,
+  offsetMinutes: rule.offsetMinutes,
+  channel: rule.channel,
+});
+
+/**
  * Maps a Task entity to the `TaskDTO` wire shape. `recurrence` is the inline
  * `recurrenceConfig` on the row (its OWN config, not the group-inherited one);
  * `requiresCompletion` / `color` are the task's OWN (nullable) values so the
- * client can distinguish "inherit" from an explicit setting.
+ * client can distinguish "inherit" from an explicit setting. `reminders` are the
+ * task's own per-task notification rules — passed in by the caller (the service
+ * loads them); defaults to an empty array when not supplied.
  */
-export const toTaskDTO = (task: Task): TaskDTO => ({
+export const toTaskDTO = (
+  task: Task,
+  reminders: NotificationRule[] = [],
+): TaskDTO => ({
   id: task.id,
   calendarId: task.calendarId,
   groupId: task.groupId,
@@ -201,10 +239,12 @@ export const toTaskDTO = (task: Task): TaskDTO => ({
   timezone: task.timezone,
   requiresCompletion: task.requiresCompletion,
   color: task.color,
+  icon: task.icon,
   completedAt: task.completedAt ? task.completedAt.toISOString() : null,
   recurrence: task.recurrenceConfig
     ? toRecurrenceConfigDTO(task.recurrenceConfig)
     : null,
+  reminders: reminders.map(toReminderResultDto),
   notificationStrategyId: task.notificationStrategyId,
   createdAt: task.createdAt.toISOString(),
   updatedAt: task.updatedAt.toISOString(),
@@ -224,6 +264,10 @@ export const toOccurrenceDTO = (occurrence: Occurrence): OccurrenceDTO => {
     taskId: occurrence.task.id,
     calendarId: occurrence.task.calendarId,
     groupId: occurrence.task.groupId,
+    // The owning group's own color — honored only when the group relation was
+    // loaded (else null). Distinct from the EFFECTIVE `color` below, which a
+    // task-level override can shadow.
+    groupColorHex: occurrence.task.group?.color ?? null,
     originalStart: occurrence.originalStart
       ? occurrence.originalStart.toISOString()
       : null,
@@ -239,6 +283,7 @@ export const toOccurrenceDTO = (occurrence: Occurrence): OccurrenceDTO => {
     timezone: occurrence.task.timezone,
     requiresCompletion: effective.requiresCompletion,
     color: effective.color,
+    icon: occurrence.task.icon,
     completedAt: occurrence.completedAt
       ? occurrence.completedAt.toISOString()
       : null,

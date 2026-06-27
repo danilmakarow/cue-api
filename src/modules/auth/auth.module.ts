@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 
+import { AppleTokenRevoker } from './apple-token.revoker';
 import { AppleTokenVerifier } from './apple-token.verifier';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -30,7 +31,13 @@ import { DatabaseModule } from '@/modules/database/database.module';
     }),
   ],
   controllers: [AuthController, DevAuthController],
-  providers: [AuthService, AppleTokenVerifier, AccessTokenGuard, DevOnlyGuard],
-  exports: [AuthService, AccessTokenGuard, JwtModule],
+  providers: [
+    AuthService,
+    AppleTokenVerifier,
+    AppleTokenRevoker,
+    AccessTokenGuard,
+    DevOnlyGuard,
+  ],
+  exports: [AuthService, AppleTokenRevoker, AccessTokenGuard, JwtModule],
 })
 export class AuthModule {}

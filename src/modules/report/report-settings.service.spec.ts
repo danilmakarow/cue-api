@@ -1,5 +1,8 @@
 import { ReportSettingsService } from './report-settings.service';
-import { UserReportSettings } from '@/modules/database/entities';
+import {
+  NotificationChannel,
+  UserReportSettings,
+} from '@/modules/database/entities';
 
 /**
  * Builds a {@link ReportSettingsService} over an in-memory settings store so each
@@ -22,6 +25,7 @@ const buildHarness = () => {
         userId,
         enabled: false,
         reportTimeLocal: '08:00',
+        channel: NotificationChannel.TELEGRAM,
         lastSentLocalDate: null,
       } as UserReportSettings;
 
@@ -44,13 +48,39 @@ const buildHarness = () => {
 };
 
 describe('ReportSettingsService (Story 17 / ADR 0046)', () => {
-  it('getOrCreate returns a default (off, 08:00) on the first read', async () => {
+  it('getOrCreate returns a default (off, 08:00, TELEGRAM) on the first read', async () => {
     const { service } = buildHarness();
 
     const settings = await service.getOrCreate('user-1');
 
     expect(settings.enabled).toBe(false);
     expect(settings.reportTimeLocal).toBe('08:00');
+    expect(settings.channel).toBe(NotificationChannel.TELEGRAM);
+  });
+
+  it('update applies the channel and persists via save (S7)', async () => {
+    const { service, userReportSettingsDatabaseService } = buildHarness();
+
+    await service.getOrCreate('user-1');
+
+    const updated = await service.update('user-1', {
+      channel: NotificationChannel.PUSH,
+    });
+
+    expect(updated.channel).toBe(NotificationChannel.PUSH);
+    expect(userReportSettingsDatabaseService.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('update is a no-op when the channel is unchanged', async () => {
+    const { service, userReportSettingsDatabaseService } = buildHarness();
+
+    await service.getOrCreate('user-1');
+
+    await service.update('user-1', {
+      channel: NotificationChannel.TELEGRAM,
+    });
+
+    expect(userReportSettingsDatabaseService.save).not.toHaveBeenCalled();
   });
 
   it('update applies enabled + reportTimeLocal and persists via save', async () => {

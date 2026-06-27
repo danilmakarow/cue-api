@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsOptional,
@@ -12,6 +14,7 @@ import {
 } from 'class-validator';
 
 import { IsTaskColor } from './is-task-color.validator';
+import { ReminderDto } from './reminder.dto';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 
 /**
@@ -84,6 +87,29 @@ export class CreateTaskDto {
   @IsOptional()
   @IsTaskColor()
   color?: string;
+
+  /** Optional per-task icon (an SF Symbol name); null/omitted leaves it iconless. */
+  @ApiPropertyOptional({
+    example: 'cart.fill',
+    maxLength: 255,
+    description: 'Per-task icon name (e.g. an SF Symbol).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  icon?: string;
+
+  /** Optional per-task reminders persisted as taskId-linked notification rules. */
+  @ApiPropertyOptional({
+    type: () => [ReminderDto],
+    description: 'Per-task reminders (offset + channel).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ReminderDto)
+  reminders?: ReminderDto[];
 
   /** Optional group this task belongs to; must live in the same calendar. */
   @ApiPropertyOptional({

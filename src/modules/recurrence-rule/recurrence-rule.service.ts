@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 
 import { CreateRecurrenceRuleDto } from './dtos';
 import {
+  MonthlyAnchorMode,
   Occurrence,
   RecurrenceConfig,
   RecurrenceSource,
@@ -115,30 +116,144 @@ const dayInMonthOrNull = (
 };
 
 /**
- * Produces the candidate starts within a single MONTHLY period. When
- * `byMonthDay` is set the month expands into one candidate per listed day (each
- * skipped if it overflows the month); otherwise the seed's day-of-month, also
- * skipped on overflow.
+ * True when the given luxon weekday (1 = Monday … 7 = Sunday) is a working day
+ * (Mon–Fri). Weekends (Sat = 6, Sun = 7) are non-working.
+ */
+const isWorkday = (luxonWeekday: number): boolean => luxonWeekday <= 5;
+
+/**
+ * Carries the seed's wall-clock time (hour/minute/second/ms) onto a date-anchored
+ * candidate, so every generated instant keeps the series' local time-of-day. A
+ * pure date→date transform reused by every monthly selector.
+ */
+const atSeedTime = (candidate: DateTime, seed: DateTime): DateTime =>
+  candidate.set({
+    hour: seed.hour,
+    minute: seed.minute,
+    second: seed.second,
+    millisecond: seed.millisecond,
+  });
+
+/**
+ * Resolves the nth match of a weekday set within a month (RFC-5545 BYSETPOS over
+ * BYDAY). Builds the ordered list of every day in the month whose weekday is in
+ * `byWeekday`, then indexes by `setPos`: 1..k counts from the front, -1 the last.
+ * Returns null when the ordinal overflows the available matches (e.g. a 5th
+ * Monday in a month with only four), which the caller drops — never clamps.
+ */
+const nthWeekdayInMonth = (
+  monthStart: DateTime,
+  byWeekday: number[],
+  setPos: number,
+): DateTime | null => {
+  const daysInMonth = monthStart.daysInMonth ?? 0;
+  const allowed = new Set(byWeekday);
+  const matches: DateTime[] = [];
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const candidate = monthStart.set({ day });
+
+    if (allowed.has(luxonWeekdayToEntity(candidate.weekday))) {
+      matches.push(candidate);
+    }
+  }
+
+  if (matches.length === 0) return null;
+
+  // setPos is 1-based from the front; negative counts from the back (-1 = last).
+  const index = setPos > 0 ? setPos - 1 : matches.length + setPos;
+
+  if (index < 0 || index >= matches.length) return null;
+
+  return matches[index];
+};
+
+/**
+ * Resolves the working-day (Mon–Fri) anchor of a month for the given mode:
+ * first / last / day-before-last working day. Scans inward from the month edge,
+ * counting working days, so public-holiday gaps are out of scope (calendar
+ * weekdays only). Returns the date-anchored candidate (caller applies seed time).
+ */
+const workdayAnchorInMonth = (
+  monthStart: DateTime,
+  mode: MonthlyAnchorMode,
+): DateTime | null => {
+  const daysInMonth = monthStart.daysInMonth ?? 0;
+
+  if (mode === MonthlyAnchorMode.FIRST_WORKDAY) {
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const candidate = monthStart.set({ day });
+
+      if (isWorkday(candidate.weekday)) return candidate;
+    }
+
+    return null;
+  }
+
+  // LAST_WORKDAY / DAY_BEFORE_LAST_WORKDAY both walk back from month end,
+  // skipping the requested number of leading working days.
+  const skip = mode === MonthlyAnchorMode.DAY_BEFORE_LAST_WORKDAY ? 1 : 0;
+  let seen = 0;
+
+  for (let day = daysInMonth; day >= 1; day -= 1) {
+    const candidate = monthStart.set({ day });
+
+    if (!isWorkday(candidate.weekday)) continue;
+
+    if (seen === skip) return candidate;
+
+    seen += 1;
+  }
+
+  return null;
+};
+
+/**
+ * Produces the candidate starts within a single MONTHLY period. Selector
+ * precedence (highest first):
+ * 1. `monthlyAnchor` — a single working-day anchor (first/last/day-before-last).
+ * 2. `bySetPos` + `byWeekday` — the nth weekday(s) ("first Monday", "last Fri").
+ * 3. `byMonthDay` — explicit day-of-month list (each skipped on overflow).
+ * 4. fallback — the seed's day-of-month (skipped on overflow).
+ * Each resolved date carries the seed wall-clock time; overflowing ordinals/days
+ * are dropped (iCal semantics), never clamped.
  */
 const monthlyCandidates = (
   periodStart: DateTime,
   seed: DateTime,
-  byMonthDay: number[] | null,
+  config: RecurrenceConfig,
 ): DateTime[] => {
   const monthStart = periodStart.startOf('month');
-  const days = byMonthDay && byMonthDay.length > 0 ? byMonthDay : [seed.day];
+
+  if (config.monthlyAnchor) {
+    const anchor = workdayAnchorInMonth(monthStart, config.monthlyAnchor);
+
+    return anchor ? [atSeedTime(anchor, seed)] : [];
+  }
+
+  if (
+    config.bySetPos &&
+    config.bySetPos.length > 0 &&
+    config.byWeekday &&
+    config.byWeekday.length > 0
+  ) {
+    const byWeekday = config.byWeekday;
+
+    return config.bySetPos
+      .map((setPos) => nthWeekdayInMonth(monthStart, byWeekday, setPos))
+      .filter((candidate): candidate is DateTime => candidate !== null)
+      .map((candidate) => atSeedTime(candidate, seed));
+  }
+
+  const days =
+    config.byMonthDay && config.byMonthDay.length > 0
+      ? config.byMonthDay
+      : [seed.day];
 
   return days
     .map((day) => dayInMonthOrNull(monthStart, day))
     .filter((candidate): candidate is DateTime => candidate !== null)
-    .map((candidate) =>
-      candidate.set({
-        hour: seed.hour,
-        minute: seed.minute,
-        second: seed.second,
-        millisecond: seed.millisecond,
-      }),
-    );
+    .map((candidate) => atSeedTime(candidate, seed));
 };
 
 /**
@@ -244,7 +359,7 @@ const candidatesForPeriod = (
     }
 
     if (config.frequency === RecurrenceFrequency.MONTHLY) {
-      return monthlyCandidates(periodStart, seed, config.byMonthDay);
+      return monthlyCandidates(periodStart, seed, config);
     }
 
     return yearlyCandidates(
@@ -525,6 +640,8 @@ export class RecurrenceRuleService {
       byWeekday: proposal.recurrence.byWeekday ?? null,
       byMonthDay: proposal.recurrence.byMonthDay ?? null,
       byMonth: proposal.recurrence.byMonth ?? null,
+      bySetPos: proposal.recurrence.bySetPos ?? null,
+      monthlyAnchor: proposal.recurrence.monthlyAnchor ?? null,
       endType: proposal.recurrence.endType ?? RecurrenceEndType.NEVER,
       endDate: proposal.recurrence.endDate ?? null,
       count: proposal.recurrence.count ?? null,
@@ -567,8 +684,9 @@ export class RecurrenceRuleService {
    * Normalizes a validated {@link CreateRecurrenceRuleDto} into the inline
    * {@link RecurrenceConfig} POJO stored on a Task / TaskGroup row. Optional DTO
    * fields collapse to their canonical stored form (`interval` defaults to 1, the
-   * `by*` axes and `endDate`/`count` default to null, `endType` to NEVER), so the
-   * persisted config is always fully-populated and the expander reads it directly.
+   * `by*` axes, `bySetPos`, `monthlyAnchor`, and `endDate`/`count` default to
+   * null, `endType` to NEVER), so the persisted config is always fully-populated
+   * and the expander reads it directly.
    * Static and pure — recurrence no longer touches the database (ADR 0054).
    */
   static toConfig(dto: CreateRecurrenceRuleDto): RecurrenceConfig {
@@ -578,6 +696,8 @@ export class RecurrenceRuleService {
       byWeekday: dto.byWeekday ?? null,
       byMonthDay: dto.byMonthDay ?? null,
       byMonth: dto.byMonth ?? null,
+      bySetPos: dto.bySetPos ?? null,
+      monthlyAnchor: dto.monthlyAnchor ?? null,
       endType: dto.endType ?? RecurrenceEndType.NEVER,
       endDate: dto.endDate ?? null,
       count: dto.count ?? null,

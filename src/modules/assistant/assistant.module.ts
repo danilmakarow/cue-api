@@ -13,6 +13,7 @@ import { ContextBuilderService } from './context-builder.service';
 import { DebounceConsumer } from './debounce.consumer';
 import { LinkingService } from './linking.service';
 import { ToolLoopService } from './orchestration/tool-loop.service';
+import { ParseService } from './parse.service';
 import { ReplyPresenter } from './reply/reply-presenter.service';
 import { StatusAnimatorService } from './reply/status-animator.service';
 import { StatusSessionStore } from './reply/status-session.store';
@@ -115,6 +116,7 @@ import { TaskGroupModule } from '@/modules/task-group/task-group.module';
     LastMessageLanguageStore,
     LastMenuStore,
     LinkingService,
+    ParseService,
     SummarizerService,
     MemoryExtractorService,
     RoundRecapService,

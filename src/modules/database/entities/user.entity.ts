@@ -40,6 +40,22 @@ export class User extends BaseEntity {
   @Column({ default: 'UTC' })
   timezone: string;
 
+  /**
+   * Whether the user opts in to the morning-brief notification. Cross-device
+   * preference (D8); onboarding-completion stays iOS-local @AppStorage.
+   */
+  @ApiProperty({ example: true })
+  @Column({ default: true })
+  morningBriefEnabled: boolean;
+
+  /**
+   * Whether the user opts in to the evening-recap notification. Cross-device
+   * preference (D8); onboarding-completion stays iOS-local @AppStorage.
+   */
+  @ApiProperty({ example: true })
+  @Column({ default: true })
+  eveningRecapEnabled: boolean;
+
   @OneToMany(() => Device, (device) => device.user)
   devices: Device[];
 

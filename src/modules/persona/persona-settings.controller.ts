@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Patch, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Patch,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 
 import {
@@ -57,6 +64,25 @@ export class PersonaSettingsController {
     @Body() dto: UpdatePersonaSettingsDto,
   ): Promise<PersonaSettingsDTO> {
     const persona = await this.personaSettingsService.update(user.id, dto);
+
+    return toPersonaSettingsDTO(persona);
+  }
+
+  /**
+   * Clears the current user's custom persona (D9 reset-to-preset) and returns the
+   * now-active persona — the seeded "Jarvis" preset (or the code-constant default
+   * when no seed exists). Idempotent: succeeds whether or not a custom persona was
+   * set, so the iOS screen always re-renders the preset.
+   */
+  @Delete()
+  @Swagger({
+    summary:
+      'Reset the current user custom AI persona back to the seeded preset (idempotent).',
+    responseDto: PersonaSettingsDTO,
+    responseStatus: 200,
+  })
+  async reset(@CurrentUser() user: User): Promise<PersonaSettingsDTO> {
+    const persona = await this.personaSettingsService.clearCustom(user.id);
 
     return toPersonaSettingsDTO(persona);
   }

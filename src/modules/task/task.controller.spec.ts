@@ -150,3 +150,51 @@ describe('TaskController.setCompletion', () => {
     });
   });
 });
+
+describe('TaskController.search (M1)', () => {
+  it('forwards q / groupId / limit and maps rows to search-result DTOs', async () => {
+    const taskService = {
+      searchTasks: jest.fn().mockResolvedValue([
+        makeTask({
+          id: 't-hit',
+          title: 'Dentist',
+          notes: 'card',
+          startAt: new Date('2026-06-09T09:00:00.000Z'),
+          endAt: null,
+          isAllDay: false,
+          groupId: 'grp-1',
+          group: { color: '#E27921' },
+          recurrenceConfig: null,
+          timezone: 'Europe/Berlin',
+        } as never),
+      ]),
+    };
+    const controller = new TaskController(taskService as never);
+
+    const result = await controller.search(makeUser(), {
+      q: 'dent',
+      groupId: 'grp-1',
+      limit: 10,
+    });
+
+    expect(taskService.searchTasks).toHaveBeenCalledWith('user-1', 'dent', {
+      groupId: 'grp-1',
+      limit: 10,
+    });
+    expect(result).toEqual([
+      {
+        taskId: 't-hit',
+        calendarId: 'cal-1',
+        groupId: 'grp-1',
+        groupColorHex: '#E27921',
+        title: 'Dentist',
+        notes: 'card',
+        startAt: '2026-06-09T09:00:00.000Z',
+        endAt: null,
+        isAllDay: false,
+        timezone: 'Europe/Berlin',
+        isRecurring: false,
+      },
+    ]);
+  });
+});

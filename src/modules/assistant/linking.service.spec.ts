@@ -1,7 +1,11 @@
-import { NotFoundException } from '@nestjs/common';
+import { HttpStatus } from '@nestjs/common';
 
 import { LinkingService } from './linking.service';
 import { TelegramLink } from '@/modules/database/entities';
+import {
+  InvalidLinkCodeException,
+  TelegramLinkErrorCode,
+} from '@/modules/telegram-link/exceptions/invalid-link-code.exception';
 
 /** A linked `TelegramLink` row with a fixed `linkedAt` for deterministic assertions. */
 const LINKED_AT = new Date('2026-06-01T12:30:00.000Z');
@@ -89,14 +93,29 @@ describe('LinkingService', () => {
   });
 
   describe('redeemNonce', () => {
-    it('throws NotFoundException when the nonce is unknown or expired', async () => {
+    it('throws a typed InvalidLinkCodeException (422 + stable code body) when the nonce is unknown, expired, or already burned (M3)', async () => {
       const harness = buildHarness();
 
       harness.redis.getdel.mockResolvedValue(null);
 
-      await expect(
-        harness.service.redeemNonce('user-1', 'missing'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      let caught: unknown;
+
+      try {
+        await harness.service.redeemNonce('user-1', 'missing');
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(InvalidLinkCodeException);
+
+      // The typed body carries the stable machine-readable code the iOS client
+      // branches on, under HTTP 422.
+      const exception = caught as InvalidLinkCodeException;
+
+      expect(exception.getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY);
+      expect(exception.getResponse()).toMatchObject({
+        code: TelegramLinkErrorCode.INVALID_LINK_CODE,
+      });
     });
 
     it('burns the nonce and creates a link when none exists yet', async () => {
