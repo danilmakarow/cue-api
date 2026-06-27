@@ -1,5 +1,13 @@
 import { ILike } from 'typeorm';
 
+// `@Transactional()` (used by `create` / `update`) requires a registered
+// transactional data source at runtime, which a pure unit spec has no DB to
+// provide. Stub the decorator to a pass-through so the methods' logic can be
+// exercised directly; the real transaction wrapping is covered at integration.
+jest.mock('typeorm-transactional', () => ({
+  Transactional: () => () => undefined,
+}));
+
 import { TaskService } from './task.service';
 import { NotificationChannel, Task } from '@/modules/database/entities';
 

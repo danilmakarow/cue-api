@@ -12,6 +12,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+import { IsValidMonthlySelectors } from './is-valid-monthly-selectors.validator';
 import { MonthlyAnchorMode } from '../recurrence.types';
 import {
   RecurrenceEndType,
@@ -25,6 +26,9 @@ import {
  * Cross-field rules:
  * - `endType = COUNT` requires a positive `count`.
  * - `endType = UNTIL_DATE` requires an `endDate`.
+ * - `bySetPos` requires a non-empty `byWeekday` and MONTHLY frequency.
+ * - `monthlyAnchor` is mutually exclusive with `byMonthDay` / `bySetPos` /
+ *   `byWeekday` and is MONTHLY-only.
  *
  * Weekday encoding for `byWeekday`: 0 = Monday … 6 = Sunday.
  */
@@ -34,6 +38,7 @@ export class CreateRecurrenceRuleDto {
     example: RecurrenceFrequency.WEEKLY,
   })
   @IsEnum(RecurrenceFrequency)
+  @IsValidMonthlySelectors()
   frequency: RecurrenceFrequency;
 
   @ApiPropertyOptional({

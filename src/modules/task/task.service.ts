@@ -4,6 +4,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { DateTime } from 'luxon';
+import { Transactional } from 'typeorm-transactional';
 import {
   And,
   FindOptionsWhere,
@@ -209,7 +210,12 @@ export class TaskService {
    * Throws 404 when the calendar is missing, 403 when it belongs to another user,
    * and 400 when `endAt` precedes `startAt`, the group is in another calendar, or
    * a recurrence is requested without an anchor `startAt`.
+   *
+   * Transactional so the task row and its per-task reminder rows commit or roll
+   * back together — a reminder-write failure must not leave a persisted task whose
+   * 201 response never reflected those reminders.
    */
+  @Transactional()
   async create(userId: string, dto: CreateTaskDto): Promise<Task> {
     await this.ensureCalendarOwnedByUser(dto.calendarId, userId);
 
@@ -702,7 +708,13 @@ export class TaskService {
    * co-location, and `endAt >= startAt`, and short-circuits when nothing changed.
    * Pre-existing occurrence exceptions are preserved (they remain keyed by their
    * `originalStart`). Returns the (possibly unchanged) Task.
+   *
+   * Transactional so the reminder replace (DELETE-all-then-reinsert via
+   * `replaceForTask`) and the task-row save commit or roll back as a unit — a
+   * reminder insert failing mid-replace must never leave the old reminders deleted
+   * and the new set only partially written.
    */
+  @Transactional()
   async update(
     userId: string,
     taskId: string,

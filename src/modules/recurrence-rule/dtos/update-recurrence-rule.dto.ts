@@ -12,6 +12,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+import { IsValidMonthlySelectors } from './is-valid-monthly-selectors.validator';
 import { MonthlyAnchorMode } from '../recurrence.types';
 import {
   RecurrenceEndType,
@@ -24,6 +25,9 @@ import {
  *
  * Cross-field rules apply only when `endType` is included in the payload:
  * setting `endType = COUNT` requires `count`; `endType = UNTIL_DATE` requires `endDate`.
+ * When `bySetPos` / `monthlyAnchor` is included, the same MONTHLY-selector rules as
+ * the create DTO apply (bySetPos requires byWeekday + MONTHLY; monthlyAnchor is
+ * mutually exclusive with byMonthDay / bySetPos / byWeekday and MONTHLY-only).
  */
 export class UpdateRecurrenceRuleDto {
   @ApiPropertyOptional({ enum: RecurrenceFrequency })
@@ -84,12 +88,14 @@ export class UpdateRecurrenceRuleDto {
   @ArrayNotEmpty()
   @IsInt({ each: true })
   @IsIn([-1, 1, 2, 3, 4], { each: true })
+  @IsValidMonthlySelectors()
   bySetPos?: number[];
 
   /** MONTHLY working-day anchor (first/last/day-before-last Mon–Fri of the month). */
   @ApiPropertyOptional({ enum: MonthlyAnchorMode })
   @IsOptional()
   @IsEnum(MonthlyAnchorMode)
+  @IsValidMonthlySelectors()
   monthlyAnchor?: MonthlyAnchorMode;
 
   @ApiPropertyOptional({ enum: RecurrenceEndType })

@@ -1,7 +1,13 @@
 import { BadRequestException } from '@nestjs/common';
+import { DateTime } from 'luxon';
 
 import { DailyBriefService } from './daily-brief.service';
 import { User } from '@/modules/database/entities';
+
+/** The user's CURRENT local day in the test zone — always inside the ±1d window. */
+const TODAY_LOCAL = DateTime.now()
+  .setZone('Europe/Berlin')
+  .toISODate() as string;
 
 /**
  * Builds a {@link DailyBriefService} over a mocked generator + an in-memory cache
@@ -60,10 +66,10 @@ describe('DailyBriefService (D2)', () => {
     const { service, reportGeneratorService, dailyBriefCacheStore } =
       buildHarness();
 
-    const result = await service.getBrief(user(), '2026-06-21');
+    const result = await service.getBrief(user(), TODAY_LOCAL);
 
     expect(result.brief).toBe('Good morning, Tony.');
-    expect(result.localDate).toBe('2026-06-21');
+    expect(result.localDate).toBe(TODAY_LOCAL);
     expect(reportGeneratorService.generateForUser).toHaveBeenCalledTimes(1);
     expect(dailyBriefCacheStore.set).toHaveBeenCalledTimes(1);
   });
@@ -71,9 +77,9 @@ describe('DailyBriefService (D2)', () => {
   it('returns the cached brief WITHOUT generating on a hit', async () => {
     const { service, reportGeneratorService } = buildHarness();
 
-    await service.getBrief(user(), '2026-06-21');
+    await service.getBrief(user(), TODAY_LOCAL);
 
-    const second = await service.getBrief(user(), '2026-06-21');
+    const second = await service.getBrief(user(), TODAY_LOCAL);
 
     expect(second.brief).toBe('Good morning, Tony.');
     // Only the first call generated; the second was served from cache.
@@ -86,13 +92,13 @@ describe('DailyBriefService (D2)', () => {
 
     reportGeneratorService.generateForUser.mockResolvedValueOnce(null);
 
-    const result = await service.getBrief(user(), '2026-06-21');
+    const result = await service.getBrief(user(), TODAY_LOCAL);
 
     expect(result.brief).toBeNull();
     expect(dailyBriefCacheStore.set).not.toHaveBeenCalled();
 
     // A second request regenerates (the empty result was not cached).
-    await service.getBrief(user(), '2026-06-21');
+    await service.getBrief(user(), TODAY_LOCAL);
 
     expect(reportGeneratorService.generateForUser).toHaveBeenCalledTimes(2);
   });
@@ -122,5 +128,39 @@ describe('DailyBriefService (D2)', () => {
     await expect(service.getBrief(user(), '2026-02-30')).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+
+  it('rejects a date far outside the ±1d window with 400 (no generation)', async () => {
+    const { service, reportGeneratorService } = buildHarness();
+
+    const farPast = DateTime.now()
+      .setZone('Europe/Berlin')
+      .minus({ days: 30 })
+      .toISODate() as string;
+
+    await expect(service.getBrief(user(), farPast)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(reportGeneratorService.generateForUser).not.toHaveBeenCalled();
+  });
+
+  it('accepts yesterday and tomorrow (window edges)', async () => {
+    const { service } = buildHarness();
+
+    const yesterday = DateTime.now()
+      .setZone('Europe/Berlin')
+      .minus({ days: 1 })
+      .toISODate() as string;
+    const tomorrow = DateTime.now()
+      .setZone('Europe/Berlin')
+      .plus({ days: 1 })
+      .toISODate() as string;
+
+    await expect(service.getBrief(user(), yesterday)).resolves.toMatchObject({
+      localDate: yesterday,
+    });
+    await expect(service.getBrief(user(), tomorrow)).resolves.toMatchObject({
+      localDate: tomorrow,
+    });
   });
 });

@@ -9,6 +9,16 @@ import { User } from '@/modules/database/entities';
 const LOCAL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * How many local days on either side of the user's current day an explicit
+ * `date` may target. The brief is a "today" card with a tiny look-back/ahead, so
+ * one day each way is generous. Bounding the window caps the distinct cache keys
+ * (and therefore the distinct MAIN-model generations) a single user can fan out:
+ * the per-day content cache de-dupes repeats of the SAME day, this bounds the set
+ * of reachable days. A wider request is rejected with 400.
+ */
+const DATE_WINDOW_DAYS = 1;
+
+/**
  * The resolved daily brief: the generated text (null when the day yielded nothing
  * usable) plus the canonical local date it covers.
  */
@@ -35,21 +45,24 @@ export class DailyBriefService {
 
   /**
    * Resolves the local date the brief is for. An explicit `date` query param must
-   * be a real `YYYY-MM-DD` in the user's timezone (rejected with 400 otherwise);
-   * when omitted, the user's CURRENT local date is used. Returns the canonical
+   * be a real `YYYY-MM-DD` in the user's timezone (rejected with 400 otherwise)
+   * AND fall within ±{@link DATE_WINDOW_DAYS} of the user's CURRENT local day —
+   * dates outside that window are rejected with 400 so a single user cannot fan a
+   * MAIN-model generation across thousands of attacker-chosen distinct days. When
+   * omitted, the user's current local date is used. Returns the canonical
    * `YYYY-MM-DD` so the cache key is stable regardless of input padding.
    */
   private resolveLocalDate(user: User, date?: string): string {
+    const today = DateTime.now().setZone(user.timezone).startOf('day');
+
+    if (!today.isValid) {
+      throw new BadRequestException(
+        `User timezone "${user.timezone}" is not a valid IANA zone.`,
+      );
+    }
+
     if (date === undefined) {
-      const today = DateTime.now().setZone(user.timezone).toISODate();
-
-      if (!today) {
-        throw new BadRequestException(
-          `User timezone "${user.timezone}" is not a valid IANA zone.`,
-        );
-      }
-
-      return today;
+      return today.toISODate() as string;
     }
 
     if (!LOCAL_DATE_PATTERN.test(date)) {
@@ -58,11 +71,21 @@ export class DailyBriefService {
       );
     }
 
-    const parsed = DateTime.fromISO(date, { zone: user.timezone });
+    const parsed = DateTime.fromISO(date, { zone: user.timezone }).startOf(
+      'day',
+    );
     const isoDate = parsed.toISODate();
 
     if (!isoDate) {
       throw new BadRequestException('date must be a valid calendar date.');
+    }
+
+    const offsetDays = parsed.diff(today, 'days').days;
+
+    if (Math.abs(offsetDays) > DATE_WINDOW_DAYS) {
+      throw new BadRequestException(
+        `date must be within ${DATE_WINDOW_DAYS} day(s) of today.`,
+      );
     }
 
     return isoDate;

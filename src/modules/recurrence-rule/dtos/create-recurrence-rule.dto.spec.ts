@@ -207,6 +207,64 @@ describe('CreateRecurrenceRuleDto', () => {
       }),
     ).toContain('monthlyAnchor');
   });
+
+  it('rejects bySetPos without byWeekday', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        bySetPos: [1],
+      }),
+    ).toContain('frequency');
+  });
+
+  it('rejects bySetPos on a non-MONTHLY frequency', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.WEEKLY,
+        byWeekday: [0],
+        bySetPos: [1],
+      }),
+    ).toContain('frequency');
+  });
+
+  it('rejects monthlyAnchor on a non-MONTHLY frequency', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.DAILY,
+        monthlyAnchor: MonthlyAnchorMode.FIRST_WORKDAY,
+      }),
+    ).toContain('frequency');
+  });
+
+  it('rejects monthlyAnchor combined with byMonthDay', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+        byMonthDay: [15],
+      }),
+    ).toContain('frequency');
+  });
+
+  it('rejects monthlyAnchor combined with bySetPos / byWeekday', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+        byWeekday: [0],
+        bySetPos: [1],
+      }),
+    ).toContain('frequency');
+  });
+
+  it('accepts a lone monthlyAnchor on MONTHLY', async () => {
+    expect(
+      await failingProps(CreateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.FIRST_WORKDAY,
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe('UpdateRecurrenceRuleDto', () => {
@@ -240,5 +298,34 @@ describe('UpdateRecurrenceRuleDto', () => {
     expect(
       await failingProps(UpdateRecurrenceRuleDto, { byWeekday: [-1] }),
     ).toContain('byWeekday');
+  });
+
+  it('rejects bySetPos without byWeekday in a partial payload', async () => {
+    expect(
+      await failingProps(UpdateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        bySetPos: [1],
+      }),
+    ).toContain('bySetPos');
+  });
+
+  it('rejects monthlyAnchor combined with byMonthDay in a partial payload', async () => {
+    expect(
+      await failingProps(UpdateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        monthlyAnchor: MonthlyAnchorMode.LAST_WORKDAY,
+        byMonthDay: [15],
+      }),
+    ).toContain('monthlyAnchor');
+  });
+
+  it('accepts a valid bySetPos + byWeekday partial payload', async () => {
+    expect(
+      await failingProps(UpdateRecurrenceRuleDto, {
+        frequency: RecurrenceFrequency.MONTHLY,
+        byWeekday: [0],
+        bySetPos: [1],
+      }),
+    ).toEqual([]);
   });
 });
