@@ -4,7 +4,6 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { DateTime } from 'luxon';
-import { Transactional } from 'typeorm-transactional';
 import {
   And,
   FindOptionsWhere,
@@ -16,6 +15,7 @@ import {
   MoreThanOrEqual,
   Not,
 } from 'typeorm';
+import { Transactional } from 'typeorm-transactional';
 
 import { CreateTaskDto } from './dtos';
 import {

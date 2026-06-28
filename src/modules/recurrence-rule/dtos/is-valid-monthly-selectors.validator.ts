@@ -34,7 +34,9 @@ interface MonthlySelectorShape {
  * skips the MONTHLY-frequency guards — the structural exclusivity guards still
  * apply, since those are independent of the frequency being re-stated.
  */
-export const areMonthlySelectorsValid = (dto: MonthlySelectorShape): boolean => {
+export const areMonthlySelectorsValid = (
+  dto: MonthlySelectorShape,
+): boolean => {
   const hasSetPos = dto.bySetPos != null && dto.bySetPos.length > 0;
   const hasAnchor = dto.monthlyAnchor != null;
   const hasWeekday = dto.byWeekday != null && dto.byWeekday.length > 0;

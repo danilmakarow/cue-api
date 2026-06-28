@@ -62,7 +62,7 @@ export class DailyBriefService {
     }
 
     if (date === undefined) {
-      return today.toISODate() as string;
+      return today.toISODate();
     }
 
     if (!LOCAL_DATE_PATTERN.test(date)) {
