@@ -97,14 +97,24 @@ export class DailyBriefService {
    * miss runs ONE MAIN-model generation, caches a non-empty result, and returns
    * it. A null/empty generation is NOT cached so a later request can retry; the
    * caller surfaces the empty case as it sees fit.
+   *
+   * When `refresh` is true the cache READ is BYPASSED: the brief is regenerated
+   * and the fresh (non-empty) result OVERWRITES the cached value. Used to force a
+   * fresh brief on demand (e.g. right after the user changes their brief settings).
    */
-  async getBrief(user: User, date?: string): Promise<DailyBriefResult> {
+  async getBrief(
+    user: User,
+    date?: string,
+    refresh = false,
+  ): Promise<DailyBriefResult> {
     const localDate = this.resolveLocalDate(user, date);
 
-    const cached = await this.dailyBriefCacheStore.get(user.id, localDate);
+    if (!refresh) {
+      const cached = await this.dailyBriefCacheStore.get(user.id, localDate);
 
-    if (cached !== null) {
-      return { brief: cached, localDate };
+      if (cached !== null) {
+        return { brief: cached, localDate };
+      }
     }
 
     const correlationId = `daily-brief-${user.id}-${localDate}`;

@@ -17,8 +17,10 @@ import {
   TaskOccurrenceException,
   TelegramLink,
   User,
+  UserBriefSettings,
   UserMemoryFact,
   UserReportSettings,
+  UserSyncState,
 } from './entities';
 import {
   CalendarRepository,
@@ -35,9 +37,11 @@ import {
   TaskOccurrenceExceptionRepository,
   TaskRepository,
   TelegramLinkRepository,
+  UserBriefSettingsRepository,
   UserMemoryFactRepository,
   UserReportSettingsRepository,
   UserRepository,
+  UserSyncStateRepository,
 } from './repositories';
 import {
   CalendarDatabaseService,
@@ -54,9 +58,11 @@ import {
   TaskGroupDatabaseService,
   TaskOccurrenceExceptionDatabaseService,
   TelegramLinkDatabaseService,
+  UserBriefSettingsDatabaseService,
   UserDatabaseService,
   UserMemoryFactDatabaseService,
   UserReportSettingsDatabaseService,
+  UserSyncStateDatabaseService,
 } from './services';
 
 /**
@@ -84,7 +90,9 @@ import {
       UserMemoryFact,
       PendingQuestion,
       UserReportSettings,
+      UserBriefSettings,
       PersonaPrompt,
+      UserSyncState,
     ]),
   ],
   providers: [
@@ -104,7 +112,9 @@ import {
     UserMemoryFactRepository,
     PendingQuestionRepository,
     UserReportSettingsRepository,
+    UserBriefSettingsRepository,
     PersonaPromptRepository,
+    UserSyncStateRepository,
     UserDatabaseService,
     DeviceDatabaseService,
     TelegramLinkDatabaseService,
@@ -121,7 +131,9 @@ import {
     UserMemoryFactDatabaseService,
     PendingQuestionDatabaseService,
     UserReportSettingsDatabaseService,
+    UserBriefSettingsDatabaseService,
     PersonaPromptDatabaseService,
+    UserSyncStateDatabaseService,
   ],
   exports: [
     UserDatabaseService,
@@ -140,7 +152,9 @@ import {
     UserMemoryFactDatabaseService,
     PendingQuestionDatabaseService,
     UserReportSettingsDatabaseService,
+    UserBriefSettingsDatabaseService,
     PersonaPromptDatabaseService,
+    UserSyncStateDatabaseService,
   ],
 })
 export class DatabaseModule {}

@@ -17,6 +17,7 @@ import {
   ChangesDTO,
   ChangesQuery,
   CompletionResultDTO,
+  CreateOccurrenceOverrideDto,
   DailyCountsDTO,
   DailyCountsQuery,
   ListTasksQuery,
@@ -33,7 +34,7 @@ import {
   toTaskSearchResultDTO,
 } from './dtos';
 import { CreateTaskDto } from './dtos';
-import { TaskService } from './task.service';
+import { TaskDeleteMode, TaskService } from './task.service';
 import { CurrentUser } from '@/decorators/current-user.decorator';
 import { AccessTokenGuard } from '@/guards/access-token.guard';
 import { User } from '@/modules/database/entities';
@@ -271,10 +272,54 @@ export class TaskController {
   async remove(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query('mode') mode?: string,
   ): Promise<{ id: string }> {
-    await this.taskService.remove(user.id, id);
+    // `mode` applies only when the target is an override child: `revert` restores
+    // the generated occurrence; anything else (incl. absent) is the default
+    // `remove` (delete-means-delete). An unknown value degrades to `remove`.
+    const deleteMode: TaskDeleteMode = mode === 'revert' ? 'revert' : 'remove';
+
+    await this.taskService.remove(user.id, id, deleteMode);
 
     return { id };
+  }
+
+  /**
+   * Materializes an override for a single occurrence of a recurring task: creates
+   * (or updates) a real child task linked to the parent at `originalStart`, so the
+   * occurrence can be edited / moved / completed independently while staying part
+   * of the series. Returns the child task's `TaskDTO`.
+   */
+  @Post(':id/occurrences/override')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @Swagger({
+    summary: 'Materialize an editable override for a single occurrence.',
+    responseDto: TaskDTO,
+    responseStatus: 201,
+  })
+  async createOccurrenceOverride(
+    @CurrentUser() user: User,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateOccurrenceOverrideDto,
+  ): Promise<TaskDTO> {
+    const { originalStart, ...patch } = dto;
+
+    const child = await this.taskService.createOrUpdateOverride(
+      user.id,
+      id,
+      new Date(originalStart),
+      patch,
+    );
+
+    // Re-load with the group relation + reminders so the response echoes the same
+    // shape as create/update.
+    const childWithRule = await this.taskService.findByIdWithRule(
+      user.id,
+      child.id,
+    );
+    const reminders = await this.taskService.listReminders(user.id, child.id);
+
+    return toTaskDTO(childWithRule, reminders);
   }
 
   /**
@@ -314,12 +359,9 @@ export class TaskController {
       };
     }
 
-    // Assert calendar ownership before toggling — `setCompleted` itself does
-    // not (it is a bare `findOneBy({ id })`), so calling it directly would let
-    // any authenticated user toggle another user's task by id.
-    const task = await this.taskService.findById(user.id, id);
     const updated = await this.taskService.setCompleted(
-      task.id,
+      user.id,
+      id,
       dto.isCompleted,
     );
 

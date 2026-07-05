@@ -971,6 +971,13 @@ export class ToolDispatcherService implements ToolHandlerHost {
 
       if (moveConflict) return moveConflict;
 
+      // NOTE: the assistant's per-occurrence EDIT still writes a
+      // `TaskOccurrenceException` (its start-only-move span-preservation logic
+      // lives here). The read path renders exception-based and materialized-child
+      // overrides identically, so this stays correct; unifying the assistant onto
+      // `createOrUpdateOverride` (materialized children) is a deliberate
+      // follow-up. A live child on the slot makes this 409 (the client edits the
+      // child directly instead).
       await this.taskService.applyOccurrenceOverride(
         userId,
         target.taskId,
@@ -1470,7 +1477,11 @@ export class ToolDispatcherService implements ToolHandlerHost {
         completed,
       );
     } else {
-      await this.taskService.setCompleted(target.taskId, completed);
+      await this.taskService.setCompleted(
+        context.userId,
+        target.taskId,
+        completed,
+      );
     }
 
     return {
@@ -1529,12 +1540,26 @@ export class ToolDispatcherService implements ToolHandlerHost {
     }
 
     if (isRecurringInstance && parsed.editScope === 'this') {
-      await this.taskService.applyOccurrenceOverride(
+      // If the occurrence was already materialized as an override child, delete
+      // THAT (its default `remove` soft-deletes the child and writes the skip);
+      // the exception-skip path would 409 against a live child. A never-overridden
+      // occurrence still skips via the exception.
+      const overrideChild = await this.taskService.findOverrideChild(
         context.userId,
         target.taskId,
         target.originalStart as Date,
-        { isSkipped: true },
       );
+
+      if (overrideChild) {
+        await this.taskService.remove(context.userId, overrideChild.id);
+      } else {
+        await this.taskService.applyOccurrenceOverride(
+          context.userId,
+          target.taskId,
+          target.originalStart as Date,
+          { isSkipped: true },
+        );
+      }
 
       return { content: 'Removed this occurrence.' };
     }

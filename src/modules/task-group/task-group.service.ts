@@ -7,10 +7,12 @@ import { EntityNotFoundException } from '@/exceptions/entity-not-found.exception
 import { Calendar, TaskGroup } from '@/modules/database/entities';
 import {
   CalendarDatabaseService,
+  TaskDatabaseService,
   TaskGroupDatabaseService,
 } from '@/modules/database/services';
 import { CreateRecurrenceRuleDto } from '@/modules/recurrence-rule/dtos';
 import { RecurrenceRuleService } from '@/modules/recurrence-rule/recurrence-rule.service';
+import { SyncStateService } from '@/modules/sync/sync-state.service';
 
 /**
  * Fields the REST layer may change on an existing task group.
@@ -40,6 +42,8 @@ export class TaskGroupService {
   constructor(
     private readonly taskGroupDatabaseService: TaskGroupDatabaseService,
     private readonly calendarDatabaseService: CalendarDatabaseService,
+    private readonly taskDatabaseService: TaskDatabaseService,
+    private readonly syncStateService: SyncStateService,
   ) {}
 
   /**
@@ -49,6 +53,7 @@ export class TaskGroupService {
    * `requiresCompletion` / `color` are stored as the group defaults. Built via
    * `createInstance` and persisted with `.save()`.
    */
+  @Transactional()
   async create(userId: string, dto: CreateTaskGroupDto): Promise<TaskGroup> {
     await this.ensureCalendarOwnedByUser(dto.calendarId, userId);
 
@@ -67,7 +72,11 @@ export class TaskGroupService {
       sortOrder: dto.sortOrder ?? 0,
     });
 
-    return this.taskGroupDatabaseService.save(group);
+    const saved = await this.taskGroupDatabaseService.save(group);
+
+    await this.syncStateService.bump(userId);
+
+    return saved;
   }
 
   /**
@@ -77,6 +86,7 @@ export class TaskGroupService {
    * cleared; when `undefined` it is left unchanged (ADR 0054). Short-circuits when
    * nothing changed.
    */
+  @Transactional()
   async update(
     userId: string,
     groupId: string,
@@ -96,12 +106,19 @@ export class TaskGroupService {
 
     const recurrenceChanged = this.applyRecurrenceUpdate(group, changes);
 
+    // Capture effective-settings-affecting diffs BEFORE mutating the row, so the
+    // member-task touch below fires exactly when a group change alters what its
+    // tasks inherit (color / requiresCompletion / recurrence — task-wins).
+    const colorChanged = nextColor !== group.color;
+    const requiresCompletionChanged =
+      nextRequiresCompletion !== group.requiresCompletion;
+
     const hasFieldChanges =
       nextName !== group.name ||
-      nextColor !== group.color ||
+      colorChanged ||
       nextIcon !== group.icon ||
       nextSortOrder !== group.sortOrder ||
-      nextRequiresCompletion !== group.requiresCompletion;
+      requiresCompletionChanged;
 
     if (hasFieldChanges) {
       group.name = nextName;
@@ -113,6 +130,14 @@ export class TaskGroupService {
 
     if (hasFieldChanges || recurrenceChanged) {
       await this.taskGroupDatabaseService.save(group);
+
+      // A change to inherited settings must surface the member tasks in the
+      // delta even though their own rows were not written.
+      if (colorChanged || requiresCompletionChanged || recurrenceChanged) {
+        await this.taskDatabaseService.touchAllInGroup(group.id);
+      }
+
+      await this.syncStateService.bump(userId);
     }
 
     return group;
@@ -147,6 +172,7 @@ export class TaskGroupService {
 
     const groupById = new Map(groups.map((group) => [group.id, group]));
 
+    let anyChanged = false;
     const reordered = await Promise.all(
       groupIds.map((groupId, index) => {
         const group = groupById.get(groupId) as TaskGroup;
@@ -154,10 +180,15 @@ export class TaskGroupService {
         if (group.sortOrder === index) return Promise.resolve(group);
 
         group.sortOrder = index;
+        anyChanged = true;
 
         return this.taskGroupDatabaseService.save(group);
       }),
     );
+
+    if (anyChanged) {
+      await this.syncStateService.bump(userId);
+    }
 
     return reordered;
   }
@@ -215,6 +246,7 @@ export class TaskGroupService {
    * Renames a group after asserting ownership. Short-circuits and returns the
    * group untouched when the name is unchanged.
    */
+  @Transactional()
   async rename(
     userId: string,
     groupId: string,
@@ -226,17 +258,35 @@ export class TaskGroupService {
 
     group.name = name;
 
-    return this.taskGroupDatabaseService.save(group);
+    const saved = await this.taskGroupDatabaseService.save(group);
+
+    await this.syncStateService.bump(userId);
+
+    return saved;
   }
 
   /**
    * Deletes a group after asserting ownership. Contained tasks are not deleted;
    * their `groupId` is set null by the FK rule.
+   *
+   * Order matters: capture the live member ids FIRST, delete the group (the FK
+   * `SET NULL` fires), THEN touch those members so any delta observes their
+   * post-delete `groupId = null` state (a group that carried a default rule /
+   * color just stopped applying it — the members' effective settings changed
+   * even though their own rows were not otherwise written). All in one
+   * transaction so no delta can see an intermediate state.
    */
+  @Transactional()
   async remove(userId: string, groupId: string): Promise<void> {
     const group = await this.findOwnedGroup(userId, groupId);
 
+    const memberIds = await this.taskDatabaseService.findIdsByGroup(group.id);
+
     await this.taskGroupDatabaseService.delete(group.id);
+
+    await this.taskDatabaseService.touchByIds(memberIds);
+
+    await this.syncStateService.bump(userId);
   }
 
   /**

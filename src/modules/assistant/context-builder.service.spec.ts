@@ -40,6 +40,8 @@ const oneOffOccurrence = (
   completedAt: null,
   isRecurring: false,
   isException: false,
+    parentTaskId: null,
+    isDetached: false,
   recurrence: null,
 });
 
@@ -57,6 +59,8 @@ const recurringOccurrence = (
   completedAt: null,
   isRecurring: true,
   isException: false,
+    parentTaskId: null,
+    isDetached: false,
   recurrence: {
     config: {
       frequency: RecurrenceFrequency.DAILY,

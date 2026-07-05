@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
@@ -51,10 +52,61 @@ import {
   RecurrenceSource,
 } from '@/modules/recurrence-rule/recurrence.types';
 import {
-  OccurrenceOverrideChanges,
+  type OccurrenceOverrideChanges,
   TaskOccurrenceExceptionService,
 } from '@/modules/task-occurrence-exception/task-occurrence-exception.service';
+import { SyncStateService } from '@/modules/sync/sync-state.service';
 import { parseWallClockInZone } from '@/utils/datetime';
+
+/**
+ * Overlap lag applied to the delta cursor. TypeORM stamps `updatedAt` /
+ * `deletedAt` when a statement executes inside a transaction, but the row only
+ * becomes visible at COMMIT. A row can therefore commit AFTER a delta read yet
+ * carry a timestamp earlier than that delta's `since`, making it invisible to
+ * every future delta. Widening each delta's predicates to `since − 5s` closes
+ * that in-flight-transaction race; the cost is that changes made within 5s of
+ * the previous delta are re-reported once, which is harmless — the client apply
+ * (upsert / delete / memo-invalidate) is idempotent. 5s comfortably exceeds any
+ * transaction span here.
+ */
+const DELTA_OVERLAP_LAG_MS = 5000;
+
+/**
+ * Stable error codes surfaced in `BadRequestException` payloads for
+ * override-related conflicts, so the client can react (resync + retry) rather
+ * than show a generic failure.
+ */
+export const OCCURRENCE_NOT_GENERATED = 'OCCURRENCE_NOT_GENERATED';
+export const OCCURRENCE_OVERRIDDEN = 'OCCURRENCE_OVERRIDDEN';
+
+/**
+ * Delete semantics for a task that is an override child:
+ * - `remove` (default): the occurrence is gone — soft-delete the child AND write
+ *   a skip on the parent slot, so a plain delete sticks for every caller.
+ * - `revert`: drop the override and restore the generated occurrence, carrying
+ *   back any completion the child had absorbed.
+ */
+export type TaskDeleteMode = 'remove' | 'revert';
+
+/**
+ * The patch a create-override request may carry. Every field is optional and
+ * tri-state (undefined = inherit the parent snapshot; null = clear where
+ * nullable), mirroring `UpdateTaskInput`. `startAt`/`endAt` are wall-clock ISO
+ * strings interpreted in the parent's timezone.
+ */
+export interface CreateOverrideInput {
+  title?: string;
+  notes?: string | null;
+  startAt?: string | null;
+  endAt?: string | null;
+  isAllDay?: boolean;
+  timezone?: string;
+  requiresCompletion?: boolean | null;
+  color?: string | null;
+  icon?: string | null;
+  groupId?: string | null;
+  reminders?: ReminderInput[];
+}
 
 /**
  * Fields the assistant may change on an existing event (the "all" / one-off
@@ -197,6 +249,7 @@ export class TaskService {
     private readonly recurrenceRuleService: RecurrenceRuleService,
     private readonly taskOccurrenceExceptionService: TaskOccurrenceExceptionService,
     private readonly notificationRuleService: NotificationRuleService,
+    private readonly syncStateService: SyncStateService,
   ) {}
 
   /**
@@ -272,6 +325,8 @@ export class TaskService {
         dto.reminders,
       );
     }
+
+    await this.syncStateService.bump(userId);
 
     return savedTask;
   }
@@ -407,10 +462,15 @@ export class TaskService {
 
     const includeTodos = opts.includeTodos ?? true;
 
+    // Widen the cursor by the overlap lag to catch rows that committed after the
+    // previous delta with an earlier timestamp (in-flight-transaction race).
+    // `serverTime` above is returned unchanged — only the read predicates lag.
+    const effectiveSince = new Date(since.getTime() - DELTA_OVERLAP_LAG_MS);
+
     const changedTasks = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        updatedAt: MoreThan(since),
+        updatedAt: MoreThan(effectiveSince),
         ...(includeTodos ? {} : { startAt: Not(IsNull()) }),
       },
       order: { updatedAt: 'ASC' },
@@ -418,11 +478,11 @@ export class TaskService {
 
     // `.withDeleted()` is required for soft-deleted rows to be visible at all;
     // we then keep only those whose tombstone (`deletedAt`) landed after the
-    // cursor so the client can drop exactly the newly-removed series.
+    // (lagged) cursor so the client can drop exactly the newly-removed series.
     const deletedRows = await this.taskDatabaseService.findAll({
       where: {
         calendarId,
-        deletedAt: MoreThan(since),
+        deletedAt: MoreThan(effectiveSince),
       },
       withDeleted: true,
     });
@@ -437,7 +497,7 @@ export class TaskService {
     const exceptions =
       await this.taskOccurrenceExceptionService.findChangedForTasks(
         seriesRows.map((task) => task.id),
-        since,
+        effectiveSince,
       );
 
     return { tasks: changedTasks, deleted, exceptions, serverTime };
@@ -484,8 +544,35 @@ export class TaskService {
       opts.groupId,
     );
 
+    // Suppress every generated occurrence whose (parentId, originalStart) slot is
+    // replaced by a live override child (the child itself surfaces via the
+    // one-off read). Keyed on the child's originalStartAt — NOT its (possibly
+    // moved) startAt — so a slot is hidden in its ORIGINAL month regardless of
+    // where the override moved the event to. Also covers the "former parent"
+    // case: a task whose rule was cleared becomes a one-off wrapped at its
+    // startAt, which this suppresses when a child pins its anchor slot.
+    const suppressedSlots = await this.buildOverrideSuppressionSet(
+      calendarIds,
+      from,
+      to,
+    );
+
     const merged = [...oneOffOccurrences, ...recurringOccurrences].filter(
-      (occurrence) => opts.includeCompleted || occurrence.completedAt === null,
+      (occurrence) => {
+        if (
+          occurrence.originalStart &&
+          suppressedSlots.has(
+            this.overrideSlotKey(
+              occurrence.task.id,
+              occurrence.originalStart,
+            ),
+          )
+        ) {
+          return false;
+        }
+
+        return opts.includeCompleted || occurrence.completedAt === null;
+      },
     );
 
     return merged.sort(
@@ -493,6 +580,52 @@ export class TaskService {
         this.startSortKey(left.occurrenceStart) -
         this.startSortKey(right.occurrenceStart),
     );
+  }
+
+  /**
+   * Builds the set of `${parentTaskId}#${originalStartMs}` slot keys covered by a
+   * LIVE override child whose original slot falls in `[from, to)`, across the
+   * given calendars. A generated occurrence (or a former-parent one-off) matching
+   * a key is suppressed so only the materialized child renders for that slot.
+   *
+   * Scoped by calendar (not group): a child moved out of its parent's group must
+   * still suppress the parent's slot in a group-scoped view. Keying on
+   * `originalStartAt` (not the child's own `startAt`) hides the slot in its
+   * original month even after the override moves the event elsewhere.
+   */
+  private async buildOverrideSuppressionSet(
+    calendarIds: string[],
+    from: Date,
+    to: Date,
+  ): Promise<Set<string>> {
+    const children = await this.taskDatabaseService.findAll({
+      where: {
+        calendarId: In(calendarIds),
+        parentTaskId: Not(IsNull()),
+        originalStartAt: And(MoreThanOrEqual(from), LessThan(to)),
+      },
+      select: { parentTaskId: true, originalStartAt: true },
+    });
+
+    const keys = new Set<string>();
+
+    for (const child of children) {
+      // The query already restricts to non-null parentTaskId / in-window
+      // originalStartAt; guard defensively against a partial row lacking either.
+      if (!child.parentTaskId || !child.originalStartAt) continue;
+
+      keys.add(this.overrideSlotKey(child.parentTaskId, child.originalStartAt));
+    }
+
+    return keys;
+  }
+
+  /**
+   * Stable slot key for override suppression: the parent task id plus the
+   * epoch-ms of the original (pre-override) occurrence instant.
+   */
+  private overrideSlotKey(parentTaskId: string, originalStart: Date): string {
+    return `${parentTaskId}#${originalStart.getTime()}`;
   }
 
   /**
@@ -537,14 +670,19 @@ export class TaskService {
    * Toggles the Task's completion state by id (series-master or one-off).
    * When `isCompleted` is true, stamps `completedAt = new Date()` only if
    * not already set (idempotent). When false, clears `completedAt`.
-   * Throws 404 when the task does not exist.
+   * Asserts calendar ownership (404 when missing, 403 when owned by another
+   * user) so callers no longer need a compensating pre-check. Bumps the user's
+   * sync revision only when the completion state actually changed.
+   *
+   * Transactional so the completion write and the revision bump commit as a unit.
    */
-  async setCompleted(id: string, isCompleted: boolean): Promise<Task> {
-    const task = await this.taskDatabaseService.findOneBy({ id });
-
-    if (!task) {
-      throw new EntityNotFoundException(Task);
-    }
+  @Transactional()
+  async setCompleted(
+    userId: string,
+    id: string,
+    isCompleted: boolean,
+  ): Promise<Task> {
+    const task = await this.findById(userId, id);
 
     if (isCompleted) {
       if (task.completedAt) {
@@ -553,7 +691,11 @@ export class TaskService {
 
       task.completedAt = new Date();
 
-      return this.taskDatabaseService.save(task);
+      const saved = await this.taskDatabaseService.save(task);
+
+      await this.syncStateService.bump(userId);
+
+      return saved;
     }
 
     if (task.completedAt === null) {
@@ -562,7 +704,11 @@ export class TaskService {
 
     task.completedAt = null;
 
-    return this.taskDatabaseService.save(task);
+    const saved = await this.taskDatabaseService.save(task);
+
+    await this.syncStateService.bump(userId);
+
+    return saved;
   }
 
   /**
@@ -579,6 +725,7 @@ export class TaskService {
    * expansion on every per-instance completion for no correctness benefit (a
    * completion on a phantom coordinate is harmless and never surfaces in a read).
    */
+  @Transactional()
   async setOccurrenceCompleted(
     userId: string,
     taskId: string,
@@ -588,9 +735,25 @@ export class TaskService {
     const task = await this.findById(userId, taskId);
 
     if (task.recurrenceConfig === null) {
-      const updated = await this.setCompleted(taskId, completed);
+      const updated = await this.setCompleted(userId, taskId, completed);
 
       return { completedAt: updated.completedAt, isOccurrenceScoped: false };
+    }
+
+    // If a live override child occupies this slot, the occurrence's truth lives
+    // on the child — redirect the completion there. A completion written to the
+    // suppressed slot's exception would never surface (and could zombie-complete
+    // a later regenerated slot). Old clients need no change: they still PATCH the
+    // parent, the server routes it to the child.
+    const child = await this.taskDatabaseService.findOneBy({
+      parentTaskId: taskId,
+      originalStartAt: originalStart,
+    });
+
+    if (child) {
+      const updated = await this.setCompleted(userId, child.id, completed);
+
+      return { completedAt: updated.completedAt, isOccurrenceScoped: true };
     }
 
     const exception = await this.taskOccurrenceExceptionService.upsertOverride(
@@ -598,6 +761,8 @@ export class TaskService {
       originalStart,
       { completedAt: completed ? new Date() : null },
     );
+
+    await this.syncStateService.bump(userId);
 
     return { completedAt: exception.completedAt, isOccurrenceScoped: true };
   }
@@ -615,6 +780,7 @@ export class TaskService {
    * completion-only change stays lenient (it is no-op-safe either way), per the
    * spec error table.
    */
+  @Transactional()
   async applyOccurrenceOverride(
     userId: string,
     taskId: string,
@@ -624,9 +790,27 @@ export class TaskService {
     const task = await this.findById(userId, taskId);
 
     if (task.recurrenceConfig === null) {
+      // The collapse delegates to update / remove / setCompleted, each of which
+      // bumps the revision itself — no bump here.
       await this.collapseOverrideToMaster(userId, taskId, changes);
 
       return;
+    }
+
+    // A live override child already owns this slot: the exception-based skip /
+    // override path would desync from the materialized child. The client should
+    // delete the child instead (which writes the skip). 409 so it can react.
+    const child = await this.taskDatabaseService.findOneBy({
+      parentTaskId: taskId,
+      originalStartAt: originalStart,
+    });
+
+    if (child) {
+      throw new ConflictException({
+        code: OCCURRENCE_OVERRIDDEN,
+        message:
+          'this occurrence has a materialized override; edit or delete it directly',
+      });
     }
 
     if (this.isOverrideMutation(changes)) {
@@ -637,6 +821,184 @@ export class TaskService {
       taskId,
       originalStart,
       changes,
+    );
+
+    await this.syncStateService.bump(userId);
+  }
+
+  /**
+   * Creates — or updates, when one already exists — a materialized OVERRIDE child
+   * for a single occurrence of the recurring parent `parentId` at `originalStart`.
+   * The child is a first-class one-off task linked by `(parentTaskId,
+   * originalStartAt)` that suppresses the generated occurrence and can then be
+   * edited / moved / completed independently while staying connected to the
+   * series.
+   *
+   * Locks the parent row FOR UPDATE so this check-then-insert serializes against
+   * a concurrent rule edit's detach sweep. On a first override it validates the
+   * slot is generated by the parent's EFFECTIVE rule, snapshots the parent,
+   * absorbs any pre-existing `TaskOccurrenceException` (span / title /
+   * completion), copies the parent's reminders, then applies the request patch.
+   * Touches the parent so the affected windows invalidate on clients. Returns the
+   * child task.
+   */
+  @Transactional()
+  async createOrUpdateOverride(
+    userId: string,
+    parentId: string,
+    originalStart: Date,
+    patch: CreateOverrideInput,
+  ): Promise<Task> {
+    // Lock the parent row alone — a FOR UPDATE spanning the nullable `group`
+    // outer join errors on Postgres, so load no relations here and resolve the
+    // effective config separately.
+    const parent = await this.taskDatabaseService.findOne({
+      where: { id: parentId },
+      lock: { mode: 'pessimistic_write' },
+    });
+
+    if (!parent) {
+      throw new EntityNotFoundException(Task);
+    }
+
+    await this.ensureCalendarOwnedByUser(parent.calendarId, userId);
+
+    if (parent.parentTaskId != null) {
+      throw new BadRequestException(
+        'cannot create an override of an override occurrence',
+      );
+    }
+
+    const existingChild = await this.taskDatabaseService.findOneBy({
+      parentTaskId: parentId,
+      originalStartAt: originalStart,
+    });
+
+    let child = existingChild;
+
+    if (!child) {
+      // First override for this slot: the coordinate must be a generated
+      // occurrence of the EFFECTIVE (own ?? group) rule.
+      const effectiveConfig = await this.resolveEffectiveConfigForTask(parent);
+
+      this.ensureGeneratedOccurrenceEffective(
+        parent,
+        effectiveConfig,
+        originalStart,
+      );
+
+      const durationMillis =
+        parent.startAt && parent.endAt
+          ? parent.endAt.getTime() - parent.startAt.getTime()
+          : null;
+      const snapshotEnd =
+        durationMillis !== null
+          ? new Date(originalStart.getTime() + durationMillis)
+          : null;
+
+      const created = this.taskDatabaseService.createInstance({
+        calendarId: parent.calendarId,
+        groupId: parent.groupId,
+        title: parent.title,
+        notes: parent.notes,
+        startAt: originalStart,
+        endAt: snapshotEnd,
+        isAllDay: parent.isAllDay,
+        timezone: parent.timezone,
+        requiresCompletion: parent.requiresCompletion,
+        color: parent.color,
+        icon: parent.icon,
+        notificationStrategyId: parent.notificationStrategyId,
+        completedAt: null,
+        recurrenceConfig: null,
+        parentTaskId: parent.id,
+        originalStartAt: originalStart,
+      });
+
+      child = await this.taskDatabaseService.save(created);
+
+      // Copy the parent's per-task reminders (start-relative offsets → verbatim).
+      const parentReminders = await this.notificationRuleService.listByTask(
+        parent.id,
+      );
+
+      if (parentReminders.length > 0) {
+        await this.notificationRuleService.createForTask(
+          child.id,
+          parentReminders.map((rule) => ({
+            offsetMinutes: rule.offsetMinutes,
+            channel: rule.channel,
+          })),
+        );
+      }
+    }
+
+    // Absorb any pre-existing exception (span / title / completion) onto the
+    // child and delete it — suppression is henceforth carried by the child. Runs
+    // on both the create and upsert branches (the latter catches a late exception
+    // written between an earlier create and this call).
+    await this.absorbExceptionInto(child, parent, originalStart);
+
+    // The parent is otherwise untouched by a child write; touch it so the
+    // affected months invalidate on clients (the suppressed slot changed).
+    await this.taskDatabaseService.touchUpdatedAt(parent.id);
+
+    // Apply the request patch via the normal update path (validation, tri-state,
+    // reminder replace, revision bump). A child never recurs, so no sweep fires.
+    const updated = await this.update(userId, child.id, patch);
+
+    await this.syncStateService.bump(userId);
+
+    return updated;
+  }
+
+  /**
+   * Folds any pre-existing `TaskOccurrenceException` at `(parent.id,
+   * originalStart)` onto the override child (its overridden span / title /
+   * completion), then hard-deletes the exception. No-op when none exists.
+   */
+  private async absorbExceptionInto(
+    child: Task,
+    parent: Task,
+    originalStart: Date,
+  ): Promise<void> {
+    const exception = await this.taskOccurrenceExceptionService.findOverride(
+      parent.id,
+      originalStart,
+    );
+
+    if (!exception) return;
+
+    const durationMillis =
+      parent.startAt && parent.endAt
+        ? parent.endAt.getTime() - parent.startAt.getTime()
+        : null;
+
+    if (exception.overrideStartAt) {
+      child.startAt = exception.overrideStartAt;
+      // overrideEndAt is independent of overrideStartAt: honor a prior length
+      // change, else re-derive from the parent duration off the new start.
+      child.endAt =
+        exception.overrideEndAt ??
+        (durationMillis !== null
+          ? new Date(exception.overrideStartAt.getTime() + durationMillis)
+          : child.endAt);
+    } else if (exception.overrideEndAt) {
+      child.endAt = exception.overrideEndAt;
+    }
+
+    if (exception.overrideTitle != null) {
+      child.title = exception.overrideTitle;
+    }
+
+    if (exception.completedAt != null) {
+      child.completedAt = exception.completedAt;
+    }
+
+    await this.taskDatabaseService.save(child);
+    await this.taskOccurrenceExceptionService.deleteForSlot(
+      parent.id,
+      originalStart,
     );
   }
 
@@ -659,6 +1021,25 @@ export class TaskService {
       taskId,
       originalStart,
     );
+  }
+
+  /**
+   * Returns the LIVE materialized override child for `(parentId, originalStart)`,
+   * or null when the occurrence has not been overridden. Asserts ownership of the
+   * parent first. Lets the assistant's delete-`this` path route to the child's
+   * own delete (skip + soft-delete) instead of the now-409 exception skip.
+   */
+  async findOverrideChild(
+    userId: string,
+    parentId: string,
+    originalStart: Date,
+  ): Promise<Task | null> {
+    await this.findById(userId, parentId);
+
+    return this.taskDatabaseService.findOneBy({
+      parentTaskId: parentId,
+      originalStartAt: originalStart,
+    });
   }
 
   /**
@@ -722,6 +1103,14 @@ export class TaskService {
   ): Promise<Task> {
     const task = await this.findById(userId, taskId);
 
+    // Invariant: an override child is a one-off and can never carry its own
+    // recurrence rule (it would then both expand AND suppress a slot).
+    if (task.parentTaskId != null && input.recurrence != null) {
+      throw new BadRequestException(
+        'an override occurrence cannot have its own recurrence rule',
+      );
+    }
+
     // The zone a bare move is interpreted in = the task's NEXT timezone. The
     // dispatcher forwards the user's timezone as `input.timezone` on updates, so
     // this is the user zone, and `task.timezone` is re-set to it below.
@@ -781,34 +1170,79 @@ export class TaskService {
       );
     }
 
+    // Capture the rule-INPUT diffs BEFORE mutating the row: recurrence, anchor
+    // start, timezone, all-day, and group each change which occurrences a series
+    // generates, so they drive the detach sweep + recurrenceUpdatedAt bump below.
+    const startChanged = nextStartAt?.getTime() !== task.startAt?.getTime();
+    const timezoneChanged = nextTimezone !== task.timezone;
+    const isAllDayChanged = nextIsAllDay !== task.isAllDay;
+    const groupChanged = nextGroupId !== task.groupId;
+
     const hasFieldChanges =
       nextTitle !== task.title ||
       nextNotes !== task.notes ||
-      nextGroupId !== task.groupId ||
-      nextIsAllDay !== task.isAllDay ||
-      nextTimezone !== task.timezone ||
+      groupChanged ||
+      isAllDayChanged ||
+      timezoneChanged ||
       nextRequiresCompletion !== task.requiresCompletion ||
       nextColor !== task.color ||
       nextIcon !== task.icon ||
-      nextStartAt?.getTime() !== task.startAt?.getTime() ||
+      startChanged ||
       nextEndAt?.getTime() !== task.endAt?.getTime();
 
-    if (!hasFieldChanges) {
-      return recurrenceChanged ? this.taskDatabaseService.save(task) : task;
+    const remindersChanged = input.reminders !== undefined;
+
+    // A child never recurs, so its own edits never rekey a series — only a real
+    // (parentless) series' rule inputs trigger the sweep + discriminator bump.
+    const ruleInputsChanged =
+      task.parentTaskId == null &&
+      (recurrenceChanged ||
+        startChanged ||
+        timezoneChanged ||
+        isAllDayChanged ||
+        groupChanged);
+
+    if (hasFieldChanges) {
+      task.title = nextTitle;
+      task.notes = nextNotes;
+      task.groupId = nextGroupId;
+      task.isAllDay = nextIsAllDay;
+      task.timezone = nextTimezone;
+      task.requiresCompletion = nextRequiresCompletion;
+      task.color = nextColor;
+      task.icon = nextIcon;
+      task.startAt = nextStartAt;
+      task.endAt = nextEndAt;
     }
 
-    task.title = nextTitle;
-    task.notes = nextNotes;
-    task.groupId = nextGroupId;
-    task.isAllDay = nextIsAllDay;
-    task.timezone = nextTimezone;
-    task.requiresCompletion = nextRequiresCompletion;
-    task.color = nextColor;
-    task.icon = nextIcon;
-    task.startAt = nextStartAt;
-    task.endAt = nextEndAt;
+    if (ruleInputsChanged) {
+      task.recurrenceUpdatedAt = new Date();
+    }
 
-    return this.taskDatabaseService.save(task);
+    const needsSave = hasFieldChanges || recurrenceChanged || ruleInputsChanged;
+
+    if (needsSave) {
+      await this.taskDatabaseService.save(task);
+      await this.syncStateService.bump(userId);
+    } else if (remindersChanged) {
+      // Reminder-only edit: no column/recurrence diff, but `replaceForTask`
+      // already rewrote the reminder rows. Touch `updatedAt` so the change
+      // surfaces in the delta endpoint's `Task.updatedAt > since` query (which
+      // it otherwise would not — reminders are a side relation), and bump.
+      await this.taskDatabaseService.touchUpdatedAt(task.id);
+      await this.syncStateService.bump(userId);
+    }
+
+    // Re-evaluate override children against the parent's NEW effective rule:
+    // detach those whose original slot is no longer generated, re-attach those a
+    // rule revert regenerates.
+    if (ruleInputsChanged) {
+      const effectiveConfig = await this.resolveEffectiveConfigForTask(task);
+
+      await this.sweepOverrideChildren(task, effectiveConfig);
+    }
+
+    return task;
   }
 
   /**
@@ -844,6 +1278,7 @@ export class TaskService {
    * - **Old exceptions `>= originalStart`** are left on the old task as inert rows
    *   (the now-ended old rule can never reach them); physical deletion is deferred.
    */
+  @Transactional()
   async splitSeries(
     userId: string,
     taskId: string,
@@ -887,6 +1322,7 @@ export class TaskService {
       endType: RecurrenceEndType.UNTIL_DATE,
       endDate: this.dayBefore(originalStart, task.timezone),
     };
+    task.recurrenceUpdatedAt = new Date();
     await this.taskDatabaseService.save(task);
 
     const durationMillis =
@@ -929,6 +1365,13 @@ export class TaskService {
 
     await this.copyExceptionsFrom(taskId, savedTask.id, originalStart);
 
+    // Re-evaluate the OLD series' override children against its now-truncated
+    // rule: those past the split boundary detach (kept + flagged). Reparenting
+    // them onto the new series is a deliberate follow-up (see specs).
+    await this.sweepOverrideChildren(task, task.recurrenceConfig);
+
+    await this.syncStateService.bump(userId);
+
     return savedTask;
   }
 
@@ -937,12 +1380,72 @@ export class TaskService {
    * via `.save()` (per the repo's save-only convention); subsequent finds
    * exclude it by default.
    */
-  async remove(userId: string, taskId: string): Promise<void> {
+  @Transactional()
+  async remove(
+    userId: string,
+    taskId: string,
+    mode: TaskDeleteMode = 'remove',
+  ): Promise<void> {
     const task = await this.findById(userId, taskId);
 
-    task.deletedAt = new Date();
+    // Override child: delete-means-delete by default (soft-delete + skip the
+    // parent slot), so every caller — REST, the assistant, old iOS builds — makes
+    // the occurrence stay gone. `revert` (explicit, the "Revert to series
+    // schedule" action) instead restores the generated occurrence, carrying back
+    // any completion the child had absorbed.
+    if (task.parentTaskId != null && task.originalStartAt != null) {
+      const parentTaskId = task.parentTaskId;
+      const originalStartAt = task.originalStartAt;
 
+      task.deletedAt = new Date();
+      await this.taskDatabaseService.save(task);
+
+      if (mode === 'revert') {
+        if (task.completedAt != null) {
+          // Re-materialize the pre-override exception so the regenerated slot
+          // keeps its completion history (the override absorbed + deleted the
+          // original exception when it was created). upsertOverride touches the
+          // parent, invalidating the slot's window on clients.
+          await this.taskOccurrenceExceptionService.upsertOverride(
+            parentTaskId,
+            originalStartAt,
+            { completedAt: task.completedAt },
+          );
+        } else {
+          await this.taskDatabaseService.touchUpdatedAt(parentTaskId);
+        }
+      } else {
+        // Write the skip UNCONDITIONALLY (even for a currently-detached child):
+        // inert now, effective if a later rule edit regenerates the slot,
+        // preserving the delete intent across detach/re-attach cycles.
+        await this.taskOccurrenceExceptionService.upsertOverride(
+          parentTaskId,
+          originalStartAt,
+          { isSkipped: true },
+        );
+      }
+
+      await this.syncStateService.bump(userId);
+
+      return;
+    }
+
+    // Parent / ordinary task: soft-delete it, then cascade soft-delete every live
+    // override child (each needs its OWN tombstone so the delta drops the child
+    // rows — a parent-only tombstone would strand them on other devices).
+    task.deletedAt = new Date();
     await this.taskDatabaseService.save(task);
+
+    const children = await this.taskDatabaseService.findAllBy({
+      parentTaskId: task.id,
+    });
+
+    for (const child of children) {
+      child.deletedAt = new Date();
+      await this.taskDatabaseService.save(child);
+    }
+
+    await this.syncStateService.bump(userId);
   }
 
   /**
@@ -961,6 +1464,7 @@ export class TaskService {
    * Loads the anchor via `findByIdWithRule`; recurrence is the inline
    * `recurrenceConfig` on the row. Validates ownership first.
    */
+  @Transactional()
   async endSeriesAt(
     userId: string,
     taskId: string,
@@ -989,7 +1493,14 @@ export class TaskService {
       endType: RecurrenceEndType.UNTIL_DATE,
       endDate: this.dayBefore(originalStart, task.timezone),
     };
+    task.recurrenceUpdatedAt = new Date();
     await this.taskDatabaseService.save(task);
+
+    // Override children past the new cut are no longer generated: detach them
+    // (kept + flagged rather than destroyed — a user edit survives a rule edit).
+    await this.sweepOverrideChildren(task, task.recurrenceConfig);
+
+    await this.syncStateService.bump(userId);
   }
 
   /**
@@ -1237,6 +1748,12 @@ export class TaskService {
    * owned by the recurring path and still surfaces through the todo read.
    */
   private inheritsGroupRecurrence(task: Task): boolean {
+    // An override child is a materialized one-off, never owned by the recurring
+    // path — it must stay in the one-off read (and never be filtered out of it),
+    // otherwise it vanishes from every window (the anchor scan excludes children
+    // too). This is the third of the three "children never recur" gates.
+    if (task.parentTaskId != null) return false;
+
     return task.startAt !== null && task.group?.recurrenceConfig != null;
   }
 
@@ -1326,6 +1843,9 @@ export class TaskService {
       where: {
         calendarId: In(calendarIds),
         recurrenceConfig: Not(IsNull()),
+        // Override children never expand as a series (they carry no own config
+        // anyway, but exclude explicitly as the second "children never recur" gate).
+        parentTaskId: IsNull(),
         ...(groupId ? { groupId } : {}),
       },
       relations: { group: true },
@@ -1338,6 +1858,10 @@ export class TaskService {
         calendarId: In(calendarIds),
         recurrenceConfig: IsNull(),
         groupId: Not(IsNull()),
+        // Exclude override children: a child inside a group that carries a rule
+        // would otherwise be expanded here (config null + groupId set) instead of
+        // surfacing as the materialized one-off it is.
+        parentTaskId: IsNull(),
         ...(groupId ? { groupId } : {}),
       },
       relations: { group: true },
@@ -1411,6 +1935,7 @@ export class TaskService {
       where: {
         calendarId,
         recurrenceConfig: Not(IsNull()),
+        parentTaskId: IsNull(),
         ...excludeScope,
       },
     });
@@ -1420,10 +1945,22 @@ export class TaskService {
         calendarId,
         recurrenceConfig: IsNull(),
         groupId: Not(IsNull()),
+        // Exclude override children (config null + groupId set) — a moved child
+        // is conflict-checked via the one-off timed clash query, not as a series.
+        parentTaskId: IsNull(),
         ...excludeScope,
       },
       relations: { group: true },
     });
+
+    // A slot overridden by a live child is vacated at its original time — the
+    // child's new time is checked as a one-off. Suppress those slots so the
+    // parent's expansion does not report a phantom conflict at the vacated slot.
+    const suppressedSlots = await this.buildOverrideSuppressionSet(
+      [calendarId],
+      startAt,
+      endAt,
+    );
 
     const clashing: Task[] = [];
 
@@ -1443,7 +1980,14 @@ export class TaskService {
       );
 
       const hasLiveOccurrence = occurrences.some(
-        (occurrence) => occurrence.completedAt === null,
+        (occurrence) =>
+          occurrence.completedAt === null &&
+          !(
+            occurrence.originalStart &&
+            suppressedSlots.has(
+              this.overrideSlotKey(anchor.id, occurrence.originalStart),
+            )
+          ),
       );
 
       if (hasLiveOccurrence) {
@@ -1485,6 +2029,11 @@ export class TaskService {
       isRecurring: false,
       isException: false,
       recurrence: null,
+      // A materialized override child surfaces through this one-off path; carry
+      // its provenance so the client can render/route it. Ordinary one-offs have
+      // parentTaskId null and are never detached.
+      parentTaskId: task.parentTaskId,
+      isDetached: task.detachedAt != null,
     };
   }
 
@@ -1540,7 +2089,7 @@ export class TaskService {
     });
 
     if (changes.completedAt !== undefined) {
-      await this.setCompleted(taskId, changes.completedAt !== null);
+      await this.setCompleted(userId, taskId, changes.completedAt !== null);
     }
   }
 
@@ -1567,33 +2116,117 @@ export class TaskService {
    * window is deliberately bounded to a single instant so expansion stays cheap.
    */
   private ensureGeneratedOccurrence(task: Task, originalStart: Date): void {
-    if (!task.recurrenceConfig) {
+    if (
+      !task.recurrenceConfig ||
+      !this.isGeneratedOccurrence(task, task.recurrenceConfig, originalStart)
+    ) {
       throw new BadRequestException(
         'originalStart is not an occurrence of this series',
       );
     }
+  }
 
-    // Membership is a property of the config, not of current overrides — expand
-    // with NO exceptions so a pre-existing skip/override on this coordinate does
-    // not hide the (otherwise valid) occurrence from the match.
+  /**
+   * Effective-config variant of {@link ensureGeneratedOccurrence} for the
+   * override endpoint: validates membership against the task's EFFECTIVE rule
+   * (own ?? group-inherited) rather than only its own config, so a
+   * group-recurring parent is not wrongly rejected. Throws
+   * `OCCURRENCE_NOT_GENERATED` when the coordinate is not a generated slot.
+   */
+  private ensureGeneratedOccurrenceEffective(
+    task: Task,
+    effectiveConfig: RecurrenceConfig | null,
+    originalStart: Date,
+  ): void {
+    if (
+      !effectiveConfig ||
+      !this.isGeneratedOccurrence(task, effectiveConfig, originalStart)
+    ) {
+      throw new BadRequestException({
+        code: OCCURRENCE_NOT_GENERATED,
+        message: 'originalStart is not an occurrence of this series',
+      });
+    }
+  }
+
+  /**
+   * Returns whether `config` generates an occurrence exactly at `originalStart`,
+   * by expanding a tight 1ms-bracketed window around the coordinate. Expands with
+   * NO exceptions so a pre-existing skip/override on the slot does not hide the
+   * otherwise-valid occurrence. The window is a single instant so expansion is
+   * cheap.
+   */
+  private isGeneratedOccurrence(
+    task: Task,
+    config: RecurrenceConfig,
+    originalStart: Date,
+  ): boolean {
     const originalStartMillis = originalStart.getTime();
     const occurrences = this.recurrenceRuleService.expandOccurrences(
       task,
-      task.recurrenceConfig,
+      config,
       [],
       new Date(originalStartMillis - 1),
       new Date(originalStartMillis + 1),
     );
 
-    const isGenerated = occurrences.some(
+    return occurrences.some(
       (occurrence) =>
         occurrence.originalStart?.getTime() === originalStartMillis,
     );
+  }
 
-    if (!isGenerated) {
-      throw new BadRequestException(
-        'originalStart is not an occurrence of this series',
-      );
+  /**
+   * Resolves a task's effective recurrence config, loading its group on demand
+   * when the task inherits (no own config, has a group). Returns null for an
+   * override child or a genuinely non-recurring task. Used by the detach sweep
+   * and the override endpoint, which start from a relation-less loaded task.
+   */
+  private async resolveEffectiveConfigForTask(
+    task: Task,
+  ): Promise<RecurrenceConfig | null> {
+    if (task.parentTaskId != null) return null;
+
+    if (task.recurrenceConfig) return task.recurrenceConfig;
+
+    if (!task.groupId) return null;
+
+    const group =
+      task.group ??
+      (await this.taskGroupDatabaseService.findOneBy({ id: task.groupId }));
+
+    return group?.recurrenceConfig ?? null;
+  }
+
+  /**
+   * Re-evaluates every live override child of `parent` against the parent's
+   * CURRENT effective rule and flips `detachedAt`: sets it when the child's
+   * original slot is no longer generated (rule / anchor edit rekeyed the series),
+   * clears it when a later revert regenerates the slot. Keep-as-detached — the
+   * child (a real user edit) is never destroyed by a rule tweak.
+   */
+  private async sweepOverrideChildren(
+    parent: Task,
+    effectiveConfig: RecurrenceConfig | null,
+  ): Promise<void> {
+    const children = await this.taskDatabaseService.findAllBy({
+      parentTaskId: parent.id,
+    });
+
+    for (const child of children) {
+      if (child.originalStartAt === null) continue;
+
+      const generated =
+        effectiveConfig != null &&
+        this.isGeneratedOccurrence(parent, effectiveConfig, child.originalStartAt);
+
+      if (!generated && child.detachedAt === null) {
+        child.detachedAt = new Date();
+        await this.taskDatabaseService.save(child);
+      } else if (generated && child.detachedAt !== null) {
+        child.detachedAt = null;
+        await this.taskDatabaseService.save(child);
+      }
     }
   }
 

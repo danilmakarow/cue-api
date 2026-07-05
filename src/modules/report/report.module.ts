@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 
+import { BriefSettingsController } from './brief-settings.controller';
+import { BriefSettingsService } from './brief-settings.service';
 import { DailyBriefCacheStore } from './daily-brief-cache.store';
 import { DailyBriefController } from './daily-brief.controller';
 import { DailyBriefService } from './daily-brief.service';
@@ -31,9 +33,14 @@ import { TaskModule } from '@/modules/task/task.module';
  */
 @Module({
   imports: [DatabaseModule, AiModule, TaskModule, ExternalVendorModule],
-  controllers: [ReportSettingsController, DailyBriefController],
+  controllers: [
+    ReportSettingsController,
+    DailyBriefController,
+    BriefSettingsController,
+  ],
   providers: [
     ReportSettingsService,
+    BriefSettingsService,
     ReportGeneratorService,
     ReportSenderService,
     DailyReportScheduler,

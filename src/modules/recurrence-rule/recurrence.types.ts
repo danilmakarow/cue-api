@@ -147,4 +147,16 @@ export interface Occurrence {
    * render the rule + source inline instead of treating it as a one-off.
    */
   recurrence: RecurrenceSummary | null;
+  /**
+   * Non-null when this occurrence is a materialized OVERRIDE of a recurring
+   * parent's slot — the id of that parent. Its `task` is then the CHILD row
+   * (`task.id` is the child id, `isRecurring` is false). Null for ordinary
+   * one-offs and generated recurring occurrences.
+   */
+  parentTaskId: string | null;
+  /**
+   * True when this occurrence is an override child whose parent rule no longer
+   * generates its original slot (detached). Always false for non-children.
+   */
+  isDetached: boolean;
 }

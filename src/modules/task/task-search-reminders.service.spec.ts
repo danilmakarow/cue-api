@@ -70,6 +70,7 @@ const buildService = (
     {} as never,
     {} as never,
     notificationRuleService as never,
+    { bump: jest.fn().mockResolvedValue(undefined) } as never,
   );
 
   return { service, taskDb, notificationRuleService, calendarDb };
@@ -195,6 +196,8 @@ describe('TaskService per-task reminders (S1)', () => {
     const taskDb = {
       findOneBy: jest.fn().mockResolvedValue(existing),
       save: jest.fn().mockImplementation((task: Task) => Promise.resolve(task)),
+      // A reminder-only edit touches updatedAt so it rides the delta endpoint.
+      touchUpdatedAt: jest.fn().mockResolvedValue(undefined),
     };
     const notificationRuleService = buildNotificationRuleService();
     const { service } = buildService(taskDb, notificationRuleService);
@@ -213,6 +216,8 @@ describe('TaskService per-task reminders (S1)', () => {
     const taskDb = {
       findOneBy: jest.fn().mockResolvedValue(existing),
       save: jest.fn().mockImplementation((task: Task) => Promise.resolve(task)),
+      // A reminder-only edit touches updatedAt so it rides the delta endpoint.
+      touchUpdatedAt: jest.fn().mockResolvedValue(undefined),
     };
     const notificationRuleService = buildNotificationRuleService();
     const { service } = buildService(taskDb, notificationRuleService);

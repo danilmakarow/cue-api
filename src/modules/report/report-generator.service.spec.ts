@@ -1,5 +1,9 @@
 import { ReportGeneratorService } from './report-generator.service';
 import {
+  BRIEF_USER_PREFERENCES_HEADING,
+  DAILY_REPORT_SYSTEM_PROMPT,
+} from './report.prompts';
+import {
   AiModelRole,
   AiStopReason,
   CompletionRequest,
@@ -45,9 +49,19 @@ const buildHarness = () => {
     ),
   };
 
-  const service = new ReportGeneratorService(ai as never, taskService as never);
+  const userBriefSettingsDatabaseService = {
+    findCustomPromptForUser: jest.fn(
+      async (_userId: string): Promise<string | null> => null,
+    ),
+  };
 
-  return { service, ai, taskService };
+  const service = new ReportGeneratorService(
+    ai as never,
+    taskService as never,
+    userBriefSettingsDatabaseService as never,
+  );
+
+  return { service, ai, taskService, userBriefSettingsDatabaseService };
 };
 
 /** A timed occurrence at the given UTC instant with the given title + tz. */
@@ -65,6 +79,8 @@ const occurrence = (
     completedAt: null,
     isRecurring: false,
     isException: false,
+    parentTaskId: null,
+    isDetached: false,
     recurrence: null,
   }) as Occurrence;
 
@@ -137,5 +153,60 @@ describe('ReportGeneratorService (Story 17 / ADR 0046)', () => {
     const report = await service.generateForUser(user(), '2026-06-21', 'cid-1');
 
     expect(report).toBeNull();
+  });
+
+  it('uses the base system prompt verbatim when the user has no custom prompt', async () => {
+    const { service, ai, userBriefSettingsDatabaseService } = buildHarness();
+
+    userBriefSettingsDatabaseService.findCustomPromptForUser.mockResolvedValueOnce(
+      null,
+    );
+
+    await service.generateForUser(user(), '2026-06-21', 'cid-1');
+
+    const [request] = ai.complete.mock.calls[0];
+    const systemPrompt = request.system![0].content;
+
+    expect(systemPrompt).toBe(DAILY_REPORT_SYSTEM_PROMPT);
+    expect(systemPrompt).not.toContain(BRIEF_USER_PREFERENCES_HEADING);
+  });
+
+  it('AUGMENTS (not replaces) the base prompt with the user custom prompt', async () => {
+    const { service, ai, userBriefSettingsDatabaseService } = buildHarness();
+
+    userBriefSettingsDatabaseService.findCustomPromptForUser.mockResolvedValueOnce(
+      'Keep it very brief and mention the weather.',
+    );
+
+    await service.generateForUser(user(), '2026-06-21', 'cid-1');
+
+    const [request] = ai.complete.mock.calls[0];
+    const systemPrompt = request.system![0].content;
+
+    // The base prompt is retained IN FULL — the custom text is appended, not
+    // substituted.
+    expect(systemPrompt).toContain(DAILY_REPORT_SYSTEM_PROMPT);
+    expect(systemPrompt).toContain(BRIEF_USER_PREFERENCES_HEADING);
+    expect(systemPrompt).toContain(
+      'Keep it very brief and mention the weather.',
+    );
+    // Base structure/safety rules still present after augmentation.
+    expect(systemPrompt).toContain('2–4 sentences');
+    expect(systemPrompt).toContain('do not invent items');
+  });
+
+  it('treats a whitespace-only custom prompt as unset (base prompt unchanged)', async () => {
+    const { service, ai, userBriefSettingsDatabaseService } = buildHarness();
+
+    userBriefSettingsDatabaseService.findCustomPromptForUser.mockResolvedValueOnce(
+      '   ',
+    );
+
+    await service.generateForUser(user(), '2026-06-21', 'cid-1');
+
+    const [request] = ai.complete.mock.calls[0];
+    const systemPrompt = request.system![0].content;
+
+    expect(systemPrompt).toBe(DAILY_REPORT_SYSTEM_PROMPT);
   });
 });

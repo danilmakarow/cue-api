@@ -27,6 +27,7 @@ import {
   TelegramLinkDatabaseService,
   UserDatabaseService,
   UserMemoryFactDatabaseService,
+  UserSyncStateDatabaseService,
 } from '@/modules/database/services';
 import { TaskModule } from '@/modules/task/task.module';
 import { TaskGroupModule } from '@/modules/task-group/task-group.module';
@@ -53,6 +54,7 @@ const DATABASE_SERVICE_TOKENS: Type<unknown>[] = [
   ConversationSummaryDatabaseService,
   UserMemoryFactDatabaseService,
   PersonaPromptDatabaseService,
+  UserSyncStateDatabaseService,
 ];
 
 /**

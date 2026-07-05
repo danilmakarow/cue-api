@@ -470,6 +470,10 @@ export class RecurrenceRuleService {
       isRecurring: true,
       isException: exception !== undefined,
       recurrence: summary,
+      // A generated recurring occurrence is never itself an override child; the
+      // anchor is a series master (parentTaskId null, not detached).
+      parentTaskId: anchor.parentTaskId,
+      isDetached: anchor.detachedAt != null,
     };
   }
 

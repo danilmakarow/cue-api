@@ -5,6 +5,7 @@ import { TaskService } from './task.service';
 import { DatabaseModule } from '../database/database.module';
 import { NotificationRuleModule } from '../notification-rule/notification-rule.module';
 import { RecurrenceRuleModule } from '../recurrence-rule/recurrence-rule.module';
+import { SyncModule } from '../sync/sync.module';
 import { TaskOccurrenceExceptionModule } from '../task-occurrence-exception/task-occurrence-exception.module';
 
 /**
@@ -20,6 +21,7 @@ import { TaskOccurrenceExceptionModule } from '../task-occurrence-exception/task
     RecurrenceRuleModule,
     TaskOccurrenceExceptionModule,
     NotificationRuleModule,
+    SyncModule,
   ],
   controllers: [TaskController],
   providers: [TaskService],

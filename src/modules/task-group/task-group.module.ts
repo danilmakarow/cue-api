@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { TaskGroupController } from './task-group.controller';
 import { TaskGroupService } from './task-group.service';
 import { DatabaseModule } from '../database/database.module';
+import { SyncModule } from '../sync/sync.module';
 
 /**
  * TaskGroup module managing user-owned task buckets. Recurrence is stored inline
@@ -10,7 +11,7 @@ import { DatabaseModule } from '../database/database.module';
  * `RecurrenceRuleService.toConfig` mapper, so no RecurrenceRuleModule import.
  */
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, SyncModule],
   controllers: [TaskGroupController],
   providers: [TaskGroupService],
   exports: [TaskGroupService],

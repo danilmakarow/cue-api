@@ -32,9 +32,29 @@ export const resolveEffectiveSettings = (task: Task): EffectiveSettings => {
   const group = task.group ?? null;
 
   return {
-    recurrence: task.recurrenceConfig ?? group?.recurrenceConfig ?? null,
+    recurrence: resolveEffectiveRecurrence(task),
     requiresCompletion:
       task.requiresCompletion ?? group?.requiresCompletion ?? false,
     color: task.color ?? group?.color ?? null,
   };
+};
+
+/**
+ * Resolves a task's effective recurrence config with one override-aware rule on
+ * top of task-wins inheritance: an OVERRIDE CHILD (`parentTaskId` set) NEVER
+ * recurs — it is a materialized one-off replacing a single generated slot, so it
+ * must not expand (via its own config, which is disallowed anyway, nor via group
+ * inheritance). Otherwise the task's own inline config wins, then the group
+ * default, then null.
+ *
+ * This is the single gate every recurrence read passes through (the anchor scan
+ * and `inheritsGroupRecurrence` enforce the same "children never recur"
+ * invariant) so a child can never be double-counted or expanded as a series.
+ */
+export const resolveEffectiveRecurrence = (
+  task: Task,
+): RecurrenceConfig | null => {
+  if (task.parentTaskId != null) return null;
+
+  return task.recurrenceConfig ?? task.group?.recurrenceConfig ?? null;
 };

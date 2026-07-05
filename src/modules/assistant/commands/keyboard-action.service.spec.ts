@@ -37,6 +37,8 @@ const timedOccurrence = (title: string, start: Date): Occurrence => ({
   completedAt: null,
   isRecurring: false,
   isException: false,
+    parentTaskId: null,
+    isDetached: false,
   recurrence: null,
 });
 

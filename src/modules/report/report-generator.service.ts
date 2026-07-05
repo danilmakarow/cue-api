@@ -1,11 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DateTime } from 'luxon';
 
-import { DAILY_REPORT_SYSTEM_PROMPT } from './report.prompts';
+import { buildDailyReportSystemPrompt } from './report.prompts';
 import { AiConnector } from '@/modules/ai/ai-connector.abstract';
 import { ACTIVE_AI_CONNECTOR } from '@/modules/ai/ai.module';
 import { AiModelRole, PromptRole } from '@/modules/ai/ai.types';
 import { User } from '@/modules/database/entities';
+import { UserBriefSettingsDatabaseService } from '@/modules/database/services';
 import { Occurrence } from '@/modules/recurrence-rule/recurrence.types';
 import { TaskService } from '@/modules/task/task.service';
 
@@ -26,6 +27,7 @@ export class ReportGeneratorService {
   constructor(
     @Inject(ACTIVE_AI_CONNECTOR) private readonly ai: AiConnector,
     private readonly taskService: TaskService,
+    private readonly userBriefSettingsDatabaseService: UserBriefSettingsDatabaseService,
   ) {}
 
   /**
@@ -88,9 +90,18 @@ export class ReportGeneratorService {
 
     const displayName = user.displayName ?? 'there';
 
+    // Personalize the base prompt with the user's own preferences when set — the
+    // custom prompt AUGMENTS the base structure/safety/format rules, never
+    // replaces them.
+    const customPrompt =
+      await this.userBriefSettingsDatabaseService.findCustomPromptForUser(
+        user.id,
+      );
+    const systemPrompt = buildDailyReportSystemPrompt(customPrompt);
+
     const result = await this.ai.complete({
       modelRole: AiModelRole.MAIN,
-      system: [{ role: PromptRole.USER, content: DAILY_REPORT_SYSTEM_PROMPT }],
+      system: [{ role: PromptRole.USER, content: systemPrompt }],
       messages: [
         {
           role: PromptRole.USER,

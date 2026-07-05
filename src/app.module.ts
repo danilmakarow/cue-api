@@ -18,6 +18,7 @@ import { RecurrenceRuleModule } from './modules/recurrence-rule/recurrence-rule.
 import { RedisModule } from './modules/redis/redis.module';
 import { ReportModule } from './modules/report/report.module';
 import { ScheduledNotificationModule } from './modules/scheduled-notification/scheduled-notification.module';
+import { SyncModule } from './modules/sync/sync.module';
 import { TaskModule } from './modules/task/task.module';
 import { TaskGroupModule } from './modules/task-group/task-group.module';
 import { TaskOccurrenceExceptionModule } from './modules/task-occurrence-exception/task-occurrence-exception.module';
@@ -75,6 +76,7 @@ import { getDatabaseConfig, getDataSource } from '@/config/typeorm.config';
     NotificationStrategyModule,
     NotificationRuleModule,
     ScheduledNotificationModule,
+    SyncModule,
     AssistantModule,
     ReportModule,
     PersonaModule,

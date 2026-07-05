@@ -1,0 +1,1933 @@
+[
+  {
+    "name": "allday-duration-ny-daily-anchor-on-spring-forward",
+    "zone": "America/New_York",
+    "start": "2026-03-08T00:00",
+    "end": "2026-03-09T00:00",
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-07T00:00",
+      "to": "2026-03-12T00:00"
+    },
+    "rationale": "luxon: the all-day anchor's own midnight-to-midnight span is 2026-03-08T00:00-05:00 -> 2026-03-09T00:00-04:00, i.e. a FIXED 23h duration because it straddles the March-8 spring-forward gap (02:00->03:00). Every downstream occurrence adds that fixed 23h to its own preserved-midnight start, so occ0 (start still on the transition day) ends exactly at 2026-03-09T00:00 (midnight) while occ1+ end at 23:00 the SAME day (2026-03-10T00:00 start -> 2026-03-10T23:00 end). This proves both engines derive occurrenceEnd as occurrenceStart + fixed anchor-millis (NOT a recomputed calendar +1 day), the exact all-day-across-DST behavior a naive port breaks. Verified by replicating the engine step loop in luxon."
+  },
+  {
+    "name": "allday-duration-ny-daily-anchor-on-fall-back",
+    "zone": "America/New_York",
+    "start": "2026-11-01T00:00",
+    "end": "2026-11-02T00:00",
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-31T00:00",
+      "to": "2026-11-05T00:00"
+    },
+    "rationale": "luxon: the all-day anchor midnight-to-midnight span on the Nov-1 fall-back day (02:00->01:00) is 2026-11-01T00:00-04:00 -> 2026-11-02T00:00-05:00, a FIXED 25h duration. occ0 ends exactly at midnight 2026-11-02; occ1 (2026-11-02T00:00-05:00 start) + fixed 25h lands at 2026-11-03T01:00-05:00 (01:00 next day), and every later occurrence likewise ends at 01:00. Mirror image of the spring-forward 23h case: confirms fixed-millis all-day end arithmetic on the fall-back side, which a calendar-recompute port would render as a clean midnight and diverge. Verified in luxon by replicating the daily step loop."
+  },
+  {
+    "name": "allday-duration-berlin-daily-anchor-on-fall-back",
+    "zone": "Europe/Berlin",
+    "start": "2026-10-25T00:00",
+    "end": "2026-10-26T00:00",
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-24T00:00",
+      "to": "2026-10-29T00:00"
+    },
+    "rationale": "luxon: Berlin fall-back is 2026-10-25 03:00->02:00. The all-day anchor 2026-10-25T00:00+02:00 -> 2026-10-26T00:00+01:00 is a FIXED 25h duration. occ0 ends at clean midnight 2026-10-26; occ1 (2026-10-26T00:00+01:00) + 25h = 2026-10-27T01:00+01:00 (01:00 next day), same for occ2/occ3. Distinct zone (EU one-hour-earlier transition than US) exercising the same 25h fall-back all-day arithmetic, so a zone-specific offset-table bug surfaces here but not in the NY case. Verified by replicating the step loop in luxon."
+  },
+  {
+    "name": "allday-duration-sydney-weekly-midnight-crossing-spring-forward",
+    "zone": "Australia/Sydney",
+    "start": "2026-09-27T00:00",
+    "end": "2026-09-28T00:00",
+    "isAllDay": true,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-09-27T00:00",
+      "to": "2026-10-19T00:00"
+    },
+    "rationale": "luxon: Sydney spring-forward is 2026-10-04 02:00->03:00. A WEEKLY all-day midnight series (Sunday anchor, no byWeekday, +7-day cursor step) gives occ0 2026-09-27T00:00+10:00 (end midnight, clean 24h), occ1 2026-10-04T00:00+10:00 whose FIXED 24h end lands at 2026-10-05T01:00+11:00 (01:00, because the 02:00 gap falls INSIDE the occurrence's own span even though its midnight start is an hour before the gap), then occ2 2026-10-11T00:00+11:00 back to a clean midnight end. Exercises weekly +7-day wall-preserving stepping AND fixed-millis end arithmetic where the gap is interior to a single all-day occurrence — southern-hemisphere (spring in October) so a hemisphere-hardcoded DST-sign bug diverges. Verified in luxon."
+  },
+  {
+    "name": "allday-duration-sydney-monthly-bymonthday-across-both-transitions",
+    "zone": "Australia/Sydney",
+    "start": "2026-01-04T00:00",
+    "end": "2026-01-05T00:00",
+    "isAllDay": true,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        4
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-11-01T00:00"
+    },
+    "rationale": "luxon: MONTHLY byMonthDay[4] all-day midnight, so each occurrence is rebuilt via monthStart.set({day:4}).set({hour:0...}) — the reconstruction path, not plain cursor stepping. Day 4 hits BOTH Sydney transitions in one series: 2026-10-04 is the spring-forward day (midnight start +10:00, fixed 24h end at 2026-10-05T01:00+11:00) while 2026-04-04 is the day BEFORE the Apr-5 fall-back (clean midnight-to-midnight +11:00). Confirms the setting(day:)+settingTime(0,0,0,0) midnight reconstruction agrees across both a spring and a non-transition month, and that the Oct end shift matches the weekly case through a different (monthly) code path. Verified in luxon by rebuilding each month's candidate."
+  },
+  {
+    "name": "multiday-duration-sydney-50h-daily-crossing-fall-back",
+    "zone": "Australia/Sydney",
+    "start": "2026-04-03T10:00",
+    "end": "2026-04-05T12:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-03T00:00",
+      "to": "2026-04-09T00:00"
+    },
+    "rationale": "luxon: anchor 2026-04-03T10:00+11:00 -> 2026-04-05T12:00+10:00 is a 50-WALL-hour span that crosses the 2026-04-05 fall-back (03:00->02:00), giving a FIXED 51-REAL-hour duration (51*3600000 ms). Stepping DAILY: occ0/occ1 whose START is still on the DST side (+11:00) end at wall-hour 12; occ2/occ3/occ4 whose START is on the standard side (+10:00) end at wall-hour 13 — the identical fixed 51h millis lands on a different wall-clock end depending on which offset the START carries. A pure integer-arithmetic edge (multi-day fixed-millis end) that the corpus only touches with a single 32h weekly case; this widens to a 50/51h daily span in the southern hemisphere. Verified in luxon by replicating the daily step + fixed-millis end."
+  },
+  {
+    "name": "multiday-duration-ny-26h-anchor-crossing-spring-forward",
+    "zone": "America/New_York",
+    "start": "2026-03-07T22:00",
+    "end": "2026-03-09T00:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-07T00:00",
+      "to": "2026-03-12T00:00"
+    },
+    "rationale": "luxon: anchor 2026-03-07T22:00-05:00 -> 2026-03-09T00:00-04:00 is a 26-WALL-hour span across the 2026-03-08 spring-forward, i.e. a FIXED 25-REAL-hour duration. Stepping DAILY: occ0 (start 22:00 EST, -05:00) + 25h lands at 2026-03-09T00:00 (clean midnight); occ1 (start 22:00 EDT, -04:00, after the gap) + the SAME 25h millis lands at 2026-03-09T23:00 (wall-hour 23), and occ2/occ3 likewise end at 23:00. The fixed-millis multi-day end shifts by the offset the START carries — the spring-forward mirror of the Sydney 50h fall-back case, on the US axis with a 26h span. Verified in luxon."
+  },
+  {
+    "name": "multiday-duration-berlin-26h-override-crossing-fall-back",
+    "zone": "Europe/Berlin",
+    "start": "2026-10-24T12:00",
+    "end": "2026-10-24T13:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [
+      {
+        "originalStart": "2026-10-24T12:00",
+        "isSkipped": false,
+        "overrideStart": "2026-10-24T23:00",
+        "overrideEnd": "2026-10-26T01:00",
+        "overrideTitle": null,
+        "completedAt": null
+      }
+    ],
+    "window": {
+      "from": "2026-10-24T00:00",
+      "to": "2026-10-28T00:00"
+    },
+    "rationale": "luxon: a 1h DAILY series (12:00-13:00) with an exception that keys the 2026-10-24T12:00 slot (generated originalStart -> 2026-10-24T10:00Z) and moves it into a MULTI-DAY span: overrideStart 2026-10-24T23:00+02:00 -> overrideEnd 2026-10-26T01:00+01:00. That 26-WALL-hour override span straddles the 2026-10-25 Berlin fall-back (03:00->02:00), so it is 27 REAL hours; overrideEnd resolves to +01:00 (standard side) while overrideStart is +02:00 (DST side). This exercises exception overrideStart/overrideEnd landing across a transition (both are pre-resolved to UTC by the generator, so parity depends on the exception being keyed to the exact originalStart millis and the overridden instants surviving to occurrenceStart/occurrenceEnd unchanged) plus originalStart-key matching on a normal slot. Verified in luxon: overrideStart=2026-10-24T21:00Z, overrideEnd=2026-10-26T00:00Z, 27 real hours."
+  },
+  {
+    "name": "bounds-cap-santiago-daily-1000th-dst-drift",
+    "zone": "America/Santiago",
+    "start": "2025-05-01T08:00",
+    "end": "2025-05-01T08:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2025-05-01T00:00",
+      "to": "2029-01-01T00:00"
+    },
+    "rationale": "1000-occurrence cap where the 1000th instant's UTC depends on DST drift. Anchor 2025-05-01 08:00 is Chilean WINTER (offset -04, anchor UTC 2025-05-01T12:00Z). luxon plus({days}) preserves wall 08:00 across 6 Santiago DST transitions; the 1000th daily occurrence lands 2028-01-25 (SUMMER, offset -03) at UTC 2028-01-25T11:00Z — one hour EARLIER in UTC than the anchor because the offset flipped. Full engine sim confirms exactly count=1000 (steps=1000, no backstop), first=2025-05-01T12:00:00.000Z, last(1000th)=2028-01-25T11:00:00.000Z, and the window (to 2029) comfortably contains all 1000 so the cap — not the window — terminates. The existing corpus cap-truncation-1000 runs in UTC (no DST), so this is the first cap whose boundary instant's date+offset is DST-sensitive; any Foundation/luxon disagreement on Chile's 2025-2028 transition dates would surface exactly at the 1000th."
+  },
+  {
+    "name": "bounds-backstop-troll-farpast-1748-empty",
+    "zone": "Antarctica/Troll",
+    "start": "1748-06-01T09:00",
+    "end": "1748-06-01T09:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2027-01-01T00:00",
+      "to": "2027-02-01T00:00"
+    },
+    "rationale": "64000-step generation backstop in a DST zone -> EMPTY. Anchor 1748-06-01 with a 2027 window: 64000 daily period-steps (~175 years) advance the cursor only to ~1923-08-24, never entering the 2027 window, so the loop exits via MAX_GENERATION_STEPS (=1000*64) with zero occurrences. Engine sim confirms steps=64000, backstop=true, emitted=0. Troll is chosen over other far-past anchors because its 1748 offset is EXACTLY +00 (uninhabited -> IANA -00 LMT, no fractional-second LMT), so the anchor UTC (1748-06-01T09:00:00Z) is tzdata-stable and cannot introduce a spurious sub-minute divergence; yet Troll IS a DST zone (2h transitions), so the empty result rides 'alongside' DST exactly like the class demands. The existing generation-backstop-farpast-anchor uses UTC (1800 anchor); this adds a DST zone AND pushes the anchor further past (1748) so the reach clearly falls short of a near-future window."
+  },
+  {
+    "name": "oddzone-casablanca-ramadan-daily-springforward-gap",
+    "zone": "Africa/Casablanca",
+    "start": "2027-03-13T02:30",
+    "end": "2027-03-13T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2027-03-12T00:00",
+      "to": "2027-03-17T00:00"
+    },
+    "rationale": "Morocco's non-standard Ramadan-linked +00 -> +01 spring-forward. Under tzdata 2025b, Casablanca returns to +01 on 2027-03-14 with the transition at wall-clock 03:00 (02:00->03:00), so wall 02:00-02:59 is the GAP on that day. The DAILY anchor 02:30 is BEFORE the gap on 03-13 (offset +00, UTC 2027-03-13T02:30:00Z); on 03-14 the same wall 02:30 lands INSIDE the gap and luxon rolls it forward to 03:30 (+01, UTC 2027-03-14T02:30:00Z), then the whole series drift-sticks at wall 03:30. Verified instants: 03-13T02:30Z, 03-14T02:30Z, 03-15T02:30Z, 03-16T02:30Z (count=4). This stresses (a) an UNUSUAL transition wall-clock of 03:00 rather than Europe's 01:00-UTC rule, and (b) gap-forward resolution in a zone whose transition dates are tzdata-projected from the Islamic calendar. Foundation Calendar.date(from:) must resolve the in-gap 02:30->03:30 identically and step cumulatively; any snap-to-transition-instant behavior diverges."
+  },
+  {
+    "name": "oddzone-troll-daily-2h-springforward-gap",
+    "zone": "Antarctica/Troll",
+    "start": "2027-03-27T01:30",
+    "end": "2027-03-27T02:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2027-03-26T00:00",
+      "to": "2027-03-31T00:00"
+    },
+    "rationale": "TWO-HOUR spring-forward gap (rare; most zones jump 1h). Antarctica/Troll goes +00 -> +02 on 2027-03-28, skipping wall-clock 01:00-02:59 entirely. The DAILY anchor 01:30 is valid on 03-27 (offset +00, UTC 2027-03-27T01:30:00Z); on 03-28 the same wall 01:30 sits in the MIDDLE of the 2-hour gap and luxon rolls it forward by the FULL 2 hours to 03:30 (+02, UTC 2027-03-28T01:30:00Z). Verified series: 03-27T01:30Z, 03-28T01:30Z, 03-29T01:30Z, 03-30T01:30Z. This is the sharpest test that gap resolution advances by the actual transition size, not a hardcoded 1 hour: if Foundation's Calendar rolled a gap time forward by only 1h it would land at 02:30 (still inside the gap / a different instant) and diverge from luxon's 2h roll."
+  },
+  {
+    "name": "oddzone-troll-daily-2h-fallback-ambiguous",
+    "zone": "Antarctica/Troll",
+    "start": "2027-10-30T01:00",
+    "end": "2027-10-30T01:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2027-10-29T00:00",
+      "to": "2027-11-03T00:00"
+    },
+    "rationale": "TWO-HOUR fall-back ambiguous window (the inverse of the 2h gap). Troll goes +02 -> +00 on 2027-10-31, so wall-clock 00:00-01:59 occurs TWICE that day. The DAILY anchor 01:00 on 10-30 is unambiguous (+02, UTC 2027-10-29T23:00:00Z). On 10-31 the same wall 01:00 is AMBIGUOUS across a 2-hour repeated span; luxon resolves it to the EARLIER offset (+02), giving UTC 2027-10-30T23:00:00Z — note the UTC instant lands on the calendar day BEFORE the wall date because of the +02 offset. After the transition, 11-01 and 11-02 at 01:00 are +00 (UTC ==wall). Verified series: 2027-10-29T23:00Z, 2027-10-30T23:00Z, 2027-11-01T01:00Z, 2027-11-02T01:00Z. Both engines must resolve the 2h ambiguous hour to the earlier offset (luxon default == Calendar default); a later-offset choice would shift the 10-31 instant by 2h."
+  },
+  {
+    "name": "oddzone-kiritimati-plus14-weekly-mon-sun-daybound",
+    "zone": "Pacific/Kiritimati",
+    "start": "2026-06-17T23:30",
+    "end": "2026-06-17T23:45",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 4
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-06-15T00:00",
+      "to": "2026-07-15T00:00"
+    },
+    "rationale": "Most extreme offset on Earth: Pacific/Kiritimati is +14:00 (no DST), so wall 23:30 maps to a UTC instant on the PREVIOUS calendar day (seed 2026-06-17 23:30 -> UTC 2026-06-17T09:30Z). WEEKLY with byWeekday=[Mon(0),Sun(6)] forces the Monday-anchored startOf('week') grid to be computed at +14, and the near-midnight wall time makes any date-vs-instant confusion visible. In the seed's own week, Monday (06-15) is BEFORE the Wed seed and is dropped by the <seed filter, so the first period yields only Sunday 06-21; the within-period millis sort then interleaves subsequent weeks as Mon-before-Sun. COUNT=4 verified to produce exactly: 2026-06-21T09:30Z (Sun), 2026-06-22T09:30Z (Mon), 2026-06-28T09:30Z (Sun), 2026-06-29T09:30Z (Mon). This exercises Foundation's startOfWeekMonday()/settingTime reconstruction (calendar.date(from: y/m/d components)) at +14 against luxon startOf('week')/set — if either resolves 'local midnight' to a different UTC instant, the whole week grid shifts a day."
+  },
+  {
+    "name": "precision-subminute-kolkata-halfopen-window-drop",
+    "zone": "Asia/Kolkata",
+    "start": "2026-06-01T09:00:00",
+    "end": "2026-06-01T09:00:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-06-01T09:00:30",
+      "to": "2026-06-04T00:00"
+    },
+    "rationale": "Sub-minute duration meeting the half-open window's exclusive lower boundary at EXACT equality, in a half-hour-offset (+05:30) no-DST zone. Anchor duration is 30s (09:00:00 -> 09:00:30 = 30000ms). The window's 'from' is set to EXACTLY the first occurrence's end, 09:00:30 (UTC 2026-06-01T03:30:30Z). The engine drops an occurrence when occurrenceEndMillis <= windowFromMillis; occurrence-0 ends at precisely windowFrom, so the exclusive <= drops it, while occurrences 1 and 2 survive. Engine sim confirms count=2: 2026-06-02T03:30:00Z and 2026-06-03T03:30:00Z. This is the only case exercising a genuine SUB-MINUTE duration (existing occurrence-ending-exactly-at-from-excluded uses a 1-hour duration), so it tests three precision seams at once: (a) 30000ms duration arithmetic, (b) the epochMillis rounding (x1000).rounded() vs luxon toMillis() agreeing on the sub-minute end, and (c) the exclusive-boundary drop firing on exact equality rather than off-by-one."
+  },
+  {
+    "name": "count-window-dst-ny-spring-drift-into-window",
+    "zone": "America/New_York",
+    "start": "2026-03-06T02:30",
+    "end": "2026-03-06T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 8
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-08T03:00",
+      "to": "2026-03-14T00:00"
+    },
+    "rationale": "NY spring-forward 2026-03-08 (02:00->03:00). DAILY 02:30 series: the cumulative luxon .plus({days:1}) step lands 02:30 in the gap on Mar 8 and rolls it forward to 03:30-04:00 (07:30Z), then the whole series carries 03:30 from that day on. COUNT=8 counts from the origin Mar 6, but window.from is wall-clock Mar 8 03:00 (=07:00Z) which sits AFTER the pre-gap 02:30 would have been yet BEFORE the drifted 03:30, so the drift is what lets Mar 8 fall inside the window. luxon oracle: 6 in-window occurrences all at 07:30Z off -240, first 2026-03-08T07:30Z, count-return. Divergence risk: if Foundation's date(byAdding:.day) resolves the gap differently or does not carry the drift forward, Mar 8's membership and every later instant shift by an hour."
+  },
+  {
+    "name": "count-window-dst-sydney-weekly-mon-sun-fallback",
+    "zone": "Australia/Sydney",
+    "start": "2026-03-30T02:30",
+    "end": "2026-03-30T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 6
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-04T00:00",
+      "to": "2026-04-20T00:00"
+    },
+    "rationale": "Sydney fall-back 2026-04-05 (03:00 +11 -> 02:00 +10); 02:30 occurs twice that Sunday. WEEKLY byWeekday=[Mon,Sun], anchor Mon Mar 30 02:30 (+11). weeklyCandidates derives the Sunday via weekStart.startOf('week').plus({days:6}).set({hour:2,minute:30}); because the week-0 cursor is still +11 the DERIVED Sunday Apr 5 02:30 resolves to the EARLIER offset +11 = 2026-04-04T15:30Z (NOT +10/16:30Z that a bare fromISO would give). All later occurrences are +10. COUNT=6 counts Mon Mar 30 (dropped by window) so 5 land in-window. luxon oracle confirmed: Apr5 occ = 2026-04-04T15:30Z off 660, count-return. Highest divergence risk: Foundation's Calendar.date(from:) builds the Sunday from bare DateComponents with no source offset and may pick the LATER (+10, 16:30Z) resolution of the repeated hour, diverging by exactly one hour on the fall-back Sunday."
+  },
+  {
+    "name": "count-window-dst-ny-daily-0130-fallback-ambiguous",
+    "zone": "America/New_York",
+    "start": "2026-10-30T01:30",
+    "end": "2026-10-30T02:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 6
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-31T00:00",
+      "to": "2026-11-10T00:00"
+    },
+    "rationale": "NY fall-back 2026-11-01 (02:00 EDT -> 01:00 EST); 01:30 occurs twice. DAILY 01:30 series via cumulative .plus({days:1}): on Nov 1 the ambiguous 01:30 resolves to the EARLIER offset -04:00 (05:30Z), then Nov 2 onward is 01:30 -05:00 (06:30Z). The UTC gap across the transition is 25h (day2->day3) vs 24h elsewhere - the ambiguous-hour signature. COUNT=6 counts the origin Oct 30 (window drops it, ends 06:00Z < window.from 04:00Z) so 5 land in-window. luxon oracle: gap sequence 24,25,24,24 h; Nov1 occ off -240 then flip to -300, count-return. Divergence risk: if Foundation resolves the repeated 01:30 on Nov 1 to the LATER offset (-05:00, 06:30Z) the Nov 1 instant and the 25h-gap placement move by an hour."
+  },
+  {
+    "name": "count-window-dst-berlin-window-opens-at-springforward",
+    "zone": "Europe/Berlin",
+    "start": "2026-03-27T02:30",
+    "end": "2026-03-27T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 7
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-29T03:00",
+      "to": "2026-04-03T00:00"
+    },
+    "rationale": "Berlin spring-forward 2026-03-29 (02:00 +01 -> 03:00 +02); the gap opens at exactly 01:00Z. window.from is wall-clock Mar 29 03:00 which resolves to precisely 2026-03-29T01:00Z - the transition instant itself. DAILY 02:30 series drifts on Mar 29 to 03:30 +02 (01:30Z), which is >= window.from (01:00Z) so it is included; the pre-drift days Mar 27/28 (02:30 +01) fall before the window. COUNT=7 from origin Mar 27, 5 in-window. luxon oracle: first in-window 2026-03-29T01:30Z off 120, count-return. This isolates the case where the window boundary coincides with a DST transition instant AND the first in-window occurrence is a gap-drifted one - a mismatch in either the boundary conversion or the gap roll flips membership."
+  },
+  {
+    "name": "count-window-dst-berlin-windowfrom-in-repeated-hour",
+    "zone": "Europe/Berlin",
+    "start": "2026-10-24T02:30",
+    "end": "2026-10-24T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 5
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-25T02:30",
+      "to": "2026-10-28T00:00"
+    },
+    "rationale": "Berlin fall-back 2026-10-25 (03:00 +02 -> 02:00 +01); 02:30 occurs twice: 00:30Z (+02, earlier) and 01:30Z (+01, later). BOTH window.from (wall 02:30 on the fall-back day) AND the Oct 25 daily occurrence (cumulative step) resolve to the EARLIER instant 2026-10-25T00:30Z (+02). Occurrence start 00:30Z == window.from 00:30Z, and since the >= from check is inclusive while occurrenceEnd (01:00Z) > from, Oct 25 is kept. Later days are 01:30Z (+01). luxon oracle: occ Oct25 00:30Z off 120, Oct26/27 01:30Z off 60, windowTo-return, 3 occ. Divergence risk: if Foundation resolves EITHER the 02:30 window boundary OR the Oct 25 occurrence to the LATER repeated instant (01:30Z), the equality that keeps Oct 25 in-window breaks and the count of in-window occurrences changes."
+  },
+  {
+    "name": "count-window-dst-ny-count1-seed-at-windowto-gap",
+    "zone": "America/New_York",
+    "start": "2026-03-08T02:30",
+    "end": "2026-03-08T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 1
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-07T00:00",
+      "to": "2026-03-08T03:30"
+    },
+    "rationale": "COUNT=1 razor edge. NY spring-forward 2026-03-08: the anchor/seed 02:30 sits in the gap and rolls forward to 03:30-04:00 = 2026-03-08T07:30Z. window.to is wall-clock Mar 8 03:30 which ALSO resolves to 2026-03-08T07:30Z. The half-open window excludes candidateMillis >= windowToMillis, so the single COUNT=1 occurrence lands exactly on the excluded boundary and the result is ZERO occurrences (COUNT still consumed). luxon oracle: windowTo-return, occ=0; seed and windowTo both 07:30Z. Divergence risk is maximal: seed gap-roll, half-open boundary, and COUNT=1 all collide on one instant - if Foundation resolves the gap time to 06:30Z or 08:30Z, or treats the boundary as inclusive, the result flips from 0 to 1."
+  },
+  {
+    "name": "count-window-dst-ny-count-1005-cap-brush-multidst",
+    "zone": "America/New_York",
+    "start": "2025-01-15T02:30",
+    "end": "2025-01-15T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 1005
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2025-01-01T00:00",
+      "to": "2028-12-31T00:00"
+    },
+    "rationale": "COUNT=1005 exceeds the 1000 MAX_OCCURRENCES_PER_WINDOW cap; the engine truncates at exactly 1000. DAILY 02:30 in NY over ~2.75 years crosses 5 offset flips. The gap-roll drift is a ONE-WAY RATCHET: over the 1005 steps the wall clock is 02:30 for only the 53 days before the first spring-forward, then 03:30 for the remaining 952 (once rolled to 03:30 it is never in a gap and fall-back never pushes it back). luxon oracle: truncated=true, returned 1000, first 2025-01-15T07:30Z off -300, last 2027-10-11T07:30Z off -240, 5 offset flips. This stresses cap termination + COUNT together with cumulative drift stability: any single mis-step in Foundation's date(byAdding:.day) across a transition compounds over 1000 occurrences and shifts the truncation point."
+  },
+  {
+    "name": "fall-back-ambiguous-sydney-daily-seed-in-repeated-hour",
+    "zone": "Australia/Sydney",
+    "start": "2026-04-04T02:30",
+    "end": "2026-04-04T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-04T00:00",
+      "to": "2026-04-08T00:00"
+    },
+    "rationale": "Southern-Hemisphere APRIL fall-back. Sydney repeats wall-clock 02:00-02:59 on 2026-04-05 (offset +11:00 AEDT -> +10:00 AEST). A DAILY series is seeded the day BEFORE (04-04 02:30, unambiguous +11:00) so the engine's cumulative luxon .plus({days}) — NOT fromISO — drifts it THROUGH the repeated hour. Verified against the real backend oracle: occurrences land 2026-04-03T15:30Z, 2026-04-04T15:30Z (this is the 04-05 02:30 slot, resolved to the FIRST occurrence +11:00 because .plus preserves the prior offset), then 2026-04-05T16:30Z, 2026-04-06T16:30Z (the +10:00 second-half offset). The offset shift is visible as a +1h UTC jump AFTER the ambiguous day. Foundation Calendar.date(byAdding:.day) must replicate luxon's offset-preserving arithmetic exactly (confirmed by a Swift harness matching all four instants); any snap-to-earlier-instant or re-resolve-from-scratch behavior would shift occ2/occ3 by 1h."
+  },
+  {
+    "name": "fall-back-ambiguous-auckland-weekly-sunday-seed-filter-drop",
+    "zone": "Pacific/Auckland",
+    "start": "2026-04-05T02:30",
+    "end": "2026-04-05T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-05T00:00",
+      "to": "2026-04-20T00:00"
+    },
+    "rationale": "The sharpest edge in this class: a seed/candidate offset split that silently DROPS the first occurrence. Auckland repeats 02:00-02:59 on 2026-04-05 (Sunday; +13:00 NZDT -> +12:00 NZST). The anchor start is that ambiguous Sunday 02:30, so the generator's luxon fromISO stamps the SEED at the SECOND occurrence (+12:00, UTC 2026-04-04T14:30Z, ms 1775313000000). But the WEEKLY byWeekday=[6] candidate for week 0 is built via startOf('week') [Monday 03-30, +13:00] + .set({hour:2,minute:30}), which inherits the Monday pre-transition offset -> FIRST occurrence (+13:00, UTC 2026-04-04T13:30Z, ms 1775309400000). Because that candidate is EARLIER than the seed, candidatesForPeriod's `millis < seedMillis` filter DROPS it. Confirmed against the real backend oracle: the first emitted occurrence is week 1 (2026-04-11T14:30Z), total 2 not 3. Both engines must (a) resolve seed vs candidate to the same two distinct instants and (b) drop identically; a Foundation that resolved the seed to the first occurrence, or built the candidate at the second, would emit 3 occurrences."
+  },
+  {
+    "name": "fall-back-ambiguous-sydney-daily-exception-at-ambiguous-and-drifted",
+    "zone": "Australia/Sydney",
+    "start": "2026-04-04T02:30",
+    "end": "2026-04-04T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [
+      {
+        "originalStart": "2026-04-05T02:30",
+        "isSkipped": true,
+        "overrideStart": null,
+        "overrideEnd": null,
+        "overrideTitle": null,
+        "completedAt": null
+      },
+      {
+        "originalStart": "2026-04-06T02:30",
+        "isSkipped": false,
+        "overrideStart": null,
+        "overrideEnd": null,
+        "overrideTitle": "Drifted override",
+        "completedAt": null
+      }
+    ],
+    "window": {
+      "from": "2026-04-04T00:00",
+      "to": "2026-04-08T00:00"
+    },
+    "rationale": "Exception-key matching AT an ambiguous instant vs AT the drifted instant — the exact edge the brief targets. Same Sydney DAILY series as the seed case: the engine's occurrence for the ambiguous 04-05 slot is the FIRST occurrence (+11:00, UTC 2026-04-04T15:30Z, ms 1775316600000) because .plus arithmetic preserves the offset. Exception A is keyed at wall '2026-04-05T02:30', which the generator converts via luxon fromISO to the SECOND occurrence (+10:00, UTC 2026-04-04T16:30Z, ms 1775320200000) — a 1h KEY MISMATCH — so the isSkipped exception does NOT match and the occurrence survives (verified against the real oracle: 04-05 still present, not skipped). Exception B is keyed at the drifted, unambiguous '2026-04-06T02:30' (+10:00, ms 1775406600000), which MATCHES the engine's occ (title becomes 'Drifted override', isException true). This asymmetry — miss at ambiguous, hit at drifted — must be reproduced identically by iOS: the exception keys are stored as absolute ISO in the fixture, so a divergence would come only from the iOS engine building the candidate at a different offset than the backend."
+  },
+  {
+    "name": "fall-back-ambiguous-ny-weekly-sunday-first-occurrence",
+    "zone": "America/New_York",
+    "start": "2026-10-30T01:30",
+    "end": "2026-10-30T02:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-30T00:00",
+      "to": "2026-11-16T00:00"
+    },
+    "rationale": "Northern-Hemisphere fall-back via the WEEKLY byWeekday .set path. New York repeats 01:00-01:59 on 2026-11-01 (Sunday; -04:00 EDT -> -05:00 EST). Seed is Friday 10-30 01:30 (-04:00). The week-0 Sunday candidate is startOf('week') [Monday 10-26, -04:00] + .set({hour:1,minute:30}) at the ambiguous 11-01 01:30 -> resolves to the FIRST occurrence (-04:00 EDT, UTC 2026-11-01T05:30Z, ms 1793511000000) because .set inherits the Monday pre-transition offset. Confirmed against the real oracle: 2026-11-01T05:30Z, then 2026-11-08T06:30Z and 2026-11-15T06:30Z (both -05:00 EST post-transition). This pins the FIRST-occurrence choice for a US zone where the repeated hour is 01:xx; a Foundation date(from:) that picked the second occurrence would shift 11-01 by 1h. A Swift ZonedDateTime harness reproducing startOfWeekMonday + settingTime confirmed the identical instant."
+  },
+  {
+    "name": "fall-back-ambiguous-berlin-monthly-day25-first-occurrence",
+    "zone": "Europe/Berlin",
+    "start": "2026-09-25T02:30",
+    "end": "2026-09-25T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        25
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-09-25T00:00",
+      "to": "2026-11-26T00:00"
+    },
+    "rationale": "European fall-back via the MONTHLY byMonthDay path (startOfMonth + setting(day) + settingTime chain). Berlin repeats 02:00-02:59 on 2026-10-25 (+02:00 CEST -> +01:00 CET). A MONTHLY byMonthDay=[25] series lands day 25 of October directly on the ambiguous hour. The candidate is monthStart [Oct 1, +02:00] .set({day:25}).set({hour:2,minute:30}) -> FIRST occurrence (+02:00 CEST, UTC 2026-10-25T00:30Z, ms 1792888200000), inheriting the month-start pre-transition offset through the .set chain. Confirmed against the real oracle: Sep 25 at 2026-09-25T00:30Z (+02:00), the ambiguous Oct 25 at 2026-10-25T00:30Z (+02:00 first occ), then Nov 25 at 2026-11-25T01:30Z (+01:00 CET, wall-clock 02:30 preserved). This exercises a DIFFERENT engine construction path (monthly setting(day:)) than the weekly/daily cases, verifying Foundation's setting(day:) also inherits the source offset at the ambiguous hour rather than re-resolving from scratch."
+  },
+  {
+    "name": "fall-back-ambiguous-chicago-daily-seed-in-repeated-hour",
+    "zone": "America/Chicago",
+    "start": "2026-11-01T01:30",
+    "end": "2026-11-01T02:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-11-01T00:00",
+      "to": "2026-11-05T00:00"
+    },
+    "rationale": "Seed placed EXACTLY on the ambiguous instant, plus a duration that spans the transition. Chicago repeats 01:00-01:59 on 2026-11-01 (-05:00 CDT -> -06:00 CST). The anchor start is the ambiguous 01:30, which the generator's luxon fromISO resolves to -05:00 CDT (the FIRST/pre-transition occurrence, UTC 2026-11-01T06:30Z, ms 1793514600000). The end 02:15 is AFTER the fall-back, so the 45-minute wall-clock duration spans 105 minutes of real time: occ0 end is 2026-11-01T08:15Z (a durationMillis stress across the transition — 1h45m elapsed for a 45m wall interval). The DAILY .plus({days}) drift then carries the wall-clock 01:30 forward, dropping to -06:00 CST on subsequent days: 2026-11-02T07:30Z, 2026-11-03T07:30Z, 2026-11-04T07:30Z. Confirmed against the real oracle (4 occurrences). This is the mirror of the Sydney seed case but for a US 01:xx repeated hour AND stresses the fixed-millis duration arithmetic through the fall-back; Foundation must both resolve the seed to CDT and compute the 105-minute real-time end identically."
+  },
+  {
+    "name": "iso-week-sunday-seed-mon-wed-sun-utc",
+    "zone": "UTC",
+    "start": "2026-01-04T09:00",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        2,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-01-19T00:00"
+    },
+    "rationale": "Seed 2026-01-04 is a SUNDAY (luxon weekday 7). luxon startOf('week') is Monday, so the seed's week starts Mon 2025-12-29 — the PRIOR calendar year. byWeekday=[Mon,Wed,Sun]: in the seed week the Mon(Dec29)/Wed(Dec31) candidates fall BEFORE the Sunday seed and are dropped by the seedMillis filter, so week 1 yields only Sun Jan 04. Later weeks yield all three. Confirmed via luxon: first occ 2026-01-04T09:00Z, then 01-05,01-07 (week 2's Mon/Wed),01-11,01-12,01-14,01-18. This stresses the Monday-anchored week + seed-filter interaction on a Sunday seed whose anchor week crosses the year boundary — the Swift port derives startOfWeekMonday() manually (offsetFromMonday = luxonWeekday-1) and must drop the same pre-seed days."
+  },
+  {
+    "name": "iso-week-interval2-tue-thu-year-boundary-utc",
+    "zone": "UTC",
+    "start": "2025-12-16T10:00",
+    "end": "2025-12-16T11:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 2,
+      "byWeekday": [
+        1,
+        3
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2025-12-15T00:00",
+      "to": "2026-02-01T00:00"
+    },
+    "rationale": "interval-2 WEEKLY, byWeekday=[Tue,Thu], seed Tue 2025-12-16. The +14d cursor step must keep phase across the year boundary: period 1's cursor is 2025-12-30 whose Monday-anchored weekStart is Mon 2025-12-29 (2025), yet the Thu candidate lands 2026-01-01 (2026). Confirmed via luxon the series is 12-16,12-18 / 12-30,2026-01-01 / 01-13,01-15 / 01-27,01-29 — the interval-2 phase never slips at the calendar-year rollover. Distinct from the corpus's interval-1 weekly cases and its single-weekday interval-2-monday: this exercises multi-weekday expansion AND +14d phase alignment straddling Dec->Jan simultaneously."
+  },
+  {
+    "name": "iso-week-sunday-seed-interval2-year-boundary-utc",
+    "zone": "UTC",
+    "start": "2025-12-21T07:00",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 2,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2025-12-15T00:00",
+      "to": "2026-02-16T00:00"
+    },
+    "rationale": "SUNDAY seed (2025-12-21, luxon weekday 7) + interval-2 + byWeekday=[Sun]. The Sunday candidate is weekStart(Mon)+6days; because the seed is itself the anchor-week's Sunday, the candidate equals the seed. The +14d cursor stepping must then keep every subsequent Sunday exactly two weeks apart while each period re-derives weekStart from a cursor that is a Sunday (so weekStart is the PRIOR Monday, a different calendar week index). Confirmed via luxon: 2025-12-21, 2026-01-04, 01-18, 02-01, 02-15 — the phase survives the year boundary. Isolates the Sunday-belongs-to-prior-Monday-week rule combined with interval phase, the case most likely to expose an off-by-one week if Foundation's week anchoring diverged."
+  },
+  {
+    "name": "iso-week-iso53-straddle-mon-wed-fri-sun-utc",
+    "zone": "UTC",
+    "start": "2026-12-28T08:00",
+    "end": "2026-12-28T08:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-12-28T00:00",
+      "to": "2027-01-04T00:00"
+    },
+    "rationale": "The Monday-anchored week starting Mon 2026-12-28 is ISO week 53 of weekYear 2026, yet its Fri(2027-01-01) and Sun(2027-01-03) candidates fall in calendar year 2027. byWeekday=[Mon,Wed,Fri,Sun] forces the expander to add day-offsets to a weekStart in one calendar year and produce candidates in the next. Confirmed via luxon: Mon 2026-12-28, Wed 12-30 (both weekYear 2026 / year 2026), Fri 2027-01-01, Sun 2027-01-03 (both weekYear 2026 / year 2027). Any divergence in how Foundation computes weekStart+offset across a Dec31->Jan1 boundary (e.g. a stray firstWeekday/weekYear dependency) would surface here as a wrong Fri/Sun instant."
+  },
+  {
+    "name": "iso-week-dst-springfwd-mon-thu-sun-0230-ny",
+    "zone": "America/New_York",
+    "start": "2026-03-02T02:30",
+    "end": "2026-03-02T03:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        3,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-02T00:00",
+      "to": "2026-03-09T00:00"
+    },
+    "rationale": "US spring-forward is Sun 2026-03-08 02:00->03:00 (America/New_York). Seed Mon 2026-03-02 02:30. byWeekday=[Mon,Thu,Sun]: the Mon(03-02) and Thu(03-05) candidates re-anchor 02:30 at offset -05:00, but the Sun(03-08) candidate re-anchors 02:30 into the SPRING-FORWARD GAP. luxon rolls the nonexistent 02:30 forward to 03:30 (-04:00). Confirmed via luxon: 03-02T07:30Z, 03-05T07:30Z, 03-08T07:30Z (all identical UTC minutes past 07:00Z because the gap-rolled Sunday 03:30-04:00 == 07:30Z). The byWeekday path re-derives the Sunday via weekStart.plus({days:6}).set({hour,minute}) — NOT via cursor stepping — so this exercises DST gap resolution inside the weekday-expansion .set() call specifically, a path the corpus's single-weekday berlin-spring-forward-weekly (Sunday SEED, no re-anchor from a Monday weekStart) does not cover."
+  },
+  {
+    "name": "iso-week-dst-fallback-mon-sun-0130-ny",
+    "zone": "America/New_York",
+    "start": "2026-10-26T01:30",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-26T00:00",
+      "to": "2026-11-02T00:00"
+    },
+    "rationale": "US fall-back is Sun 2026-11-01 02:00->01:00 (America/New_York): 01:30 occurs TWICE. Seed Mon 2026-10-26 01:30. byWeekday=[Mon,Sun]: the Sun(11-01) candidate re-anchors 01:30 on the AMBIGUOUS fall-back day via weekStart.plus({days:6}).set({hour:1,minute:30}). luxon resolves the ambiguous wall-time to the EARLIER offset (-04:00, first occurrence). Confirmed via luxon: Mon 10-26T05:30Z (-04:00), Sun 11-01T05:30Z (-04:00, i.e. the first 01:30 not the second which would be 06:30Z). The Swift port's doc asserts Calendar 'resolves an ambiguous fall-back time to the earlier offset'; this case is the direct parity probe of that claim inside the weekday-expansion .set()/settingTime() path, which no existing corpus case exercises (the corpus has no ambiguous-hour weekly-byWeekday case)."
+  },
+  {
+    "name": "iso-week-interval2-dst-sunday-0230-berlin",
+    "zone": "Europe/Berlin",
+    "start": "2026-03-01T02:30",
+    "end": "2026-03-01T03:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 2,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-01T00:00",
+      "to": "2026-04-06T00:00"
+    },
+    "rationale": "Europe/Berlin spring-forward is Sun 2026-03-29 02:00->03:00. Seed Sun 2026-03-01 02:30, interval-2, byWeekday=[Sun]. The +14d cursor stepping lands period 2's cursor ON the transition Sunday 2026-03-29, where the CURSOR ITSELF drifts: luxon .plus({weeks:2}) rolls 02:30 into the gap so cursor.hour becomes 3, cursor.minute 30 (wall-clock drifts 02:30->03:30). The byWeekday re-anchor then uses that drifted cursor time (set hour:3,minute:30) on weekStart+6 (the same Sunday) -> 03:30 local. Confirmed via luxon: 2026-03-01T01:30Z, 03-15T01:30Z, 03-29T01:30Z (all == wall 02:30/02:30/03:30; the last is 03:30+02:00). This is the two-stage interaction — cursor drift through the gap THEN re-anchor from the drifted cursor's wall-clock — distinct from a single-stage interval-1 DST case; both engines must agree that the interval-2 Sunday emerges at 03:30 not 02:30."
+  },
+  {
+    "name": "midnight-dst-gap-havana-allday-daily-spring",
+    "zone": "America/Havana",
+    "start": "2024-03-08T00:00",
+    "end": null,
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-03-08T00:00",
+      "to": "2024-03-13T00:00"
+    },
+    "rationale": "Havana springs forward AT MIDNIGHT on 2024-03-10 (00:00 -> 01:00), so the all-day midnight anchor for that day is a NONEXISTENT wall time. luxon .plus({days:1}) rolls the gap-day 00:00 to 01:00 and thereafter carries the shifted wall clock; verified UTC series [2024-03-08..12 all T05:00:00.000Z] — the gap-day occurrence is 2024-03-10T05:00:00.000Z. A Swift Calendar.date(byAdding:.day) probe produced the identical instants, so this pins the nonexistent-midnight all-day case the 57-case corpus never covers (NY/Kyiv/Berlin all transition at 02:00-03:00, never at 00:00)."
+  },
+  {
+    "name": "midnight-dst-gap-havana-allday-daily-fallback-ambiguous",
+    "zone": "America/Havana",
+    "start": "2024-11-01T00:00",
+    "end": null,
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-11-01T00:00",
+      "to": "2024-11-06T00:00"
+    },
+    "rationale": "Havana falls back 01:00 -> 00:00 on 2024-11-03, making 00:00-00:59 the REPEATED (ambiguous) hour. luxon resolves the all-day midnight anchor of the 3rd to the EARLIER offset (-240 DST) -> 2024-11-03T04:00:00.000Z, then the 4th jumps to -300 -> 2024-11-04T05:00:00.000Z; confirmed series [11-01T04Z, 11-02T04Z, 11-03T04Z, 11-04T05Z, 11-05T05Z]. Foundation Calendar.date(byAdding:.day) and date(from:) both pick the same earlier offset (04:00Z) in a Swift probe, so this pins the ambiguous-midnight resolution — the single most likely place a luxon/Foundation/ICU tz-data drift would first split the two engines."
+  },
+  {
+    "name": "midnight-dst-gap-santiago-0030-daily-spring-into-gap",
+    "zone": "America/Santiago",
+    "start": "2024-09-06T00:30",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-09-06T00:00",
+      "to": "2024-09-11T00:00"
+    },
+    "rationale": "Santiago springs 00:00 -> 01:00 on 2024-09-08, so a 00:30-seeded daily series steps ONTO a NONEXISTENT 00:30 on the transition day. luxon confirms fromISO 2024-09-08T00:30 rolls forward to 01:30 (2024-09-08T04:30:00.000Z) and the series then carries 01:30; verified [09-06T04:30Z, 09-07T04:30Z, 09-08T04:30Z, 09-09T04:30Z, 09-10T04:30Z]. Distinct from the all-day cases: the seed time-of-day itself is inside the midnight gap, not just the anchor. Foundation stepping matched the same instants in a Swift probe."
+  },
+  {
+    "name": "midnight-dst-gap-havana-monthly-day3-fallback-reconstruct",
+    "zone": "America/Havana",
+    "start": "2024-09-03T00:00",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        3
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-09-01T00:00",
+      "to": "2024-12-05T00:00"
+    },
+    "rationale": "Same ambiguous Havana fall-back midnight (2024-11-03, 00:00-00:59 repeated) but reached via the MONTHLY-byMonthDay RECONSTRUCTION path (monthStart.set({day:3}).atSeedTime(hour:0)) instead of cumulative daily stepping — a different codepath that could resolve the ambiguous 00:00 differently. luxon confirms the Nov occurrence is 2024-11-03T04:00:00.000Z (earlier/DST offset), with series [09-03T04Z, 10-03T04Z, 11-03T04Z, 12-03T05Z]. A Foundation setting(day:)+settingTime(0,0,0,0) probe produced the identical 04:00Z instant, pinning that the two engines agree via BOTH the stepping path and the component-reconstruction path."
+  },
+  {
+    "name": "midnight-dst-gap-beirut-allday-daily-fallback-2023",
+    "zone": "Asia/Beirut",
+    "start": "2023-10-27T00:00",
+    "end": null,
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2023-10-27T00:00",
+      "to": "2023-11-01T00:00"
+    },
+    "rationale": "Beirut falls back at the midnight boundary on 2023-10-29 (the +03 hour just before midnight repeats; offset -> +02 at 00:00). An all-day midnight series crosses it: luxon gives [2023-10-26T21:00Z, 10-27T21:00Z, 10-28T22:00Z, 10-29T22:00Z, 10-30T22:00Z] — the offset flips +180 -> +120 exactly at the 2023-10-29 midnight anchor. This is the 2023 Beirut DST episode (Lebanon's late/contested transition) and exercises a midnight fall-back in an eastern-hemisphere zone. Foundation stepping matched all five instants in a Swift probe."
+  },
+  {
+    "name": "midnight-dst-gap-cairo-allday-daily-spring-2023",
+    "zone": "Africa/Cairo",
+    "start": "2023-04-26T00:00",
+    "end": null,
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2023-04-26T00:00",
+      "to": "2023-05-01T00:00"
+    },
+    "rationale": "Cairo reinstated DST in 2023 and springs forward AT MIDNIGHT on 2023-04-28 (00:00 -> 01:00), so that day's all-day midnight anchor is a NONEXISTENT wall time. luxon gives [2023-04-25T22:00Z, 04-26T22:00Z, 04-27T22:00Z, 04-28T22:00Z, 04-29T22:00Z] — the wall clock rolls 00:00 -> 01:00 on the gap day while the UTC instant stays continuous at 22:00Z (offset +120 -> +180). Recent (post-2016-abolition, 2023-revival) tz-data that a stale device ICU bundle might not carry, making it a good drift sentinel. Foundation date(byAdding:.day) matched all five instants in a Swift probe."
+  },
+  {
+    "name": "midnight-dst-gap-gaza-weekly-byweekday-across-spring",
+    "zone": "Asia/Gaza",
+    "start": "2024-03-25T00:00",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        0,
+        4
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-03-25T00:00",
+      "to": "2024-04-08T00:00"
+    },
+    "rationale": "Palestine (Asia/Gaza) springs forward near midnight in 2024, and a WEEKLY byWeekday=[Mon,Fri] series at 00:00 reconstructs each occurrence via startOfWeekMonday() (Foundation startOfDay) + weekStart.plus({days}).set({hour:0}) — the week-start reconstruction path, structurally distinct from daily stepping. luxon gives [2024-03-24T22:00Z (Mon 03-25 pre-DST), 03-28T22:00Z (Fri), 03-31T22:00Z (Mon post-DST), 04-04T22:00Z (Fri)] with the Mon offset flipping +120 -> +180 across the transition week. Foundation's startOfWeekMonday + settingTime path produced identical instants in a Swift probe, and luxon startOf('week') on the transition-week Sunday matched Foundation startOfDay, confirming the week-start reconstruction stays parity-safe through a near-midnight gap."
+  },
+  {
+    "name": "midnight-dst-gap-saopaulo-allday-daily-spring-2017",
+    "zone": "America/Sao_Paulo",
+    "start": "2017-10-13T00:00",
+    "end": null,
+    "isAllDay": true,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2017-10-13T00:00",
+      "to": "2017-10-18T00:00"
+    },
+    "rationale": "Historical (pre-2019-abolition) Sao Paulo springs forward AT MIDNIGHT on 2017-10-15 (00:00 -> 01:00), the classic Brazil midnight-spring the header calls out. That day's all-day midnight anchor is NONEXISTENT; luxon rolls it to 01:00 and gives [2017-10-13T03:00Z, 10-14T03:00Z, 10-15T03:00Z, 10-16T03:00Z, 10-17T03:00Z] (offset -180 -> -120, UTC instant continuous at 03:00Z). Brazil abolished DST in 2019 so this is a fixed historical fixture that stresses whether a device's ICU tz-data still models the old midnight-spring rule. Foundation date(byAdding:.day) matched all five instants in a Swift probe."
+  },
+  {
+    "name": "month-clamp-fallback-seedday-31-interval2-yearcross",
+    "zone": "UTC",
+    "start": "2026-07-31T08:30",
+    "end": "2026-07-31T09:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 2,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-07-01T00:00",
+      "to": "2027-06-01T00:00"
+    },
+    "rationale": "Seed-day fallback (no byMonthDay) uses seed.day=31 while the period cursor CLAMPS to day 30 as it steps +2 months. luxon confirms the cursor drift Jul31->Sep30->Nov30->Jan30: the day-31 candidate DROPS in Sep and Nov (rolls to Oct 1 / Dec 1, month!=monthStart) and KEEPS on Jan/Mar/May 31. Emits exactly 4 occ: 2026-07-31, 2027-01-31, 2027-03-31, 2027-05-31 (all 08:30Z). Compounding cursor-clamp with interval 2 across the year boundary in a no-DST zone — distinct from the corpus interval-1 fallback case. Divergence risk: Foundation Calendar.date(byAdding:.month) must clamp the cursor to day 30 exactly like luxon .plus({months}), and lenient setting(day:31) must overflow-and-drop on the same months."
+  },
+  {
+    "name": "month-clamp-bymonthday-31-interval3-tokyo",
+    "zone": "Asia/Tokyo",
+    "start": "2026-01-31T23:30",
+    "end": "2026-02-01T00:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 3,
+      "byWeekday": null,
+      "byMonthDay": [
+        31
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2027-07-01T00:00"
+    },
+    "rationale": "byMonthDay [31] with interval 3 in a fixed-offset (UTC+9, never-DST) zone isolates the pure month-clamp. luxon confirms the +3-month cursor visits Jan/Apr/Jul/Oct/Jan; day-31 survives only in 31-day target months, so Apr (30d) is dropped. Emits 4 occ: 2026-01-31, 2026-07-31, 2026-10-31, 2027-01-31 (23:30 local, crossing into next UTC day at 14:30Z). Duration spans midnight into Feb 1. Divergence risk: Foundation dayInMonthOrNull overflow detection (candidate.month != monthStart.month) must drop April 31 exactly as luxon, and the year-boundary +3-month step must land on the same months."
+  },
+  {
+    "name": "month-clamp-bymonthday-29-nonleap-seed-into-leap-2028",
+    "zone": "Asia/Tokyo",
+    "start": "2027-12-29T10:00",
+    "end": "2027-12-29T11:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        29
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2027-12-01T00:00",
+      "to": "2028-05-01T00:00"
+    },
+    "rationale": "byMonthDay [29] MONTHLY seeded in Dec 2027 (a NON-leap year) crossing the year boundary into leap Feb 2028 — the corpus leap case seeds Jan 2028 (already inside the leap year), so this exercises the year-boundary + leap interaction the corpus misses. luxon confirms Feb 2028 (29 days) KEEPS day 29 while it would drop in a non-leap Feb. Emits 5 consecutive occ Dec29->Apr29 including 2028-02-29T10:00 local. No-DST zone isolates the leap clamp. Divergence risk: Foundation daysInMonth for Feb 2028 must be 29 and the overflow test must keep it."
+  },
+  {
+    "name": "month-clamp-multiday-29-30-31-across-leap-feb-2028",
+    "zone": "Asia/Tokyo",
+    "start": "2028-01-29T07:15",
+    "end": "2028-01-29T08:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        29,
+        30,
+        31
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2028-01-01T00:00",
+      "to": "2028-05-01T00:00"
+    },
+    "rationale": "Multi-day byMonthDay [29,30,31] MONTHLY across leap Feb 2028: tests dropping MULTIPLE overflow days within one short month while others survive, and the sort/dedup of the surviving set. luxon confirms Jan keeps all three (29,30,31), Feb 2028 (leap, 29d) keeps ONLY 29 and drops 30+31, Mar keeps all three, Apr (30d) keeps 29+30 and drops 31 -> exactly 9 occ. No-DST zone. Divergence risk: Foundation must drop the two overflow days in Feb while keeping day 29, and produce the same per-month surviving subset that luxon's dayInMonthOrNull filter yields."
+  },
+  {
+    "name": "month-clamp-fifth-monday-sparse-seed-before-first",
+    "zone": "Asia/Tokyo",
+    "start": "2026-01-05T09:00",
+    "end": "2026-01-05T09:45",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": [
+        0
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": [
+        5
+      ],
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2027-01-01T00:00"
+    },
+    "rationale": "bySetPos [5] byWeekday [0] (5th Monday) seeded Jan 5 2026 — BEFORE the first month that even has a 5th Monday, so nthWeekdayInMonth returns nil for Jan AND Feb before the first emission (unlike the corpus case which seeds on the first hit Mar 30). luxon confirms only Mar/Jun/Aug/Nov 2026 have a 5th Monday, landing on days 30/29/31/30 respectively -> 4 occ. The 5th Monday's day-of-month varies month to month, and the ordinal overflows (returns nil) in 8 of 12 months. No-DST zone. Divergence risk: Foundation nthWeekdayInMonth must enumerate the same Monday matches per month (weekday remap + 1..daysInMonth scan) and return nil for the same 8 months."
+  },
+  {
+    "name": "month-clamp-last-friday-seed-saturday-after-anchor",
+    "zone": "Asia/Tokyo",
+    "start": "2026-01-31T18:00",
+    "end": "2026-01-31T19:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": [
+        4
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": [
+        -1
+      ],
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-06-01T00:00"
+    },
+    "rationale": "bySetPos [-1] byWeekday [4] (last Friday) with the seed on Jan 31 2026, which luxon confirms is a SATURDAY and strictly AFTER Jan's last Friday (Jan 30). So the seed-month anchor (Jan 30) is < seed and gets filtered by the millis<seedMillis guard; the first emitted occurrence is Feb's last Friday (Feb 27). Corpus last-friday seeds on the anchor itself (Jan 30) — this instead stresses the seed-filter dropping the very first candidate. luxon emits 4 occ Feb27/Mar27/Apr24/May29, the last-Friday day-of-month moving each month. Divergence risk: Foundation must (a) compute the same last-Friday per month via negative setPos indexing, and (b) drop the Jan anchor via the identical seed comparison."
+  },
+  {
+    "name": "month-clamp-last-workday-weekend-monthend-walkback",
+    "zone": "Asia/Tokyo",
+    "start": "2026-05-29T16:00",
+    "end": "2026-05-29T16:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": "LAST_WORKDAY",
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-05-01T00:00",
+      "to": "2026-12-01T00:00"
+    },
+    "rationale": "monthlyAnchor LAST_WORKDAY over May-Nov 2026, chosen so the last calendar day is a WEEKEND in some months and the anchor must walk back off the month edge. luxon confirms May 31 is Sunday (anchor->May 29 Fri) and Oct 31 is Saturday (anchor->Oct 30 Fri), while Jun/Jul/Aug/Sep/Nov end on a weekday. Corpus last-workday covers Jan-Jun (no Saturday-last-day month like Oct); this adds the walk-back-from-day-31 case. Emits 7 occ, the anchor day varying 29/30/31 month to month. No-DST zone. Divergence risk: Foundation workdayAnchorInMonth must scan back from daysInMonth skipping the same weekend days (weekday remap) to land on the identical Friday."
+  },
+  {
+    "name": "month-clamp-yearly-feb29-fixed-offset-multi-leap",
+    "zone": "Asia/Tokyo",
+    "start": "2024-02-29T12:00",
+    "end": "2024-02-29T13:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "YEARLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        29
+      ],
+      "byMonth": [
+        2
+      ],
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2024-01-01T00:00",
+      "to": "2033-01-01T00:00"
+    },
+    "rationale": "YEARLY byMonth [2] byMonthDay [29] (Feb 29) across 2024/2028/2032 leaps with the intervening non-leap years dropped. The corpus yearly-leap-feb-29 uses America/New_York (DST-bearing); this uses a fixed-offset UTC+9 zone to ISOLATE the leap clamp from any DST effect, per the task's no-DST instruction. luxon confirms yearlyCandidates' dayInMonthOrNull drops Feb 29 in 2025-2027/2029-2031 and keeps it in the three leap years -> exactly 3 occ (2024/2028/2032, all 12:00 local). Wide window is the edge's own need. Divergence risk: Foundation's per-year Feb daysInMonth (28 vs 29) must match luxon so the same 7 non-leap years are dropped."
+  },
+  {
+    "name": "spring-forward-gap-sydney-daily-seed-in-gap",
+    "zone": "Australia/Sydney",
+    "start": "2026-10-04T02:30",
+    "end": "2026-10-04T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-03T00:00",
+      "to": "2026-10-08T00:00"
+    },
+    "rationale": "Southern-Hemisphere OCTOBER spring-forward. Sydney skips wall-clock 02:00-02:59 on 2026-10-04 (offset +10:00 -> +11:00). The anchor 02:30 lands INSIDE the skipped hour, so the generator's luxon fromISO rolls it forward to 03:30 (+11:00), UTC 2026-10-03T16:30:00Z. luxon .plus({days}) then drift-sticks the whole DAILY series at wall 03:30: confirmed occurrences 2026-10-03T16:30Z, 2026-10-04T16:30Z, 2026-10-05T16:30Z, 2026-10-06T16:30Z. Foundation Calendar.date(from:) must resolve the same in-gap 02:30 -> 03:30 roll and then step cumulatively; any snap-to-transition-instant behavior diverges here."
+  },
+  {
+    "name": "spring-forward-gap-auckland-daily-seed-in-gap",
+    "zone": "Pacific/Auckland",
+    "start": "2026-09-27T02:30",
+    "end": null,
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 4
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-09-26T00:00",
+      "to": "2026-10-01T00:00"
+    },
+    "rationale": "SEPTEMBER (last-Sunday) spring-forward with a null end (untimed todo) and COUNT termination. Auckland skips 02:00-02:59 on 2026-09-27 (+12:00 -> +13:00). Anchor 02:30 is inside the gap; luxon rolls it to 03:30 (+13:00), UTC 2026-09-26T14:30:00Z, and drift-sticks: 2026-09-26T14:30Z, 2026-09-27T14:30Z, 2026-09-28T14:30Z, 2026-09-29T14:30Z (COUNT=4). Distinct from Sydney: null end exercises the durationMillis==null / occurrenceEndMillis==candidateMillis window-intersection branch across the gap, and a +13:00 extreme offset."
+  },
+  {
+    "name": "spring-forward-gap-denver-daily-drift-into-gap",
+    "zone": "America/Denver",
+    "start": "2026-03-07T02:30",
+    "end": "2026-03-07T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-06T00:00",
+      "to": "2026-03-11T00:00"
+    },
+    "rationale": "Anchor is on the day BEFORE the gap at a VALID 02:30 (-07:00), so the seed is unambiguous; the DAILY .plus({days}) STEP then lands the next occurrence on 2026-03-08 at 02:30 which is INSIDE Denver's skipped hour (02:00-02:59, -07:00 -> -06:00). luxon rolls that step to 03:30 (-06:00) and drift-sticks: 2026-03-07T09:30Z, 2026-03-08T09:30Z, 2026-03-09T09:30Z, 2026-03-10T09:30Z. This tests the ADD-lands-in-gap path (not seed-in-gap): Foundation Calendar.date(byAdding:.day) must roll the resulting nonexistent wall-clock forward exactly as luxon does, then carry the shift."
+  },
+  {
+    "name": "spring-forward-gap-london-weekly-sunday-0130-snap-back",
+    "zone": "Europe/London",
+    "start": "2026-03-22T01:30",
+    "end": "2026-03-22T02:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-21T00:00",
+      "to": "2026-04-13T00:00"
+    },
+    "rationale": "London's gap is 01:00-01:59 on 2026-03-29 (0 -> +60), and every DST transition day is a SUNDAY. WEEKLY byWeekday=[6] (Sunday) RE-DERIVES each occurrence's wall-clock from startOf('week').plus(days).set({hour:1,minute:30}) rather than drifting cumulatively, so this is a SNAP not a drift: 2026-03-22 stays 01:30Z; on the gap Sunday 2026-03-29 the .set({hour:1}) hits the skipped hour and rolls to 02:30 (+01:00) = 2026-03-29T01:30Z; then 2026-04-05 SNAPS BACK to wall 01:30 (+01:00) = 2026-04-05T00:30Z, and 2026-04-12T00:30Z. This is the highest-value edge: the gap-week instant is produced by Foundation settingTime (calendar.date(from:) with hour=1), the exact luxon .set() analog most likely to diverge, and the snap-back proves it is not cumulative drift."
+  },
+  {
+    "name": "spring-forward-gap-newyork-weekly-sunday-0230-snap-back",
+    "zone": "America/New_York",
+    "start": "2026-03-01T02:30",
+    "end": "2026-03-01T03:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-02-28T00:00",
+      "to": "2026-03-23T00:00"
+    },
+    "rationale": "US 2nd-Sunday-of-March transition: New York skips 02:00-02:59 on 2026-03-08 (-05:00 -> -04:00), which is a Sunday. WEEKLY byWeekday=[6] re-derives via set({hour:2,minute:30}) each week. 2026-03-01 is 02:30 (-05:00)=07:30Z; on the gap Sunday 2026-03-08 the set({hour:2}) rolls to 03:30 (-04:00)=2026-03-08T07:30Z; 2026-03-15 SNAPS BACK to wall 02:30 (-04:00)=06:30Z, 2026-03-22T06:30Z. Complements the London case with the American 02:00 gap and a 1-hour duration whose derived end also shifts; confirms the set()-reconstruction roll on a different offset axis."
+  },
+  {
+    "name": "spring-forward-gap-berlin-monthly-day29-0230",
+    "zone": "Europe/Berlin",
+    "start": "2026-01-29T02:30",
+    "end": "2026-01-29T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        29
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-05-01T00:00"
+    },
+    "rationale": "MONTHLY byMonthDay=[29] where day-29 of March IS the EU transition day (2026-03-29, gap 02:00-02:59, +01:00 -> +02:00). Each month's occurrence is re-derived via monthStart.set({day:29}) + atSeedTime(set hour:2,minute:30). Jan 29 = 02:30 (+01:00)=2026-01-29T01:30Z; FEB 29 OVERFLOWS (2026 non-leap) and is DROPPED — no occurrence; on the gap day 2026-03-29 the atSeedTime 02:30 rolls to 03:30 (+02:00)=2026-03-29T01:30Z; Apr 29 = 02:30 (+02:00)=2026-04-29T00:30Z. Exercises the setting(day:)+settingTime reconstruction landing in the gap combined with a month-overflow drop, so both the gap roll AND the skip must match Foundation."
+  },
+  {
+    "name": "spring-forward-gap-kyiv-monthly-day29-0330",
+    "zone": "Europe/Kyiv",
+    "start": "2026-01-29T03:30",
+    "end": "2026-01-29T04:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        29
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-04-29",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-06-01T00:00"
+    },
+    "rationale": "Kyiv's spring transition is UNUSUAL: the skipped wall-clock hour is 03:00-03:59 on 2026-03-29 (EET+2 -> EEST+3), NOT 02:00 like Berlin — a common wrong assumption a naive fixture would miss. MONTHLY byMonthDay=[29] at 03:30 re-derives via set({day:29})+atSeedTime(03:30). Jan 29 = 03:30 (+02:00)=2026-01-29T01:30Z; Feb 29 dropped (non-leap); gap day 2026-03-29 03:30 rolls to 04:30 (+03:00)=2026-03-29T01:30Z; Apr 29 = 03:30 (+03:00)=2026-04-29T00:30Z. UNTIL_DATE 2026-04-29 exercises the inclusive end-of-day boundary (Foundation builds it via DateComponents hour=23 in the zone) which must include the Apr 29 occurrence and stop before May. Verifies the correct 03:00 gap position plus the UNTIL boundary in a +02/+03 zone."
+  },
+  {
+    "name": "spring-forward-gap-berlin-monthly-last-sunday-0230",
+    "zone": "Europe/Berlin",
+    "start": "2026-02-22T02:30",
+    "end": "2026-02-22T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": [
+        -1
+      ],
+      "monthlyAnchor": null,
+      "endType": "NEVER",
+      "endDate": null,
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-02-01T00:00",
+      "to": "2026-05-01T00:00"
+    },
+    "rationale": "MONTHLY bySetPos=[-1] byWeekday=[6] = LAST SUNDAY of month, seed 02:30 Berlin. The last Sunday of March 2026 is EXACTLY the EU transition day 2026-03-29, so the nthWeekdayInMonth selector deposits the occurrence directly on the gap day and atSeedTime(02:30) rolls it to 03:30 (+02:00)=2026-03-29T01:30Z. Feb (last Sun 2026-02-22) = 02:30 (+01:00)=2026-02-22T01:30Z; Apr (last Sun 2026-04-26) = 02:30 (+02:00)=2026-04-26T00:30Z. Distinct from the byMonthDay case: the in-gap instant here is produced by the bySetPos/nthWeekdayInMonth path (weekday-scan + atSeedTime), so Foundation's calendar.component(.weekday) mapping AND its date(from:) gap roll must both agree with luxon on the transition-Sunday."
+  },
+  {
+    "name": "sub-hour-dst-lordhowe-30min-gap-daily",
+    "zone": "Australia/Lord_Howe",
+    "start": "2026-10-02T02:15",
+    "end": "2026-10-02T03:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 5
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-01T00:00",
+      "to": "2026-10-08T00:00"
+    },
+    "rationale": "Australia/Lord_Howe has a 30-MINUTE spring-forward: 2026-10-04 02:00->02:30 (+10:30 -> +11:00). A daily series anchored 10-02 02:15 steps through the gap. luxon: 10-03 02:15 is +10:30 (UTC 2026-10-02T15:45Z) while 10-04 02:15 lands past the 30-min gap at +11:00 (UTC 2026-10-03T15:45Z) and 10-05 02:15 is +11:00 (UTC 2026-10-04T15:15Z) — the wall-clock 02:15 is preserved by cumulative stepping and the offset flips by exactly 30 min across the transition. Swift RecurrenceEngine (real engine compiled standalone) reproduces every instant to the millisecond (5/5 match). No sub-hour-DST zone exists in the 57-case corpus; this pins the 30-minute gap-crossing wall-clock preservation."
+  },
+  {
+    "name": "sub-hour-dst-lordhowe-30min-ambiguous-daily",
+    "zone": "Australia/Lord_Howe",
+    "start": "2026-04-03T01:30",
+    "end": "2026-04-03T02:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 5
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-01T00:00",
+      "to": "2026-04-08T00:00"
+    },
+    "rationale": "Lord_Howe fall-back 2026-04-05 02:00->01:30 makes wall-clock [01:30,02:00) AMBIGUOUS (occurs at both +11:00 and +10:30). A daily series at 01:30 crosses it: luxon 04-04 01:30 = +11:00 (UTC 04-03T14:30Z), 04-05 01:30 resolves to the LATER/standard offset +10:30 (UTC 04-04T15:00Z), 04-06 01:30 = +10:30 (UTC 04-05T15:00Z). This is the exact axis where luxon (fromISO seed -> prefers later offset) and Foundation (prefers earlier) could diverge; the real Swift engine matches all 5 instants because cumulative stepping carries the seed's +11:00 into 04-05 identically. Pins the 30-minute ambiguous-hour resolution end-to-end."
+  },
+  {
+    "name": "sub-hour-dst-chatham-1345-gap-daily",
+    "zone": "Pacific/Chatham",
+    "start": "2026-09-25T02:45",
+    "end": "2026-09-25T03:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 5
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-09-24T00:00",
+      "to": "2026-10-01T00:00"
+    },
+    "rationale": "Pacific/Chatham runs +12:45 (std) / +13:45 (DST) — a 45-minute BASE offset. Spring-forward 2026-09-27 02:45->03:45 (+12:45 -> +13:45). Daily at 02:45 steps through the gap: luxon 09-26 02:45 = +12:45 (UTC 09-25T14:00Z), 09-27 02:45 lands past the gap at +13:45 (UTC 09-26T14:00Z), 09-28 02:45 = +13:45 (UTC 09-27T13:00Z). Exercises the largest base offset in the tz database with a DST transition; real Swift engine reproduces all 5 to the millisecond. Verifies 45-minute-base + DST arithmetic that no corpus case covers."
+  },
+  {
+    "name": "sub-hour-dst-chatham-1245-ambiguous-weekly",
+    "zone": "Pacific/Chatham",
+    "start": "2026-03-08T03:15",
+    "end": "2026-03-08T04:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": [
+        6
+      ],
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 6
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-08T00:00",
+      "to": "2026-04-26T00:00"
+    },
+    "rationale": "Chatham fall-back 2026-04-05 03:45->02:45 makes [02:45,03:45) ambiguous (base offset +12:45). A weekly-on-Sunday (byWeekday=[6]) series re-materializes 03:15 onto each Sunday via startOf('week')+6days then .set(hour,minute) — including the fall-back Sunday 04-05, landing 03:15 IN the ambiguous window: luxon UTC 04-04T14:30Z (+12:45). The weekly re-materialization path (weekStart Monday base) is the one most likely to diverge; the real Swift engine (weeklyCandidates -> settingTime) matches all 6 Sundays exactly. Combines sub-hour ambiguity with the byWeekday selector."
+  },
+  {
+    "name": "sub-hour-dst-adelaide-930-gap-monthly",
+    "zone": "Australia/Adelaide",
+    "start": "2026-09-04T02:30",
+    "end": "2026-09-04T03:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        4
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 3
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-09-01T00:00",
+      "to": "2026-12-01T00:00"
+    },
+    "rationale": "Australia/Adelaide is +9:30 (std) / +10:30 (DST) — 30-minute BASE offset, full-hour DST shift. Spring-forward 2026-10-04 02:00->03:00 makes [02:00,03:00) a gap. Monthly-on-day-4 at 02:30 re-materializes via monthStart.set(day:4)+atSeedTime: luxon Sep-04 02:30 = +9:30 (UTC 09-03T17:00Z), Oct-04 02:30 falls IN the spring gap and rolls to 03:30 +10:30 (UTC 10-03T17:00Z), Nov-04 02:30 = +10:30 (UTC 11-03T16:00Z). Exercises a monthly selector materializing a nonexistent wall-clock in a 30-min-base zone; real Swift engine matches 3/3. The 30-minute base offset is absent from the corpus."
+  },
+  {
+    "name": "sub-hour-dst-kathmandu-545-nodst-daily",
+    "zone": "Asia/Kathmandu",
+    "start": "2026-02-26T05:45",
+    "end": "2026-02-26T06:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 5
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-02-24T00:00",
+      "to": "2026-03-05T00:00"
+    },
+    "rationale": "Asia/Kathmandu is a fixed +5:45 offset with NO DST — the classic 45-minute-offset zone. A daily series crossing the Feb->Mar month boundary must apply the same +5:45 to every instant: luxon 02-26/27/28 and 03-01/02 at 05:45 all map to UTC 00:00Z on their respective days. Pins that both engines apply the non-integer offset uniformly across a month rollover with no transition; real Swift engine matches 5/5. The corpus's single Kolkata case (+5:30) does not cover +5:45."
+  },
+  {
+    "name": "sub-hour-dst-eucla-845-nodst-monthly31-overflow",
+    "zone": "Australia/Eucla",
+    "start": "2026-01-31T08:45",
+    "end": "2026-01-31T09:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "MONTHLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": [
+        31
+      ],
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "COUNT",
+      "endDate": null,
+      "count": 4
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-01-01T00:00",
+      "to": "2026-08-01T00:00"
+    },
+    "rationale": "Australia/Eucla is a fixed +8:45 offset with NO DST — a rare 45-minute-offset zone. Combined with BYMONTHDAY=31: Jan 31 exists (UTC 2026-01-31T00:00Z, +8:45), Feb has no 31st (DROPPED, not clamped), Mar 31 exists (UTC 2026-03-31T00:00Z), Apr has no 31st (dropped), so 4 counted occurrences resolve to Jan 31, Mar 31, May 31, Jul 31. Exercises the sub-hour offset simultaneously with month-day overflow-drop; the real Swift engine (dayInMonthOrNull month-mismatch detection) matches every kept instant and the same drops. Neither +8:45 nor this overflow interaction appears in the corpus."
+  },
+  {
+    "name": "until-boundary-ny-fallback-daily-2330",
+    "zone": "America/New_York",
+    "start": "2026-10-30T23:30",
+    "end": "2026-10-31T00:30",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-11-01",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-30T00:00",
+      "to": "2026-11-03T00:00"
+    },
+    "rationale": "endDate 2026-11-01 is the New York FALL-BACK day (25h; 02:00 -> 01:00, offset -04:00 -> -05:00). luxon DateTime.fromISO('2026-11-01',{zone}).endOf('day') = 2026-11-01T23:59:59.999-05:00 (millis 1793595599999) -- note it adopts the POST-transition -05:00 offset, not the -04:00 that midnight of that day had. The daily series drifts wall-clock: last kept occurrence 2026-11-01T23:30-05:00 (utc 2026-11-02T04:30Z, millis 1793593800000), which is < boundary so KEPT; the next step 2026-11-02T23:30 would be > boundary and is correctly dropped. Foundation builds the boundary via Calendar.date(from:) with hour=23,minute=59,second=59,nanosecond=999e6 on the 25h day; it must land on the SAME -05:00 offset (23:59 is unambiguous, past the 01:xx fold) and match luxon's 1793595599999 to the millisecond. Any snap-to-fold or DST-mid-day mishandling in Foundation would shift the boundary by 3600000 ms and change whether the final occurrence is kept."
+  },
+  {
+    "name": "until-boundary-ny-spring-yearly-seed-eq-enddate",
+    "zone": "America/New_York",
+    "start": "2026-03-08T23:30",
+    "end": "2026-03-09T00:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "YEARLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-03-08",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-01T00:00",
+      "to": "2028-03-10T00:00"
+    },
+    "rationale": "Inclusive-boundary where UNTIL endDate EXACTLY equals the (single) occurrence's date, on the SPRING-FORWARD short day. 2026-03-08 is the New York spring day (23h; gap 02:00 -> 03:00, offset -05:00 -> -04:00). luxon endOf('day') = 2026-03-08T23:59:59.999-04:00 (millis 1773028799999) -- adopts the POST-transition -04:00 offset. The seed occurrence 2026-03-08T23:30-04:00 (millis 1773027000000) is < boundary so the series' first-and-only instance is KEPT (proving UNTIL is inclusive down to the same calendar day). The next yearly step 2027-03-08T23:30-05:00 is > boundary and dropped, so the wide 2-year window yields exactly ONE occurrence. Foundation must produce the identical -04:00 boundary on the 23h day AND keep the equal-date seed; an off-by-one exclusive comparison, or a boundary computed at the pre-transition -05:00 offset, would either drop the sole occurrence or admit the 2027 one."
+  },
+  {
+    "name": "until-boundary-berlin-fallback-sunday-weekly",
+    "zone": "Europe/Berlin",
+    "start": "2026-10-11T22:00",
+    "end": "2026-10-11T23:00",
+    "isAllDay": false,
+    "config": {
+      "frequency": "WEEKLY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-10-25",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-10-04T00:00",
+      "to": "2026-11-08T00:00"
+    },
+    "rationale": "UNTIL endDate 2026-10-25 lands ON an occurrence date AND that day is the Berlin FALL-BACK day (25h; 03:00 -> 02:00, offset +02:00 -> +01:00). Weekly Sunday 22:00 series: luxon endOf('day') = 2026-10-25T23:59:59.999+01:00 (millis 1792969199999, post-transition +01:00). The final kept occurrence 2026-10-25T22:00+01:00 (utc 2026-10-25T21:00Z, millis 1792962000000) carries the POST-transition +01:00 -- so its UTC instant is one hour LATER than the +02:00 weeks before it, and it is still <= boundary so KEPT. The next week 2026-11-01T22:00+01:00 is > boundary and dropped -> exactly 3 occurrences in a window that spans 5 Sundays. Confirms both the inclusive endDate==occurrence-date boundary and that a weekly cursor drifting through a fall-back keeps its 22:00 wall-clock with the new offset; Foundation's Calendar.date(byAdding:.day,7) plus the +01:00 boundary must agree to the millisecond."
+  },
+  {
+    "name": "until-boundary-berlin-spring-daily-2230",
+    "zone": "Europe/Berlin",
+    "start": "2026-03-27T22:30",
+    "end": "2026-03-27T23:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-03-29",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-03-27T00:00",
+      "to": "2026-03-31T00:00"
+    },
+    "rationale": "endDate 2026-03-29 is the Berlin SPRING-FORWARD short day (23h; gap 02:00 -> 03:00, offset +01:00 -> +02:00). luxon endOf('day') = 2026-03-29T23:59:59.999+02:00 (millis 1774821599999) -- POST-transition +02:00 offset on the 23h day. The daily 22:30 series' last kept occurrence 2026-03-29T22:30+02:00 (utc 2026-03-29T20:30Z, millis 1774816200000) sits below the boundary and is KEPT; 2026-03-30T22:30 is dropped -> exactly 3 occurrences. This is the spring-side companion to the fall-back cases: the boundary end-of-day on a 23h day must be computed at the +02:00 offset. If Foundation computed the boundary from the day's START offset (+01:00) it would be 3600000 ms earlier (1774817999999), which the 22:30 occurrence at millis 1774816200000 still clears -- but the parity is exact-millis, so any offset mismatch on the boundary itself is a divergence even when the kept/dropped set is unchanged."
+  },
+  {
+    "name": "until-boundary-lordhowe-fallback-daily-2345",
+    "zone": "Australia/Lord_Howe",
+    "start": "2026-04-03T23:45",
+    "end": "2026-04-04T00:15",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-04-05",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-03T00:00",
+      "to": "2026-04-07T00:00"
+    },
+    "rationale": "Exotic 30-MINUTE DST. Lord Howe falls back on 2026-04-05 (02:00 -> 01:30, offset +11:00 -> +10:30 -- a HALF-hour step). luxon endOf('day') = 2026-04-05T23:59:59.999+10:30 (millis 1775395799999, post-transition +10:30). The daily 23:45 series' final kept occurrence 2026-04-05T23:45+10:30 (utc 2026-04-05T13:15Z, millis 1775394900000) is <= boundary so KEPT; 2026-04-06T23:45 (millis 1775481300000) is > boundary and dropped -> 3 occurrences. This stresses the boundary + cursor arithmetic against a fractional-hour offset that a naive whole-hour DST model would get wrong: the utc instants across the transition are +11:00 then +10:30, a 30-minute drift, and the boundary itself carries the +10:30 offset. Foundation's Calendar must honour the 30-minute offset for both the stepped occurrence and the end-of-day construction."
+  },
+  {
+    "name": "until-boundary-chatham-fallback-daily-2350",
+    "zone": "Pacific/Chatham",
+    "start": "2026-04-03T23:50",
+    "end": "2026-04-04T00:10",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-04-05",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-04-03T00:00",
+      "to": "2026-04-07T00:00"
+    },
+    "rationale": "Exotic +12:45 / +13:45 quarter-hour offset. Chatham Islands fall back on 2026-04-05 (03:45 -> 02:45, offset +13:45 -> +12:45, a 45-minute-based zone with a 1h DST step). luxon endOf('day') = 2026-04-05T23:59:59.999+12:45 (millis 1775387699999, post-transition +12:45). The daily 23:50 series' last kept occurrence 2026-04-05T23:50+12:45 (utc 2026-04-05T11:05Z, millis 1775387100000) is <= boundary so KEPT; 2026-04-06T23:50 (millis 1775473500000) is > boundary and dropped -> 3 occurrences. Distinct from Lord Howe: here the BASE offset has a :45 fraction, so both the stepped occurrence's utc minutes (:05) and the boundary must reflect the +12:45 offset exactly. Foundation's Calendar.date(from:) building 23:59:59.999 in a +12:45 zone, plus the cumulative daily step across the fold, must match luxon to the millisecond."
+  },
+  {
+    "name": "until-boundary-utc-control-daily-2359",
+    "zone": "UTC",
+    "start": "2026-06-13T23:59",
+    "end": "2026-06-14T00:29",
+    "isAllDay": false,
+    "config": {
+      "frequency": "DAILY",
+      "interval": 1,
+      "byWeekday": null,
+      "byMonthDay": null,
+      "byMonth": null,
+      "bySetPos": null,
+      "monthlyAnchor": null,
+      "endType": "UNTIL_DATE",
+      "endDate": "2026-06-15",
+      "count": null
+    },
+    "exceptions": [],
+    "window": {
+      "from": "2026-06-13T00:00",
+      "to": "2026-06-17T00:00"
+    },
+    "rationale": "Zero-offset CONTROL isolating the inclusive end-of-day comparison from any DST noise. luxon endOf('day') = 2026-06-15T23:59:59.999Z (millis 1781567999999). The boundary-hugging daily 23:59 series' final occurrence 2026-06-15T23:59:00.000Z (millis 1781567940000) sits 59999 ms under the boundary and is KEPT; 2026-06-16T23:59 is > boundary and dropped -> exactly 3 occurrences. This pins that UNTIL is the .999-ms end-of-day (not start-of-day, not exclusive-midnight): an implementation that treated UNTIL as midnight of endDate, or as endDate 00:00, would wrongly drop the 2026-06-15T23:59 occurrence. Foundation's nanosecond=999e6 end-of-day + rounded() epochMillis must equal 1781567999999, and the > comparison must be strict so the 23:59 occurrence 60s before the boundary survives."
+  }
+]

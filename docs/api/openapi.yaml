@@ -913,7 +913,10 @@ paths:
         Morning daily brief (D2). Optional `date` (YYYY-MM-DD, user-local; defaults
         to today). Cache-aside: a 24h Redis cache keyed by userId+localDate bounds
         the MAIN-model cost to one generation per user per local day. `brief` is
-        null when generation produced nothing usable.
+        null when generation produced nothing usable. Optional `refresh` (default
+        false): when true, the cache read is BYPASSED, the brief is regenerated,
+        and the fresh value OVERWRITES the cached entry — used to force a fresh
+        brief on demand (e.g. right after the user changes their brief settings).
       security:
         - bearerAuth: []
       parameters:
@@ -925,6 +928,14 @@ paths:
             pattern: '^\d{4}-\d{2}-\d{2}$'
             example: '2026-06-27'
           description: Local date (YYYY-MM-DD, user timezone) to brief on; defaults to today.
+        - name: refresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+            example: true
+          description: When true, bypass the cache read, regenerate, and overwrite the cached brief.
       responses:
         '200':
           description: The daily brief for the resolved local day.
@@ -1051,6 +1062,77 @@ paths:
                 $ref: '#/components/schemas/ReportSettingsDTO'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+
+  /users/me/brief-settings:
+    get:
+      tags: [users]
+      summary: Get the current user daily-brief settings
+      description: |
+        Returns the signed-in user's daily-brief personalization settings, creating
+        a default (`customPrompt: null`) on the first read so the iOS Settings
+        screen always has a row to render. `customPrompt` is the user's own
+        instruction appended to the base daily-brief prompt; null means the base
+        prompt is used as-is.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current daily-brief settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BriefSettingsDTO'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    patch:
+      tags: [users]
+      summary: Update the current user custom daily-brief prompt
+      description: |
+        Sets the signed-in user's custom brief prompt. `customPrompt` is required
+        in the body but nullable: a non-empty string (trimmed, ≤2000 chars) sets
+        it; an explicit `null` (or an empty/whitespace-only string) clears it back
+        to the base prompt. The custom prompt AUGMENTS the base prompt (it never
+        replaces the base structure/safety/format rules). This PATCH invalidates
+        today's cached brief for the user so the new prompt takes effect on the
+        next `GET /users/me/daily-brief` read.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBriefSettingsRequest'
+      responses:
+        '200':
+          description: Updated daily-brief settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BriefSettingsDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Missing, invalid, or expired bearer token.
+    delete:
+      tags: [users]
+      summary: Reset the current user daily-brief settings
+      description: |
+        Resets the signed-in user's brief settings to default by clearing
+        `customPrompt`, and invalidates today's cached brief. Returns the now-
+        cleared settings (`customPrompt: null`). Idempotent — succeeds whether or
+        not a custom prompt was set.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The now-cleared daily-brief settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BriefSettingsDTO'
         '401':
           description: Missing, invalid, or expired bearer token.
 
@@ -1229,6 +1311,36 @@ components:
           description: |
             Preferred delivery channel (S7). PUSH persists but only Telegram
             delivers today — push delivery is deferred to D1.
+    BriefSettingsDTO:
+      type: object
+      description: |
+        The signed-in user's daily-brief personalization settings. `customPrompt`
+        is the user's own instruction appended to the base daily-brief prompt, or
+        null when unset (the base prompt is used as-is).
+      required: [customPrompt]
+      properties:
+        customPrompt:
+          type: [string, 'null']
+          example: 'Keep it very brief and mention the weather if relevant.'
+          description: |
+            The user's custom instruction appended to the base daily-brief prompt,
+            or null when unset.
+    UpdateBriefSettingsRequest:
+      type: object
+      description: |
+        Sets the user's custom brief prompt. `customPrompt` is required in the body
+        but nullable: a non-empty string (trimmed, ≤2000 chars) sets it; null (or
+        an empty/whitespace-only string, normalized to null) clears it back to the
+        base prompt.
+      required: [customPrompt]
+      properties:
+        customPrompt:
+          type: [string, 'null']
+          maxLength: 2000
+          example: 'Keep it very brief and mention the weather if relevant.'
+          description: |
+            The custom instruction appended to the base daily-brief prompt. A non-
+            empty string sets it; null (or an empty string) clears it.
     PersonaSettingsDTO:
       type: object
       description: |

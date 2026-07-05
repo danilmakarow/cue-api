@@ -15,4 +15,6 @@ export { ConversationSummaryRepository } from './conversation-summary.repository
 export { UserMemoryFactRepository } from './user-memory-fact.repository';
 export { PendingQuestionRepository } from './pending-question.repository';
 export { UserReportSettingsRepository } from './user-report-settings.repository';
+export { UserBriefSettingsRepository } from './user-brief-settings.repository';
 export { PersonaPromptRepository } from './persona-prompt.repository';
+export { UserSyncStateRepository } from './user-sync-state.repository';

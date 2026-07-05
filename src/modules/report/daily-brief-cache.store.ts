@@ -56,4 +56,14 @@ export class DailyBriefCacheStore {
       DAILY_BRIEF_TTL_SECONDS,
     );
   }
+
+  /**
+   * Drops the cached brief for a user + local date so the next read misses and
+   * regenerates. Used when the user changes their brief settings, so the new
+   * custom prompt takes effect immediately. Idempotent — a no-op when the key
+   * is already absent.
+   */
+  async invalidate(userId: string, localDate: string): Promise<void> {
+    await this.redis.del(dailyBriefKey(userId, localDate));
+  }
 }

@@ -25,12 +25,13 @@ export class DailyBriefController {
    * Returns the daily brief for the current user on the given local `date`
    * (`YYYY-MM-DD`, user timezone) — or today's when omitted. Served from a 24h
    * per-day cache; a miss runs ONE MAIN-model generation and caches it. `brief`
-   * is null when the day yielded nothing usable.
+   * is null when the day yielded nothing usable. `refresh=true` bypasses the
+   * cache read, regenerates, and overwrites the cached value.
    */
   @Get()
   @Swagger({
     summary:
-      'Get the current user daily brief for a local day (cached per day; on-demand MAIN-model call).',
+      'Get the current user daily brief for a local day (cached per day; refresh=true regenerates; on-demand MAIN-model call).',
     responseDto: DailyBriefDTO,
     queryParamsDto: DailyBriefQuery,
     responseStatus: 200,
@@ -42,6 +43,7 @@ export class DailyBriefController {
     const { brief, localDate } = await this.dailyBriefService.getBrief(
       user,
       query.date,
+      query.refresh,
     );
 
     return { brief, localDate };

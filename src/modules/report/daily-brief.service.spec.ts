@@ -163,4 +163,55 @@ describe('DailyBriefService (D2)', () => {
       localDate: tomorrow,
     });
   });
+
+  it('refresh=true BYPASSES the cache read, regenerates, and OVERWRITES the cache', async () => {
+    const { service, reportGeneratorService, dailyBriefCacheStore, cache } =
+      buildHarness();
+
+    // Prime the cache with a stale brief for today.
+    cache.set(`user-1:${TODAY_LOCAL}`, 'STALE brief');
+    reportGeneratorService.generateForUser.mockResolvedValueOnce('FRESH brief');
+
+    const result = await service.getBrief(user(), TODAY_LOCAL, true);
+
+    // The cache read was bypassed — the stale value was NOT returned.
+    expect(dailyBriefCacheStore.get).not.toHaveBeenCalled();
+    expect(result.brief).toBe('FRESH brief');
+    // Regeneration ran and the fresh value overwrote the cache.
+    expect(reportGeneratorService.generateForUser).toHaveBeenCalledTimes(1);
+    expect(dailyBriefCacheStore.set).toHaveBeenCalledWith(
+      'user-1',
+      TODAY_LOCAL,
+      'FRESH brief',
+    );
+    expect(cache.get(`user-1:${TODAY_LOCAL}`)).toBe('FRESH brief');
+  });
+
+  it('refresh=false (default) still serves the cached brief', async () => {
+    const { service, reportGeneratorService, dailyBriefCacheStore, cache } =
+      buildHarness();
+
+    cache.set(`user-1:${TODAY_LOCAL}`, 'CACHED brief');
+
+    const result = await service.getBrief(user(), TODAY_LOCAL, false);
+
+    expect(dailyBriefCacheStore.get).toHaveBeenCalledTimes(1);
+    expect(result.brief).toBe('CACHED brief');
+    expect(reportGeneratorService.generateForUser).not.toHaveBeenCalled();
+  });
+
+  it('refresh=true does NOT overwrite the cache when regeneration is empty', async () => {
+    const { service, reportGeneratorService, dailyBriefCacheStore, cache } =
+      buildHarness();
+
+    cache.set(`user-1:${TODAY_LOCAL}`, 'STALE brief');
+    reportGeneratorService.generateForUser.mockResolvedValueOnce(null);
+
+    const result = await service.getBrief(user(), TODAY_LOCAL, true);
+
+    expect(result.brief).toBeNull();
+    // An empty regeneration is never cached — the stale entry is left intact.
+    expect(dailyBriefCacheStore.set).not.toHaveBeenCalled();
+    expect(cache.get(`user-1:${TODAY_LOCAL}`)).toBe('STALE brief');
+  });
 });

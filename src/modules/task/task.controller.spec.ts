@@ -37,30 +37,29 @@ describe('TaskController.setCompletion', () => {
   };
 
   describe('series / one-off branch (no occurrenceStart)', () => {
-    it('asserts ownership via findById BEFORE setCompleted (IDOR guard)', async () => {
+    it('delegates to setCompleted with the current user id (ownership enforced in the service)', async () => {
       const { controller, taskService } = buildController();
       const task = makeTask({ completedAt: new Date('2026-06-02T10:00:00Z') });
 
-      taskService.findById.mockResolvedValue(task);
       taskService.setCompleted.mockResolvedValue(task);
 
       await controller.setCompletion(makeUser(), 'task-1', {
         isCompleted: true,
       });
 
-      // findById must run first (ownership assertion), then setCompleted.
-      expect(taskService.findById).toHaveBeenCalledWith('user-1', 'task-1');
-
-      const findOrder = taskService.findById.mock.invocationCallOrder[0];
-      const setOrder = taskService.setCompleted.mock.invocationCallOrder[0];
-
-      expect(findOrder).toBeLessThan(setOrder);
+      // Ownership now lives inside setCompleted (it calls findById), so the
+      // controller simply forwards the authed user id — no separate pre-check.
+      expect(taskService.setCompleted).toHaveBeenCalledWith(
+        'user-1',
+        'task-1',
+        true,
+      );
     });
 
-    it("does NOT call setCompleted when findById rejects another user's task", async () => {
+    it("propagates setCompleted's ownership rejection (IDOR guard lives in the service)", async () => {
       const { controller, taskService } = buildController();
 
-      taskService.findById.mockRejectedValue(
+      taskService.setCompleted.mockRejectedValue(
         new ForbiddenException('You do not have access to this calendar'),
       );
 
@@ -69,8 +68,6 @@ describe('TaskController.setCompletion', () => {
           isCompleted: true,
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
-
-      expect(taskService.setCompleted).not.toHaveBeenCalled();
     });
 
     it('returns the persisted completedAt', async () => {

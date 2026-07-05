@@ -74,6 +74,19 @@ export class TaskOccurrenceExceptionService {
   }
 
   /**
+   * Hard-deletes the exception row for `(taskId, originalStart)`, if any. Used
+   * when a materialized override child absorbs the pre-existing exception's span
+   * / title / completion — suppression is then carried by the child, and the
+   * exception must not linger (it has no tombstone). No-op when none exists.
+   */
+  async deleteForSlot(taskId: string, originalStart: Date): Promise<void> {
+    await this.taskOccurrenceExceptionDatabaseService.delete({
+      taskId,
+      originalStartAt: originalStart,
+    });
+  }
+
+  /**
    * Upserts the override for a single occurrence identified by
    * `(taskId, originalStart)`: mutates the existing row when present, otherwise
    * creates one. Backed by the unique constraint, so concurrent writers

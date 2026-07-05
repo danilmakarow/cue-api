@@ -15,7 +15,9 @@ export { ConversationSummaryDatabaseService } from './conversation-summary-datab
 export { UserMemoryFactDatabaseService } from './user-memory-fact-database.service';
 export { PendingQuestionDatabaseService } from './pending-question-database.service';
 export { UserReportSettingsDatabaseService } from './user-report-settings-database.service';
+export { UserBriefSettingsDatabaseService } from './user-brief-settings-database.service';
 export {
   PersonaPromptDatabaseService,
   JARVIS_PRESET_NAME,
 } from './persona-prompt-database.service';
+export { UserSyncStateDatabaseService } from './user-sync-state-database.service';

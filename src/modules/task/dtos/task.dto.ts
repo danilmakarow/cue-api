@@ -100,6 +100,28 @@ export class TaskDTO {
   @ApiProperty({ format: 'uuid', nullable: true })
   notificationStrategyId: string | null;
 
+  /**
+   * Non-null when this task is a materialized override child — the recurring
+   * parent's id. A child carries no recurrence rule of its own.
+   */
+  @ApiProperty({ format: 'uuid', nullable: true })
+  parentTaskId: string | null;
+
+  /** RECURRENCE-ID: the pre-override generated instant this child replaces. */
+  @ApiProperty({ format: 'date-time', nullable: true })
+  originalStartAt: string | null;
+
+  /** Set when the parent rule no longer generates this child's original slot. */
+  @ApiProperty({ format: 'date-time', nullable: true })
+  detachedAt: string | null;
+
+  /**
+   * Bumped when the task's effective-rule inputs change; the delta client uses
+   * `recurrenceUpdatedAt > since` as its "re-expansion needed" discriminator.
+   */
+  @ApiProperty({ format: 'date-time', nullable: true })
+  recurrenceUpdatedAt: string | null;
+
   @ApiProperty({ format: 'date-time' })
   createdAt: string;
 
@@ -173,6 +195,21 @@ export class OccurrenceDTO {
 
   @ApiProperty()
   isException: boolean;
+
+  /**
+   * Non-null when this occurrence is a materialized override of a recurring
+   * series — the parent task's id. `taskId` above is then the CHILD's id, so
+   * completion / edit / delete address the child directly.
+   */
+  @ApiProperty({ format: 'uuid', nullable: true })
+  parentTaskId: string | null;
+
+  /**
+   * True when this override child's parent rule no longer generates its original
+   * slot (the client renders a "detached from series" affordance).
+   */
+  @ApiProperty()
+  isDetached: boolean;
 }
 
 /**
@@ -246,6 +283,14 @@ export const toTaskDTO = (
     : null,
   reminders: reminders.map(toReminderResultDto),
   notificationStrategyId: task.notificationStrategyId,
+  parentTaskId: task.parentTaskId,
+  originalStartAt: task.originalStartAt
+    ? task.originalStartAt.toISOString()
+    : null,
+  detachedAt: task.detachedAt ? task.detachedAt.toISOString() : null,
+  recurrenceUpdatedAt: task.recurrenceUpdatedAt
+    ? task.recurrenceUpdatedAt.toISOString()
+    : null,
   createdAt: task.createdAt.toISOString(),
   updatedAt: task.updatedAt.toISOString(),
 });
@@ -289,5 +334,7 @@ export const toOccurrenceDTO = (occurrence: Occurrence): OccurrenceDTO => {
       : null,
     isRecurring: occurrence.isRecurring,
     isException: occurrence.isException,
+    parentTaskId: occurrence.parentTaskId,
+    isDetached: occurrence.isDetached,
   };
 };

@@ -169,6 +169,17 @@ const routedFindAll = (fixtures: RangeFixtures) =>
   });
 
 /**
+ * `findOneBy` stub that returns the loaded task for an id lookup but null for the
+ * override-child lookup (a `parentTaskId` in the where) — i.e. no materialized
+ * override child exists by default. Keeps the pre-override behavior of the
+ * completion / skip / override paths intact under the new child-aware code.
+ */
+const routedFindOneBy = (task: Task | null) =>
+  jest.fn((where: FindOptionsWhere<Task>) =>
+    Promise.resolve('parentTaskId' in where ? null : task),
+  );
+
+/**
  * Builds a calendar-database stub. By default the single calendar `cal-1` is
  * owned by `user-1`.
  */
@@ -208,6 +219,19 @@ const buildNotificationRuleService = () => ({
   replaceForTask: jest.fn().mockResolvedValue([]),
 });
 
+/**
+ * Builds a sync-state service stub — every mutation bumps the per-user revision;
+ * the tests only need the call to resolve.
+ */
+const buildSyncStateService = () => ({
+  bump: jest.fn().mockResolvedValue(undefined),
+  getState: jest.fn().mockResolvedValue({
+    revision: '1',
+    changedAt: null,
+    serverTime: new Date().toISOString(),
+  }),
+});
+
 const WINDOW_FROM = zoned('2026-06-01T00:00');
 const WINDOW_TO = zoned('2026-06-08T00:00');
 
@@ -230,6 +254,7 @@ describe('TaskService.findOccurrencesInRange', () => {
       realEngine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, exceptionService };
@@ -526,6 +551,7 @@ describe('TaskService recurring-series conflict checks (Story 9)', () => {
       realEngine as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb };
@@ -689,6 +715,7 @@ describe('TaskService.create', () => {
       engine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb, calendarDb, groupDb };
@@ -790,7 +817,8 @@ describe('TaskService recurring-edit scopes', () => {
    */
   const buildService = (task: Task) => {
     const taskDb = {
-      findOneBy: jest.fn().mockResolvedValue(task),
+      findOneBy: routedFindOneBy(task),
+      findAllBy: jest.fn().mockResolvedValue([]),
       // `findByIdWithRule` / the membership guard read the anchor via `findOne`;
       // recurrence is the inline config on the row, so the fixture carries it.
       findOne: jest.fn().mockResolvedValue(task),
@@ -810,6 +838,7 @@ describe('TaskService recurring-edit scopes', () => {
       engine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb, exceptionService };
@@ -859,7 +888,8 @@ describe('TaskService recurring-edit scopes', () => {
       exceptionService = buildExceptionService(),
     ) => {
       const taskDb = {
-        findOneBy: jest.fn().mockResolvedValue(anchor),
+        findOneBy: routedFindOneBy(anchor),
+      findAllBy: jest.fn().mockResolvedValue([]),
         findOne: jest.fn().mockResolvedValue(anchor),
         createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
         save: jest.fn((entity: Task) => Promise.resolve({ ...entity })),
@@ -871,6 +901,7 @@ describe('TaskService recurring-edit scopes', () => {
         new RecurrenceRuleService() as never,
         exceptionService as never,
         buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
       );
 
       return { service, exceptionService };
@@ -1045,7 +1076,8 @@ describe('TaskService recurring-edit scopes', () => {
       } as TaskOccurrenceException);
 
       const taskDb = {
-        findOneBy: jest.fn().mockResolvedValue(task),
+        findOneBy: routedFindOneBy(task),
+      findAllBy: jest.fn().mockResolvedValue([]),
         findOne: jest.fn().mockResolvedValue(task),
         createInstance: jest.fn(),
         save: jest.fn(),
@@ -1057,6 +1089,7 @@ describe('TaskService recurring-edit scopes', () => {
         {} as never,
         exceptionService as never,
         buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
       );
 
       const result = await service.setOccurrenceCompleted(
@@ -1217,7 +1250,8 @@ describe('TaskService.update (details scope)', () => {
    */
   const buildService = (task: Task) => {
     const taskDb = {
-      findOneBy: jest.fn().mockResolvedValue(task),
+      findOneBy: routedFindOneBy(task),
+      findAllBy: jest.fn().mockResolvedValue([]),
       save: jest.fn((entity: Task) => Promise.resolve(entity)),
     };
     const service = new TaskService(
@@ -1227,6 +1261,7 @@ describe('TaskService.update (details scope)', () => {
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb };
@@ -1300,7 +1335,8 @@ describe('TaskService.update — per field', () => {
     groupDbOverride?: { findOneBy: jest.Mock },
   ) => {
     const taskDb = {
-      findOneBy: jest.fn().mockResolvedValue(task),
+      findOneBy: routedFindOneBy(task),
+      findAllBy: jest.fn().mockResolvedValue([]),
       save: jest.fn((entity: Task) => Promise.resolve(entity)),
     };
     const service = new TaskService(
@@ -1310,6 +1346,7 @@ describe('TaskService.update — per field', () => {
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb };
@@ -1588,7 +1625,8 @@ describe('TaskService.update — recurrence regression', () => {
    */
   const buildService = (task: Task) => {
     const taskDb = {
-      findOneBy: jest.fn().mockResolvedValue(task),
+      findOneBy: routedFindOneBy(task),
+      findAllBy: jest.fn().mockResolvedValue([]),
       save: jest.fn((entity: Task) => Promise.resolve(entity)),
     };
     const service = new TaskService(
@@ -1598,6 +1636,7 @@ describe('TaskService.update — recurrence regression', () => {
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb };
@@ -1681,6 +1720,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       realEngine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service };
@@ -1785,6 +1825,7 @@ describe('TaskService.findOverlapping (occurrence-aware)', () => {
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     const clashes = await service.findOverlapping(
@@ -1928,7 +1969,8 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     const savedTasks: Task[] = [];
     const taskDb = {
       findOne: jest.fn().mockResolvedValue(anchor),
-      findOneBy: jest.fn().mockResolvedValue(anchor),
+      findOneBy: routedFindOneBy(anchor),
+      findAllBy: jest.fn().mockResolvedValue([]),
       createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
       save: jest.fn((entity: Task) => {
         const withId = entity.id ? entity : { ...entity, id: 'new-task' };
@@ -1945,6 +1987,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       engine as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, engine, taskDb, savedTasks };
@@ -2269,7 +2312,8 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
     const engine = new RecurrenceRuleService();
     const taskDb = {
       findOne: jest.fn().mockResolvedValue(anchor),
-      findOneBy: jest.fn().mockResolvedValue(anchor),
+      findOneBy: routedFindOneBy(anchor),
+      findAllBy: jest.fn().mockResolvedValue([]),
       createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
       save: jest.fn((entity: Task) =>
         Promise.resolve({ ...entity, id: entity.id ?? 'new-task' }),
@@ -2282,6 +2326,7 @@ describe('TaskService.splitSeries (real-engine seam)', () => {
       engine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     const newMaster = await service.splitSeries(
@@ -2377,7 +2422,8 @@ describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
     const engine = new RecurrenceRuleService();
     const taskDb = {
       findOne: jest.fn().mockResolvedValue(anchor),
-      findOneBy: jest.fn().mockResolvedValue(anchor),
+      findOneBy: routedFindOneBy(anchor),
+      findAllBy: jest.fn().mockResolvedValue([]),
       createInstance: jest.fn((partial: Partial<Task>) => ({ ...partial })),
       save: jest.fn((entity: Task) => Promise.resolve(entity)),
     };
@@ -2388,6 +2434,7 @@ describe('TaskService.endSeriesAt (T-3 delete this-and-following)', () => {
       engine as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, engine, taskDb };
@@ -2486,6 +2533,7 @@ describe('TaskService.findOccurrencesInRange — group-recurrence inheritance', 
       realEngine as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb, exceptionService };
@@ -2729,6 +2777,7 @@ describe('TaskService.getDailyCounts', () => {
       realEngine as never,
       (options.exceptionService ?? buildExceptionService()) as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, calendarDb };
@@ -3018,6 +3067,7 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
       new RecurrenceRuleService() as never,
       exceptionService as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, findAll, exceptionService, calendarDb };
@@ -3054,6 +3104,9 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
     ).where ?? {}) as FindOptionsWhere<Task>;
 
   const SINCE = new Date('2026-06-20T12:00:00.000Z');
+  // The delta reads widen the cursor by a 5s overlap lag to catch rows that
+  // committed after the previous delta with an earlier timestamp (in-flight tx).
+  const EFFECTIVE_SINCE = new Date(SINCE.getTime() - 5000);
 
   it('returns the changed series rows carrying their inline recurrence config', async () => {
     const changed = [makeTask({ id: 'task-1', recurrenceConfig: makeRule() })];
@@ -3098,7 +3151,7 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
         (deletedOptions.where ?? {}) as FindOptionsWhere<Task>,
         'deletedAt',
       ),
-    ).toEqual(SINCE);
+    ).toEqual(EFFECTIVE_SINCE);
   });
 
   it('returns changed exceptions scoped to the calendar series ids', async () => {
@@ -3114,16 +3167,18 @@ describe('TaskService.findChangedSince (delta endpoint)', () => {
     expect(result.exceptions).toEqual(exceptions);
     expect(exceptionService.findChangedForTasks).toHaveBeenCalledWith(
       ['task-1', 'task-2'],
-      SINCE,
+      EFFECTIVE_SINCE,
     );
   });
 
-  it('uses `since` as the strict lower bound on changed and deleted reads', async () => {
+  it('applies the 5s overlap lag to the changed / deleted lower bound', async () => {
     const { service, findAll } = buildService({});
 
     await service.findChangedSince('user-1', SINCE, 'cal-1');
 
-    expect(moreThanBoundary(changedWhere(findAll), 'updatedAt')).toEqual(SINCE);
+    expect(moreThanBoundary(changedWhere(findAll), 'updatedAt')).toEqual(
+      EFFECTIVE_SINCE,
+    );
   });
 
   it('skips all reads on the first call (since=null) and returns only the cursor', async () => {
@@ -3231,8 +3286,9 @@ describe('TaskService write-boundary timezone interpretation', () => {
       save: jest.fn((entity: Task) =>
         Promise.resolve({ ...entity, id: entity.id ?? 'task-1' }),
       ),
-      findOneBy: jest.fn().mockResolvedValue(task ?? null),
+      findOneBy: routedFindOneBy(task ?? null),
       findOne: jest.fn().mockResolvedValue(task ?? null),
+      findAllBy: jest.fn().mockResolvedValue([]),
     };
     const service = new TaskService(
       taskDb as never,
@@ -3241,6 +3297,7 @@ describe('TaskService write-boundary timezone interpretation', () => {
       new RecurrenceRuleService() as never,
       buildExceptionService() as never,
       buildNotificationRuleService() as never,
+      buildSyncStateService() as never,
     );
 
     return { service, taskDb };

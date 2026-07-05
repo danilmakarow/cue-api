@@ -57,6 +57,8 @@ const buildOccurrence = (overrides: Partial<Occurrence> = {}): Occurrence => ({
   completedAt: null,
   isRecurring: false,
   isException: false,
+    parentTaskId: null,
+    isDetached: false,
   recurrence: null,
   ...overrides,
 });
@@ -125,6 +127,7 @@ const buildDispatcher = () => {
     setCompleted: jest.fn().mockResolvedValue(undefined),
     setOccurrenceCompleted: jest.fn().mockResolvedValue(undefined),
     findOccurrenceException: jest.fn().mockResolvedValue(null),
+    findOverrideChild: jest.fn().mockResolvedValue(null),
     applyOccurrenceOverride: jest.fn().mockResolvedValue(undefined),
     splitSeries: jest
       .fn()
@@ -323,6 +326,8 @@ describe('formatTaskLine', () => {
       buildOccurrence({
         isRecurring: true,
         isException: true,
+    parentTaskId: null,
+    isDetached: false,
         recurrence: buildSummary(),
       }),
       'UTC',
@@ -339,6 +344,8 @@ describe('formatTaskLine', () => {
       buildOccurrence({
         isRecurring: true,
         isException: true,
+    parentTaskId: null,
+    isDetached: false,
         recurrence: buildSummary({
           source: RecurrenceSource.GROUP,
           groupName: 'Chores',
@@ -2222,6 +2229,7 @@ describe('ToolDispatcherService', () => {
       );
 
       expect(harness.taskService.setCompleted).toHaveBeenCalledWith(
+        expect.any(String),
         'task-1',
         true,
       );

@@ -39,4 +39,6 @@ export type {
   PendingQuestionOption,
 } from './pending-question.entity';
 export { UserReportSettings } from './user-report-settings.entity';
+export { UserBriefSettings } from './user-brief-settings.entity';
 export { PersonaPrompt, PersonaPromptSource } from './persona-prompt.entity';
+export { UserSyncState } from './user-sync-state.entity';

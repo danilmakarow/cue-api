@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import { Transactional } from 'typeorm-transactional';
 
 import { CreateCalendarDto } from './dtos';
 import { Calendar } from '@/modules/database/entities';
 import { CalendarDatabaseService } from '@/modules/database/services';
+import { SyncStateService } from '@/modules/sync/sync-state.service';
 
 /**
  * Service handling calendar CRUD and ordering logic.
@@ -11,18 +13,26 @@ import { CalendarDatabaseService } from '@/modules/database/services';
 export class CalendarService {
   constructor(
     private readonly calendarDatabaseService: CalendarDatabaseService,
+    private readonly syncStateService: SyncStateService,
   ) {}
 
   /**
    * Creates a new calendar owned by the given user and returns the persisted row.
+   * Transactional so the calendar insert and the sync-revision bump commit as a
+   * unit.
    */
+  @Transactional()
   async create(ownerId: string, dto: CreateCalendarDto): Promise<Calendar> {
-    return this.calendarDatabaseService.create({
+    const calendar = await this.calendarDatabaseService.create({
       ownerId,
       name: dto.name,
       color: dto.color ?? null,
       icon: dto.icon ?? null,
     });
+
+    await this.syncStateService.bump(ownerId);
+
+    return calendar;
   }
 
   /**

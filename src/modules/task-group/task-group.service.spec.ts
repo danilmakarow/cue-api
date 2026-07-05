@@ -59,6 +59,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.create('user-1', {
@@ -92,6 +94,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.create('user-1', {
@@ -127,6 +131,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(
@@ -142,6 +148,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(
@@ -165,6 +173,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.findAllForUser('user-1');
@@ -182,6 +192,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.findAllForUser('user-1');
@@ -203,6 +215,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.findAllByCalendar('user-1', 'cal-1');
@@ -233,6 +247,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.findByName('user-1', 'Errands');
@@ -253,6 +269,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.findByName('user-1', 'Errands');
@@ -278,6 +296,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.rename('user-1', 'group-1', 'New');
@@ -301,6 +321,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.rename('user-1', 'group-1', 'Same');
@@ -324,6 +346,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(
@@ -344,6 +368,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.remove('user-1', 'group-1');
@@ -358,6 +384,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(service.remove('user-1', 'missing')).rejects.toBeInstanceOf(
@@ -389,6 +417,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.reorder('user-1', ['g2', 'g1']);
@@ -413,6 +443,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.reorder('user-1', ['g1', 'g2']);
@@ -437,6 +469,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.reorder('user-1', ['g2', 'g1']);
@@ -456,6 +490,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(
@@ -477,6 +513,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await expect(
@@ -512,6 +550,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       const result = await service.update('user-1', 'group-1', {
@@ -533,6 +573,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.update('user-1', 'group-1', {
@@ -576,6 +618,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.update('user-1', 'group-1', { recurrence: null });
@@ -595,6 +639,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       await service.update('user-1', 'group-1', { requiresCompletion: true });
@@ -614,6 +660,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       // Passing the same name — no change, should not call save.
@@ -657,6 +705,8 @@ describe('TaskGroupService', () => {
       const service = new TaskGroupService(
         groupDb as never,
         calendarDb as never,
+        { findIdsByGroup: jest.fn().mockResolvedValue([]), touchByIds: jest.fn().mockResolvedValue(undefined), touchAllInGroup: jest.fn().mockResolvedValue(undefined) } as never,
+        { bump: jest.fn().mockResolvedValue(undefined) } as never,
       );
 
       return { service, groupDb, calendarDb };

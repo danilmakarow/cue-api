@@ -1,4 +1,5 @@
 export * from './changes.dto';
+export * from './create-occurrence-override.dto';
 export * from './create-task.dto';
 export * from './daily-counts-query';
 export * from './daily-counts.dto';
